@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sessionId": {
+      "type": "string"
+    },
+    "guildId": {
+      "type": "string"
+    },
+    "channelId": {
+      "type": "string"
+    },
+    "startedAt": {
+      "type": "string"
+    },
+    "endedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sampleRate": {
+      "type": "number"
+    },
+    "channels": {
+      "type": "number"
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "discordId": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "character": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actorId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isGm": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "discordId",
+          "displayName",
+          "character",
+          "actorId",
+          "isGm"
+        ]
+      }
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "discordId": {
+            "type": "string"
+          },
+          "startMs": {
+            "type": "number"
+          },
+          "endMs": {
+            "type": "number"
+          },
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "discordId",
+          "startMs",
+          "endMs",
+          "file"
+        ]
+      }
+    }
+  },
+  "required": [
+    "sessionId",
+    "guildId",
+    "channelId",
+    "startedAt",
+    "endedAt",
+    "sampleRate",
+    "channels",
+    "participants",
+    "segments"
+  ]
+}

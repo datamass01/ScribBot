@@ -1,0 +1,70 @@
+{
+  "sessionId": "fixture-tts",
+  "guildId": "fixture",
+  "channelId": "fixture",
+  "startedAt": "2026-10-22T18:00:00.000Z",
+  "endedAt": "2026-10-22T18:01:00.000Z",
+  "sampleRate": 48000,
+  "channels": 1,
+  "participants": [
+    {
+      "discordId": "1",
+      "displayName": "Alice",
+      "character": "Thorin",
+      "actorId": null,
+      "isGm": false
+    },
+    {
+      "discordId": "2",
+      "displayName": "Bob",
+      "character": null,
+      "actorId": null,
+      "isGm": true
+    },
+    {
+      "discordId": "3",
+      "displayName": "Carol",
+      "character": "Elara",
+      "actorId": null,
+      "isGm": false
+    }
+  ],
+  "segments": [
+    {
+      "discordId": "2",
+      "startMs": 1000,
+      "endMs": 9315,
+      "file": "audio/2/000001000.wav"
+    },
+    {
+      "discordId": "1",
+      "startMs": 9000,
+      "endMs": 13250,
+      "file": "audio/1/000009000.wav"
+    },
+    {
+      "discordId": "3",
+      "startMs": 13000,
+      "endMs": 20810,
+      "file": "audio/3/000013000.wav"
+    },
+    {
+      "discordId": "1",
+      "startMs": 20000,
+      "endMs": 24565,
+      "file": "audio/1/000020000.wav"
+    },
+    {
+      "discordId": "2",
+      "startMs": 24000,
+      "endMs": 28705,
+      "file": "audio/2/000024000.wav"
+    },
+    {
+      "discordId": "1",
+      "startMs": 30000,
+      "endMs": 34505,
+      "file": "audio/1/000030000.wav"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sessionId": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "language": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "number"
+          },
+          "end": {
+            "type": "number"
+          },
+          "discordId": {
+            "type": "string"
+          },
+          "speaker": {
+            "type": "string"
+          },
+          "character": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isGm": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "t",
+          "end",
+          "discordId",
+          "speaker",
+          "character",
+          "isGm",
+          "text"
+        ]
+      }
+    }
+  },
+  "required": [
+    "sessionId",
+    "model",
+    "language",
+    "createdAt",
+    "lines"
+  ]
+}

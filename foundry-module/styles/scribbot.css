@@ -1,0 +1,45 @@
+.scribbot-quote {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  margin: 0.5rem 0 1rem;
+}
+.scribbot-quote img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: none;
+  flex: 0 0 auto;
+}
+.scribbot-quote blockquote {
+  margin: 0;
+}
+.scribbot-quote cite {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.9em;
+  opacity: 0.8;
+}
+.scribbot-transcript p {
+  margin: 0.2rem 0;
+}
+.scribbot-transcript .ts {
+  font-family: monospace;
+  opacity: 0.6;
+}
+.scribbot-discord-ids .form-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.scribbot-discord-ids label {
+  flex: 1;
+}
+.scribbot-discord-ids input {
+  flex: 1.2;
+}
+.scribbot-discord-ids footer {
+  margin-top: 0.75rem;
+}

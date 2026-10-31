@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 965" width="1000" height="965" role="img" aria-labelledby="title desc">
+  <title id="title">Recording session sequence</title>
+  <desc id="desc">Messages between the players on Discord, the bot, the transcription worker, the Foundry module and the LLM provider from /scrib start to the journal import.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#424a53"/>
+    </marker>
+    <marker id="open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#424a53" stroke-width="1.5"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .h { font-size: 13px; font-weight: 600; }
+    .hs { font-size: 10.5px; fill: #57606a; }
+    .m { font-size: 11px; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+    .code { font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 10.5px; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; }
+    .fl { font-size: 10.5px; font-weight: 700; fill: #424a53; }
+    .life { stroke: #8c959f; stroke-width: 1.2; stroke-dasharray: 5 4; }
+    .msg { stroke: #424a53; stroke-width: 1.4; fill: none; marker-end: url(#arr); }
+    .ret { stroke: #424a53; stroke-width: 1.3; fill: none; stroke-dasharray: 6 4; marker-end: url(#open); }
+    .frame { fill: none; stroke: #8c959f; stroke-width: 1.2; }
+    .tag { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; }
+    .phase { font-size: 11px; font-weight: 700; fill: #6e7781; }
+  </style>
+
+  <rect x="0" y="0" width="1000" height="965" fill="#ffffff"/>
+
+  <!-- Participants -->
+  <rect x="15"  y="14" width="150" height="46" rx="7" fill="#eef0ff" stroke="#5865f2" stroke-width="1.3"/>
+  <text x="90"  y="34" text-anchor="middle" class="h">GM + players</text>
+  <text x="90"  y="50" text-anchor="middle" class="hs">Discord client</text>
+  <rect x="225" y="14" width="150" height="46" rx="7" fill="#eef7f0" stroke="#2da44e" stroke-width="1.3"/>
+  <text x="300" y="34" text-anchor="middle" class="h">Bot</text>
+  <text x="300" y="50" text-anchor="middle" class="hs">Node.js</text>
+  <rect x="425" y="14" width="150" height="46" rx="7" fill="#fff6e5" stroke="#bf8700" stroke-width="1.3"/>
+  <text x="500" y="34" text-anchor="middle" class="h">Worker</text>
+  <text x="500" y="50" text-anchor="middle" class="hs">Python + Whistle</text>
+  <rect x="625" y="14" width="150" height="46" rx="7" fill="#fdf0f0" stroke="#cf222e" stroke-width="1.3"/>
+  <text x="700" y="34" text-anchor="middle" class="h">Foundry module</text>
+  <text x="700" y="50" text-anchor="middle" class="hs">GM's browser</text>
+  <rect x="825" y="14" width="150" height="46" rx="7" fill="#f5f0fe" stroke="#8250df" stroke-width="1.3"/>
+  <text x="900" y="34" text-anchor="middle" class="h">LLM provider</text>
+  <text x="900" y="50" text-anchor="middle" class="hs">Claude / Grok / …</text>
+
+  <!-- Lifelines -->
+  <line x1="90"  y1="60" x2="90"  y2="950" class="life"/>
+  <line x1="300" y1="60" x2="300" y2="950" class="life"/>
+  <line x1="500" y1="60" x2="500" y2="950" class="life"/>
+  <line x1="700" y1="60" x2="700" y2="950" class="life"/>
+  <line x1="900" y1="60" x2="900" y2="950" class="life"/>
+
+  <!-- Start -->
+  <text x="985" y="84" text-anchor="end" class="phase">START</text>
+  <path d="M90,92 H298" class="msg"/>
+  <text x="195" y="86" text-anchor="middle" class="code">/scrib start</text>
+  <path d="M300,120 H92" class="ret"/>
+  <text x="195" y="114" text-anchor="middle" class="m">joins voice muted; recording notice</text>
+  <path d="M300,148 H698" class="msg"/>
+  <text x="500" y="142" text-anchor="middle" class="code">WS session.started</text>
+
+  <!-- Loop: speech bursts -->
+  <rect x="20" y="166" width="680" height="134" class="frame"/>
+  <rect x="20" y="166" width="158" height="18" class="tag"/>
+  <text x="28" y="179" class="fl">loop  each speech burst</text>
+  <path d="M90,200 H298" class="msg"/>
+  <text x="195" y="194" text-anchor="middle" class="m">voice (Opus, per speaker)</text>
+  <path d="M300,214 h34 v16 h-32" class="msg"/>
+  <text x="342" y="226" class="m">WAV clip + timeline.json</text>
+  <path d="M300,256 H498" class="msg"/>
+  <text x="400" y="250" text-anchor="middle" class="code">POST /clips/transcribe</text>
+  <path d="M500,268 h34 v16 h-32" class="msg"/>
+  <text x="542" y="280" class="m">Whistle → cache, delete WAV</text>
+
+  <!-- Stop -->
+  <text x="985" y="322" text-anchor="end" class="phase">STOP</text>
+  <path d="M90,330 H298" class="msg"/>
+  <text x="195" y="324" text-anchor="middle" class="code">/scrib stop</text>
+  <path d="M300,344 h34 v16 h-32" class="msg"/>
+  <text x="342" y="356" class="m">flush streams, finalize timeline</text>
+  <path d="M300,388 H698" class="msg"/>
+  <text x="500" y="382" text-anchor="middle" class="code">WS session.stopped</text>
+  <path d="M700,416 H302" class="msg"/>
+  <text x="500" y="410" text-anchor="middle" class="code">POST /sessions/:id/chatlog</text>
+
+  <!-- Transcribe -->
+  <text x="985" y="440" text-anchor="end" class="phase">TRANSCRIBE</text>
+  <path d="M300,448 H498" class="msg"/>
+  <text x="400" y="442" text-anchor="middle" class="code">POST /jobs/transcribe</text>
+  <path d="M500,462 h34 v16 h-32" class="msg"/>
+  <text x="542" y="474" class="m">cache + leftover clips → transcript.json/.md</text>
+
+  <rect x="230" y="494" width="340" height="72" class="frame"/>
+  <rect x="230" y="494" width="168" height="18" class="tag"/>
+  <text x="238" y="507" class="fl">loop  every 1 s until done</text>
+  <path d="M300,528 H498" class="msg"/>
+  <text x="400" y="522" text-anchor="middle" class="code">GET /jobs/:id</text>
+  <path d="M500,554 H302" class="ret"/>
+  <text x="400" y="548" text-anchor="middle" class="m">status, progress</text>
+
+  <path d="M300,590 H92" class="ret"/>
+  <text x="195" y="584" text-anchor="middle" class="m">"Session N transcribed"</text>
+
+  <!-- Summarize -->
+  <text x="985" y="606" text-anchor="end" class="phase">SUMMARIZE</text>
+  <rect x="230" y="612" width="745" height="78" class="frame"/>
+  <rect x="230" y="612" width="236" height="18" class="tag"/>
+  <text x="238" y="625" class="fl">loop  each ~25 min chunk (3 at once)</text>
+  <path d="M300,648 H898" class="msg"/>
+  <text x="600" y="642" text-anchor="middle" class="m">pass 1: chunk_notes (transcript + rolls, context, glossary)</text>
+  <path d="M900,676 H302" class="ret"/>
+  <text x="600" y="670" text-anchor="middle" class="m">ChunkNotes JSON</text>
+
+  <path d="M300,716 H898" class="msg"/>
+  <text x="600" y="710" text-anchor="middle" class="m">pass 2: session_summary (all notes, combat rounds)</text>
+  <path d="M900,744 H302" class="ret"/>
+  <text x="600" y="738" text-anchor="middle" class="m">Summary JSON</text>
+  <path d="M300,758 h34 v16 h-32" class="msg"/>
+  <text x="342" y="770" class="m">verify quotes; write summary.json/.md</text>
+
+  <!-- Deliver -->
+  <text x="985" y="796" text-anchor="end" class="phase">DELIVER</text>
+  <path d="M300,806 H92" class="msg"/>
+  <text x="195" y="800" text-anchor="middle" class="m">embed + summary.md</text>
+  <path d="M300,836 H698" class="msg"/>
+  <text x="500" y="830" text-anchor="middle" class="code">WS summary.ready</text>
+  <path d="M700,866 H302" class="msg"/>
+  <text x="500" y="860" text-anchor="middle" class="code">GET /sessions/:id/summary + /transcript</text>
+  <path d="M300,894 H698" class="ret"/>
+  <text x="500" y="888" text-anchor="middle" class="m">summary.json, transcript.json</text>
+  <path d="M700,908 h34 v16 h-32" class="msg"/>
+  <text x="742" y="920" class="m">create / replace JournalEntry</text>
+</svg>

@@ -1,0 +1,18 @@
+{
+  "SCRIBBOT.Settings.BotUrl.Name": "ScribBot URL",
+  "SCRIBBOT.Settings.BotUrl.Hint": "Address of the ScribBot API, as seen from the GM's browser. Stored per browser.",
+  "SCRIBBOT.Settings.Token.Name": "ScribBot API token",
+  "SCRIBBOT.Settings.Token.Hint": "The API_TOKEN from ScribBot's .env file. Stored per browser, so players never see it.",
+  "SCRIBBOT.Settings.Folder.Name": "Journal folder",
+  "SCRIBBOT.Settings.Folder.Hint": "Session summaries are created in this journal folder.",
+  "SCRIBBOT.Settings.AutoImport.Name": "Import summaries automatically",
+  "SCRIBBOT.Settings.AutoImport.Hint": "Create the journal entry as soon as ScribBot finishes a summary.",
+  "SCRIBBOT.Settings.Transcript.Name": "Include full transcript",
+  "SCRIBBOT.Settings.Transcript.Hint": "Add a page with the complete session transcript to each journal entry.",
+  "SCRIBBOT.Settings.PlayersView.Name": "Players can read summaries",
+  "SCRIBBOT.Settings.PlayersView.Hint": "Give all players Observer permission on imported session journals.",
+  "SCRIBBOT.Settings.DiscordIds.Name": "Discord IDs",
+  "SCRIBBOT.Settings.DiscordIds.Label": "Link Discord accounts",
+  "SCRIBBOT.Settings.DiscordIds.Hint": "Link each Foundry user to their Discord account so ScribBot knows who is speaking.",
+  "SCRIBBOT.Import": "Import ScribBot Session"
+}

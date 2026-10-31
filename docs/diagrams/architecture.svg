@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 545" width="980" height="545" role="img" aria-labelledby="title desc">
+  <title id="title">ScribBot component architecture</title>
+  <desc id="desc">Discord, the Node.js bot, the Python transcription worker, the LLM provider, FoundryVTT and the on-disk session folder, with the calls between them.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .h { font-size: 13px; font-weight: 600; }
+    .s { font-size: 11px; fill: #57606a; }
+    .zone { font-size: 12px; font-weight: 700; fill: #424a53; }
+    .lbl { font-size: 10.5px; fill: #424a53; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+    .box { fill: #ffffff; stroke: #8c959f; stroke-width: 1.2; }
+    .ln { stroke: #57606a; stroke-width: 1.5; fill: none; marker-end: url(#arr); }
+    .both { marker-start: url(#arr); }
+  </style>
+
+  <rect x="0" y="0" width="980" height="545" fill="#ffffff"/>
+
+  <!-- Discord + campaign (left) -->
+  <rect x="20" y="60" width="200" height="70" rx="8" fill="#eef0ff" stroke="#5865f2" stroke-width="1.4"/>
+  <text x="120" y="88" text-anchor="middle" class="h">Discord text channel</text>
+  <text x="120" y="106" text-anchor="middle" class="s">/scrib commands · summary embed</text>
+
+  <rect x="20" y="150" width="200" height="70" rx="8" fill="#eef0ff" stroke="#5865f2" stroke-width="1.4"/>
+  <text x="120" y="178" text-anchor="middle" class="h">Discord voice channel</text>
+  <text x="120" y="196" text-anchor="middle" class="s">one Opus stream per speaker</text>
+
+  <rect x="20" y="310" width="200" height="70" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="120" y="338" text-anchor="middle" class="h">campaign/</text>
+  <text x="120" y="356" text-anchor="middle" class="s">glossary.md · context.md</text>
+
+  <!-- Bot container -->
+  <rect x="265" y="25" width="400" height="385" rx="10" fill="#eef7f0" stroke="#2da44e" stroke-width="1.4"/>
+  <text x="280" y="45" class="zone">bot/ · Node.js 22 + TypeScript</text>
+
+  <rect x="285" y="60" width="165" height="50" rx="6" class="box"/>
+  <text x="367" y="81" text-anchor="middle" class="h">CommandHandler</text>
+  <text x="367" y="98" text-anchor="middle" class="s">/scrib start · stop · map …</text>
+
+  <rect x="285" y="140" width="165" height="50" rx="6" class="box"/>
+  <text x="367" y="161" text-anchor="middle" class="h">SessionRecorder</text>
+  <text x="367" y="178" text-anchor="middle" class="s">Opus → 16 kHz WAV clips</text>
+
+  <rect x="285" y="230" width="165" height="50" rx="6" class="box"/>
+  <text x="367" y="251" text-anchor="middle" class="h">Pipeline</text>
+  <text x="367" y="268" text-anchor="middle" class="s">transcribe → summarize</text>
+
+  <rect x="285" y="320" width="165" height="50" rx="6" class="box"/>
+  <text x="367" y="341" text-anchor="middle" class="h">Summarizer</text>
+  <text x="367" y="358" text-anchor="middle" class="s">2-pass LLM + quote check</text>
+
+  <rect x="485" y="60" width="165" height="50" rx="6" class="box"/>
+  <text x="567" y="81" text-anchor="middle" class="h">Fastify API :7420</text>
+  <text x="567" y="98" text-anchor="middle" class="s">REST + WebSocket /ws</text>
+
+  <rect x="485" y="130" width="165" height="36" rx="6" class="box"/>
+  <text x="567" y="153" text-anchor="middle" class="h">Event bus</text>
+
+  <rect x="485" y="180" width="165" height="42" rx="6" class="box"/>
+  <text x="567" y="197" text-anchor="middle" class="h">SQLite store</text>
+  <text x="567" y="213" text-anchor="middle" class="s">sessions · mappings · roster</text>
+
+  <rect x="485" y="272" width="165" height="46" rx="6" class="box"/>
+  <text x="567" y="291" text-anchor="middle" class="h">Monitor + dashboard</text>
+  <text x="567" y="307" text-anchor="middle" class="s">GET / · /status · /logs</text>
+
+  <!-- Data dir -->
+  <rect x="285" y="430" width="365" height="72" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="467" y="452" text-anchor="middle" class="h">data/sessions/&lt;id&gt;/  ·  data/scribbot.db</text>
+  <text x="467" y="471" text-anchor="middle" class="s">timeline.json · audio/&lt;user&gt;/*.wav · transcript.json/.md</text>
+  <text x="467" y="488" text-anchor="middle" class="s">chatlog.json · notes.json · summary.json/.md</text>
+
+  <!-- Right side -->
+  <rect x="705" y="45" width="255" height="80" rx="8" fill="#fdf0f0" stroke="#cf222e" stroke-width="1.4"/>
+  <text x="832" y="70" text-anchor="middle" class="h">FoundryVTT (GM's browser)</text>
+  <text x="832" y="88" text-anchor="middle" class="s">scribbot-bridge module (v12/v13)</text>
+  <text x="832" y="105" text-anchor="middle" class="s">roster · chat/combat log · journal import</text>
+
+  <rect x="705" y="190" width="255" height="110" rx="8" fill="#fff6e5" stroke="#bf8700" stroke-width="1.4"/>
+  <text x="832" y="215" text-anchor="middle" class="h">worker/ · Python 3.10+</text>
+  <text x="832" y="235" text-anchor="middle" class="s">FastAPI + uvicorn :7421</text>
+  <text x="832" y="253" text-anchor="middle" class="s">one transcriber thread (FIFO queue)</text>
+  <text x="832" y="271" text-anchor="middle" class="s">Cactus Whistle, 17 MB, CPU only</text>
+  <text x="832" y="289" text-anchor="middle" class="s">transcript.partial.jsonl cache</text>
+
+  <rect x="705" y="325" width="255" height="75" rx="8" fill="#f5f0fe" stroke="#8250df" stroke-width="1.4"/>
+  <text x="832" y="350" text-anchor="middle" class="h">LLM provider</text>
+  <text x="832" y="368" text-anchor="middle" class="s">Anthropic Claude · xAI Grok</text>
+  <text x="832" y="385" text-anchor="middle" class="s">any OpenAI-compatible endpoint</text>
+
+  <!-- Arrows -->
+  <path d="M222,85 H283" class="ln both"/>
+  <path d="M220,165 H283" class="ln"/>
+  <text x="251" y="159" text-anchor="middle" class="lbl">Opus</text>
+  <path d="M220,345 H283" class="ln"/>
+  <text x="251" y="339" text-anchor="middle" class="lbl">names</text>
+
+  <path d="M367,110 V138" class="ln"/>
+  <path d="M367,190 V228" class="ln"/>
+  <text x="373" y="213" class="lbl">clip done</text>
+  <path d="M367,280 V318" class="ln"/>
+  <path d="M367,370 V428" class="ln"/>
+  <text x="373" y="403" class="lbl">writes summary</text>
+
+  <path d="M285,182 H275 V466 H283" class="ln"/>
+  <text x="270" y="462" class="lbl" transform="rotate(-90 270 462)">WAV clips</text>
+
+  <path d="M450,104 L483,144" class="ln"/>
+  <path d="M567,130 V112" class="ln"/>
+
+  <path d="M652,85 H703" class="ln both"/>
+  <text x="678" y="78" text-anchor="middle" class="lbl">HTTP+WS</text>
+
+  <path d="M450,255 H703" class="ln"/>
+  <text x="577" y="249" text-anchor="middle" class="lbl">POST /clips/transcribe · /jobs/transcribe</text>
+
+  <path d="M450,345 H703" class="ln"/>
+  <text x="577" y="339" text-anchor="middle" class="lbl">generateJson (schema-constrained)</text>
+
+  <path d="M705,290 H682 V466 H652" class="ln"/>
+  <text x="693" y="440" class="lbl" transform="rotate(-90 693 440)">transcript.json</text>
+
+  <text x="20" y="530" class="s">Arrows show calls and data flow. The bot API (7420) and worker (7421) bind to 127.0.0.1 by default. Audio never leaves the machine; only transcript text goes to the LLM.</text>
+</svg>

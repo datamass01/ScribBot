@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScribBot Monitor</title>
+<style>
+  :root {
+    --bg: #f6f6f8; --panel: #ffffff; --border: #e3e3e8; --text: #1c1c22; --muted: #6b6b78;
+    --accent: #7c3aed; --ok: #15803d; --ok-bg: #dcfce7; --warn: #a16207; --warn-bg: #fef3c7;
+    --err: #b91c1c; --err-bg: #fee2e2; --info-bg: #ede9fe; --rec: #dc2626;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121216; --panel: #1b1b21; --border: #2c2c35; --text: #e8e8ee; --muted: #9090a0;
+      --accent: #a78bfa; --ok: #4ade80; --ok-bg: #14321f; --warn: #facc15; --warn-bg: #3a2f0b;
+      --err: #f87171; --err-bg: #3b1515; --info-bg: #2a2140; --rec: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .spacer { flex: 1; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 18px 16px 40px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .card h2 .pill { margin-left: auto; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; overflow-wrap: break-word; min-width: 0; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .err { color: var(--err); background: var(--err-bg); }
+  .info { color: var(--accent); background: var(--info-bg); }
+  .muted { color: var(--muted); }
+  .warnings { display: grid; gap: 6px; }
+  .warnings div { padding: 8px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); }
+  .rec { border-color: var(--rec); }
+  .rec h2 { color: var(--rec); }
+  .rec .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--rec); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .rec-head { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 12px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .speakers { display: flex; flex-wrap: wrap; gap: 8px; }
+  .speaker { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+  .speaker.talking { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok-bg); }
+  .speaker small { display: block; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  th, td:not(:last-child) { white-space: nowrap; }
+  td:last-child { min-width: 220px; }
+  .table-wrap { overflow-x: auto; }
+  .files span { display: inline-block; width: 20px; text-align: center; border-radius: 4px; font-size: 11px; font-weight: 700; margin-right: 2px; }
+  .files .y { background: var(--ok-bg); color: var(--ok); }
+  .files .n { background: var(--border); color: var(--muted); }
+  .error-text { color: var(--err); font-size: 12px; max-width: 420px; }
+  .bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; width: 90px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .log-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .log { font: 12px/1.5 var(--mono); max-height: 380px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .log .l-warn { color: var(--warn); }
+  .log .l-error { color: var(--err); }
+  .log .l-event { color: var(--accent); }
+  .log time { color: var(--muted); margin-right: 8px; }
+  button, select, input { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .login { max-width: 380px; margin: 12vh auto; }
+  .login form { display: grid; gap: 10px; }
+  .login p { color: var(--muted); margin: 0 0 6px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 640px) { header { padding: 12px 16px; } dd { text-align: left; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ScribBot Monitor</h1>
+  <span id="overall" class="pill info">connecting</span>
+  <span class="spacer"></span>
+  <span class="meta" id="updated"></span>
+  <button id="logout" hidden>Change token</button>
+</header>
+
+<div id="login" class="card login" hidden>
+  <h2>Sign in</h2>
+  <p>Enter the <code>API_TOKEN</code> from your <code>.env</code>. It is stored only in this browser.</p>
+  <form id="login-form">
+    <input id="token-input" type="password" autocomplete="current-password" placeholder="API token" required>
+    <button class="primary" type="submit">Connect</button>
+    <div id="login-error" class="error-text"></div>
+  </form>
+</div>
+
+<main id="app" hidden>
+  <section id="warnings" class="warnings"></section>
+  <section id="recordings"></section>
+  <section class="grid" id="components"></section>
+  <section class="card">
+    <h2>Sessions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Started</th><th>Length</th><th>Status</th><th>Clips</th><th>Speakers</th><th title="Transcript · Chat log · Summary">Files</th><th>Notes</th></tr></thead>
+        <tbody id="sessions"></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Activity</h2>
+    <div class="log-tools">
+      <select id="log-level" aria-label="Filter">
+        <option value="all">All</option>
+        <option value="event">Events</option>
+        <option value="warn">Warnings and errors</option>
+        <option value="error">Errors</option>
+      </select>
+      <input id="log-search" type="search" placeholder="Filter text" aria-label="Filter text">
+      <label><input id="log-follow" type="checkbox" checked> Follow</label>
+      <span class="spacer"></span>
+      <button id="log-clear" type="button">Clear view</button>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const POLL_MS = 3000;
+  const TOKEN_KEY = "scribbot.monitor.token";
+  const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+  const store = {
+    get() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
+    set(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch {} },
+  };
+
+  // Allow http://localhost:7420/#token=... for a one-click bookmark; strip it from the address bar.
+  let token = store.get();
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (hash.get("token")) {
+    token = hash.get("token");
+    store.set(token);
+    history.replaceState(null, "", location.pathname);
+  }
+
+  let logs = [];
+  let lastSeq = 0;
+  let clockOffset = 0;
+  let lastStatus = null;
+  let timer = null;
+
+  class AuthError extends Error {}
+  async function api(path) {
+    const res = await fetch(path, { headers: { authorization: `Bearer ${token}` }, cache: "no-store" });
+    if (res.status === 401) throw new AuthError("Invalid token");
+    if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // ---------- formatting ----------
+  const bytes = (n) => {
+    if (n == null) return "?";
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(i > 1 ? 1 : 0)} ${u[i]}`;
+  };
+  const dur = (sec) => {
+    if (sec == null || isNaN(sec)) return "–";
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h ? `${h}h ${String(m).padStart(2, "0")}m` : m ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
+  };
+  const clock = (sec) => {
+    sec = Math.max(0, Math.floor(sec));
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(Math.floor(sec / 3600))}:${p(Math.floor((sec % 3600) / 60))}:${p(sec % 60)}`;
+  };
+  const when = (iso) => {
+    if (!iso) return "–";
+    const d = new Date(iso);
+    const today = new Date().toDateString() === d.toDateString();
+    return today ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                 : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+  const ago = (iso) => iso ? `${dur((Date.now() + clockOffset - Date.parse(iso)) / 1000)} ago` : "never";
+  const pill = (cls, text) => `<span class="pill ${cls}">${esc(text)}</span>`;
+  const rows = (pairs) => `<dl>${pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+  const card = (title, status, body) => `<div class="card"><h2>${esc(title)}${status}</h2>${body}</div>`;
+
+  // ---------- rendering ----------
+  function renderComponents(s) {
+    const d = s.discord;
+    const discord = card("Discord",
+      !d ? pill("warn", "unknown") : d.ready ? pill("ok", "connected") : pill("err", "offline"),
+      d ? rows([
+        ["Bot", esc(d.tag ?? "–")],
+        ["Gateway ping", d.pingMs == null ? "–" : `${d.pingMs} ms`],
+        ["Servers", d.guilds],
+        ["Connected since", esc(when(d.readySince))],
+      ]) : `<p class="muted">Not reported (API running without the Discord client).</p>`);
+
+    const w = s.worker;
+    const live = w.liveClips;
+    const worker = card("Transcription worker",
+      w.reachable ? (w.queued ? pill("info", `${w.queued} queued`) : pill("ok", "ready")) : pill("err", "unreachable"),
+      w.reachable ? rows([
+        ["Model", esc(w.model)],
+        ["Device", esc(w.device)],
+        ["Language", esc(w.language)],
+        ["Queue", w.queued ?? "–"],
+        ["Live clips", live ? `${live.done} done${live.failed ? `, <span class="error-text">${live.failed} failed</span>` : ""}` : "–"],
+        ["Latency", `${w.latencyMs} ms`],
+      ]) : `${rows([["URL", esc(w.url)]])}<p class="error-text">${esc(w.error)}</p>`);
+
+    const l = s.llm;
+    const llm = card("Summarizer",
+      l.credentials && l.model ? pill("ok", "configured") : pill("err", "not configured"),
+      rows([
+        ["Provider", esc(l.provider)],
+        ["Model", esc(l.model ?? "not set")],
+        ["Credentials", l.credentials ? esc(l.credentials) : `<span class="error-text">missing</span>`],
+        ["Chunk size", `${l.chunkMinutes} min`],
+      ]));
+
+    const f = s.foundry;
+    const foundry = card("Foundry module",
+      f.sockets ? pill("ok", f.sockets > 1 ? `${f.sockets} connected` : "connected") : pill("warn", "not connected"),
+      rows([
+        ["World", esc(f.lastRosterWorld ?? "–")],
+        ["Roster users", `${f.rosterUsers} <span class="muted">· ${f.rosterLinked} linked</span>`],
+        ["Last roster sync", esc(ago(f.lastRosterAt))],
+        ["Last chat log", esc(ago(f.lastChatlogAt))],
+      ]));
+
+    const p = s.process, k = s.disk;
+    const lowDisk = k.freeBytes != null && k.freeBytes < 1024 ** 3;
+    const host = card("Host",
+      lowDisk ? pill("warn", "low disk") : pill("ok", "running"),
+      rows([
+        ["Uptime", dur(p.uptimeSec)],
+        ["Memory", bytes(p.rssBytes)],
+        ["Node", esc(p.node)],
+        ["Disk free", k.freeBytes == null ? "?" : `${bytes(k.freeBytes)} <span class="muted">of ${bytes(k.totalBytes)}</span>`],
+        ["Audio", s.config.deleteAudioAfterTranscribe ? "deleted live"
+          : s.config.audioRetentionDays ? `kept ${s.config.audioRetentionDays} days` : "kept forever"],
+      ]));
+
+    $("components").innerHTML = discord + worker + llm + foundry + host;
+  }
+
+  function renderRecordings(s) {
+    $("recordings").innerHTML = s.recordings.map((r) => {
+      const speaking = new Set(r.speakingNow);
+      const speakers = r.speakers.length ? r.speakers.map((p) => {
+        const role = p.isGm ? "GM" : p.character ? esc(p.character) : `<span class="error-text">unmapped</span>`;
+        return `<div class="speaker ${speaking.has(p.discordId) ? "talking" : ""}">${esc(p.displayName)}<small>${role}</small></div>`;
+      }).join("") : `<span class="muted">Nobody has spoken yet.</span>`;
+      return `<div class="card rec">
+        <h2><span class="dot"></span>Recording session ${r.number}<span class="pill err">live</span></h2>
+        <div class="rec-head">
+          <div class="stat"><b data-elapsed="${esc(r.startedAt)}">${clock((Date.now() + clockOffset - Date.parse(r.startedAt)) / 1000)}</b><span>elapsed</span></div>
+          <div class="stat"><b>${r.clips}</b><span>clips</span></div>
+          <div class="stat"><b>${r.speakers.length}</b><span>speakers</span></div>
+          <div class="stat"><b style="font-size:15px">${esc(r.channel)}</b><span>${esc(r.guild)}</span></div>
+        </div>
+        <div class="speakers">${speakers}</div>
+      </div>`;
+    }).join("");
+  }
+
+  const STATUS_CLASS = { recording: "err", transcribing: "info", summarizing: "info", complete: "ok", failed: "err" };
+
+  function renderSessions(s) {
+    if (!s.sessions.length) {
+      $("sessions").innerHTML = `<tr><td colspan="8" class="muted">No sessions yet. Run <code>/scrib start</code> in Discord.</td></tr>`;
+      return;
+    }
+    $("sessions").innerHTML = s.sessions.map((x) => {
+      const end = x.endedAt ? Date.parse(x.endedAt) : x.status === "recording" ? Date.now() + clockOffset : null;
+      const length = end ? dur((end - Date.parse(x.startedAt)) / 1000) : "–";
+      const bar = x.progress != null ? `<div class="bar" title="${Math.round(x.progress * 100)}%"><i style="width:${x.progress * 100}%"></i></div>` : "";
+      const f = (ok, letter, title) => `<span class="${ok ? "y" : "n"}" title="${title}${ok ? "" : " (missing)"}">${letter}</span>`;
+      const notes = [
+        x.error ? `<div class="error-text">${esc(x.error)}</div>` : "",
+        x.audioPurged ? `<span class="muted">audio deleted</span>` : "",
+      ].join("");
+      return `<tr>
+        <td>${x.number}</td>
+        <td title="${esc(x.id)}">${esc(when(x.startedAt))}</td>
+        <td>${length}</td>
+        <td>${pill(STATUS_CLASS[x.status] ?? "info", x.status)}${bar}</td>
+        <td>${x.clips ?? "–"}</td>
+        <td>${x.speakers ?? "–"}</td>
+        <td class="files">${f(x.hasTranscript, "T", "Transcript")}${f(x.hasChatlog, "C", "Chat log")}${f(x.hasSummary, "S", "Summary")}</td>
+        <td>${notes}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderWarnings(s) {
+    $("warnings").innerHTML = s.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("");
+    const o = $("overall");
+    if (s.recordings.length) { o.className = "pill err"; o.textContent = "recording"; }
+    else if (s.warnings.length) { o.className = "pill warn"; o.textContent = `${s.warnings.length} warning${s.warnings.length > 1 ? "s" : ""}`; }
+    else { o.className = "pill ok"; o.textContent = "all systems ok"; }
+  }
+
+  function renderLogs() {
+    const level = $("log-level").value;
+    const q = $("log-search").value.toLowerCase();
+    const show = logs.filter((e) =>
+      (level === "all" || (level === "warn" ? e.level === "warn" || e.level === "error" : e.level === level)) &&
+      (!q || e.msg.toLowerCase().includes(q)));
+    const el = $("log");
+    el.innerHTML = show.length
+      ? show.map((e) => `<div class="l-${e.level}"><time>${esc(new Date(e.t).toLocaleTimeString())}</time>${esc(e.msg)}</div>`).join("")
+      : `<span class="muted">No activity yet.</span>`;
+    if ($("log-follow").checked) el.scrollTop = el.scrollHeight;
+  }
+
+  // ---------- polling ----------
+  async function tick() {
+    try {
+      const [status, newLogs] = await Promise.all([api("/status"), api(`/logs?after=${lastSeq}`)]);
+      clockOffset = Date.parse(status.now) - Date.now();
+      lastStatus = status;
+      renderWarnings(status);
+      renderRecordings(status);
+      renderComponents(status);
+      renderSessions(status);
+      if (newLogs.length) {
+        // The bot restarted: its sequence numbers start over.
+        if (newLogs[0].seq <= lastSeq) logs = [];
+        logs = logs.concat(newLogs).slice(-1000);
+        lastSeq = newLogs[newLogs.length - 1].seq;
+        renderLogs();
+      }
+      $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    } catch (err) {
+      if (err instanceof AuthError) return showLogin("That token was rejected.");
+      const o = $("overall");
+      o.className = "pill err";
+      o.textContent = "bot unreachable";
+      $("updated").textContent = `Last contact ${lastStatus ? new Date(Date.parse(lastStatus.now) - clockOffset).toLocaleTimeString() : "never"}`;
+    }
+    timer = setTimeout(tick, POLL_MS);
+  }
+
+  // Keep the recording clock ticking between polls.
+  setInterval(() => {
+    for (const el of document.querySelectorAll("[data-elapsed]")) {
+      el.textContent = clock((Date.now() + clockOffset - Date.parse(el.dataset.elapsed)) / 1000);
+    }
+  }, 1000);
+
+  function showLogin(error = "") {
+    clearTimeout(timer);
+    $("app").hidden = true;
+    $("logout").hidden = true;
+    $("login").hidden = false;
+    $("login-error").textContent = error;
+    $("overall").className = "pill warn";
+    $("overall").textContent = "signed out";
+    $("token-input").focus();
+  }
+
+  function start() {
+    $("login").hidden = true;
+    $("app").hidden = false;
+    $("logout").hidden = false;
+    logs = [];
+    lastSeq = 0;
+    clearTimeout(timer);
+    tick();
+  }
+
+  $("login-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    token = $("token-input").value.trim();
+    store.set(token);
+    $("token-input").value = "";
+    start();
+  });
+  $("logout").addEventListener("click", () => { token = null; store.set(null); showLogin(); });
+  $("log-level").addEventListener("change", renderLogs);
+  $("log-search").addEventListener("input", renderLogs);
+  $("log-clear").addEventListener("click", () => { logs = []; renderLogs(); });
+
+  token ? start() : showLogin();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+# ScribBot .gitignore
+# One file for the whole repo: bot/ (Node), worker/ (Python), foundry-module/ (browser JS).
+
+# ---------------------------------------------------------------- secrets
+# Real config holds the Discord token, API token and LLM keys. Only the template is committed.
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------- runtime data
+# Recordings, transcripts, summaries and the SQLite database are per-installation
+# and may contain players' voices and private table talk. Never commit them.
+# Exception: the synthetic TTS fixture used for end-to-end testing.
+/data/*
+!/data/sessions/
+/data/sessions/*
+!/data/sessions/fixture-tts/
+
+# SQLite files anywhere (e.g. when DATA_DIR points somewhere inside the repo)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Temp files from atomic writes (timeline.json.tmp, transcript.json.tmp)
+*.tmp
+
+# Local or fine-tuned Whistle weights (WHISTLE_WEIGHTS); downloaded weights live in ~/.cache
+*.cact
+
+# ---------------------------------------------------------------- Node (bot/)
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.vite/
+.npm/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------- Python (worker/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------------- Foundry module
+# Release archives built for distribution
+foundry-module/*.zip
+
+# ---------------------------------------------------------------- logs
+*.log
+logs/
+
+# ---------------------------------------------------------------- editors and OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------- AI tooling
+# Personal Claude Code settings; shared .claude/settings.json is fine to commit
+.claude/settings.local.json

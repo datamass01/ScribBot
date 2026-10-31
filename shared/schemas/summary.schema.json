@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "An evocative episode title, 3-8 words."
+    },
+    "recap": {
+      "type": "string",
+      "description": "Narrative recap in Markdown, 3-6 paragraphs, past tense, character names, no player names."
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "location",
+          "summary"
+        ]
+      }
+    },
+    "combats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Short label, e.g. \"Ambush at the Old Mill\"."
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enemies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rounds": {
+            "description": "Number of combat rounds if known from the Foundry combat log, else null.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "keyMoments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "location",
+          "participants",
+          "enemies",
+          "rounds",
+          "keyMoments",
+          "outcome"
+        ]
+      }
+    },
+    "quotes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "description": "Time from session start, \"HH:MM:SS\""
+          },
+          "character": {
+            "type": "string",
+            "description": "Character name (not the player's name). NPC name if the GM voiced it."
+          },
+          "text": {
+            "type": "string",
+            "description": "Verbatim in-character words, copied from the transcript. Filler words may be dropped."
+          },
+          "context": {
+            "type": "string",
+            "description": "One short sentence: what was happening when this was said."
+          }
+        },
+        "required": [
+          "t",
+          "character",
+          "text",
+          "context"
+        ]
+      },
+      "description": "The best 5-15 in-character quotes of the session."
+    },
+    "characterHighlights": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "character": {
+            "type": "string"
+          },
+          "highlights": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "1-4 notable things this character did."
+          }
+        },
+        "required": [
+          "character",
+          "highlights"
+        ]
+      }
+    },
+    "npcs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "Who they are and what they did this session."
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ]
+      }
+    },
+    "loot": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "recipient": {
+            "description": "Character who took it, or null if unclear.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "item",
+          "recipient"
+        ]
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Open threads and hooks for next session."
+    }
+  },
+  "required": [
+    "title",
+    "recap",
+    "scenes",
+    "combats",
+    "quotes",
+    "characterHighlights",
+    "npcs",
+    "loot",
+    "hooks"
+  ]
+}

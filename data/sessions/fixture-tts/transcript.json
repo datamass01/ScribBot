@@ -1,0 +1,62 @@
+{
+  "sessionId": "fixture-tts",
+  "model": "cactus-whistle",
+  "language": "en",
+  "createdAt": "2026-10-23T02:12:00.330763+00:00",
+  "lines": [
+    {
+      "t": 1.16,
+      "end": 8.52,
+      "discordId": "2",
+      "speaker": "Bob",
+      "character": null,
+      "isGm": true,
+      "text": "The rickety rope bridge sways as a goblin chief steps out of the mist. He snarles, who dares cross Grubnak's bridge."
+    },
+    {
+      "t": 9.24,
+      "end": 12.68,
+      "discordId": "1",
+      "speaker": "Alice",
+      "character": "Thorin",
+      "isGm": false,
+      "text": "Stand aside, little one, or taste my axe."
+    },
+    {
+      "t": 13.16,
+      "end": 20.04,
+      "discordId": "3",
+      "speaker": "Carol",
+      "character": "Elara",
+      "isGm": false,
+      "text": "Wait, Thorin. Let me try talking first. Great Grubnak. We come bearing gold."
+    },
+    {
+      "t": 20.0,
+      "end": 24.48,
+      "discordId": "1",
+      "speaker": "Alice",
+      "character": "Thorin",
+      "isGm": false,
+      "text": "Okay, out of character. Can someone pass the chips?\""
+    },
+    {
+      "t": 24.16,
+      "end": 28.0,
+      "discordId": "2",
+      "speaker": "Bob",
+      "character": null,
+      "isGm": true,
+      "text": "Grubnak laughs and draws a rusty blade. Roll Initiative."
+    },
+    {
+      "t": 30.16,
+      "end": 33.76,
+      "discordId": "1",
+      "speaker": "Alice",
+      "character": "Thorin",
+      "isGm": false,
+      "text": "I swing my axe at Grubnak. That's an 18 to hit."
+    }
+  ]
+}

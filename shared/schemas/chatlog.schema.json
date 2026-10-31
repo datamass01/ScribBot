@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "world": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "exportedAt": {
+      "type": "number"
+    },
+    "messages": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "number"
+          },
+          "alias": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actorId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userName": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inCharacter": {
+            "default": false,
+            "type": "boolean"
+          },
+          "isRoll": {
+            "default": false,
+            "type": "boolean"
+          },
+          "whisper": {
+            "default": false,
+            "type": "boolean"
+          },
+          "flavor": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "default": "",
+            "type": "string"
+          },
+          "rolls": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "formula": {
+                  "type": "string"
+                },
+                "total": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "flavor": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "formula",
+                "total"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "timestamp"
+        ]
+      }
+    },
+    "combats": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scene": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "round": {
+            "default": 0,
+            "type": "number"
+          },
+          "startedAt": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "endedAt": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "combatants": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "actorId": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "isNPC": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "defeated": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "hidden": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    }
+  }
+}

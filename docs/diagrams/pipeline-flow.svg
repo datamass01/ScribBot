@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 530" width="1000" height="530" role="img" aria-labelledby="title desc">
+  <title id="title">ScribBot data pipeline</title>
+  <desc id="desc">Four stages: capture audio during play, transcribe clips with Whistle, summarize with a two-pass LLM, and deliver to Discord and Foundry.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .h { font-size: 12.5px; font-weight: 600; }
+    .s { font-size: 10.5px; fill: #57606a; }
+    .band { font-size: 12.5px; font-weight: 700; fill: #424a53; }
+    .ln { stroke: #57606a; stroke-width: 1.5; fill: none; marker-end: url(#arr); }
+    .b1 { fill: #eef0ff; stroke: #5865f2; stroke-width: 1.2; }
+    .b2 { fill: #fff6e5; stroke: #bf8700; stroke-width: 1.2; }
+    .b3 { fill: #f5f0fe; stroke: #8250df; stroke-width: 1.2; }
+    .b4 { fill: #eef7f0; stroke: #2da44e; stroke-width: 1.2; }
+  </style>
+
+  <rect x="0" y="0" width="1000" height="530" fill="#ffffff"/>
+
+  <!-- Band 1: capture -->
+  <text x="20" y="30" class="band">1  Capture, during play (bot/src/recorder.ts)</text>
+  <rect x="20" y="42" width="225" height="80" rx="8" class="b1"/>
+  <text x="132" y="68" text-anchor="middle" class="h">Discord voice receiver</text>
+  <text x="132" y="87" text-anchor="middle" class="s">speaking.start → subscribe(user)</text>
+  <text x="132" y="103" text-anchor="middle" class="s">stream ends after 800 ms of silence</text>
+
+  <rect x="265" y="42" width="225" height="80" rx="8" class="b1"/>
+  <text x="377" y="68" text-anchor="middle" class="h">Opus decoder (prism-media)</text>
+  <text x="377" y="87" text-anchor="middle" class="s">→ 16 kHz mono PCM, 20 ms frames</text>
+  <text x="377" y="103" text-anchor="middle" class="s">Whistle's native rate: no resampling</text>
+
+  <rect x="510" y="42" width="225" height="80" rx="8" class="b1"/>
+  <text x="622" y="68" text-anchor="middle" class="h">WavFileWriter</text>
+  <text x="622" y="87" text-anchor="middle" class="s">audio/&lt;userId&gt;/&lt;startMs&gt;.wav</text>
+  <text x="622" y="103" text-anchor="middle" class="s">bursts under 250 ms are discarded</text>
+
+  <rect x="755" y="42" width="225" height="80" rx="8" class="b1"/>
+  <text x="867" y="68" text-anchor="middle" class="h">timeline.json</text>
+  <text x="867" y="87" text-anchor="middle" class="s">participants + segments (start/end ms)</text>
+  <text x="867" y="103" text-anchor="middle" class="s">atomic rewrite: .tmp → rename</text>
+
+  <path d="M245,82 H263" class="ln"/>
+  <path d="M490,82 H508" class="ln"/>
+  <path d="M735,82 H753" class="ln"/>
+
+  <!-- connector 1 → 2 -->
+  <path d="M867,122 V142 H10 V220 H18" class="ln"/>
+
+  <!-- Band 2: transcribe -->
+  <text x="20" y="165" class="band">2  Transcribe (worker/scribworker, one model thread)</text>
+  <rect x="20" y="180" width="225" height="80" rx="8" class="b2"/>
+  <text x="132" y="206" text-anchor="middle" class="h">Live clip job</text>
+  <text x="132" y="225" text-anchor="middle" class="s">POST /clips/transcribe (202)</text>
+  <text x="132" y="241" text-anchor="middle" class="s">about 1 s after the speaker pauses</text>
+
+  <rect x="265" y="180" width="225" height="80" rx="8" class="b2"/>
+  <text x="377" y="206" text-anchor="middle" class="h">Cactus Whistle (CPU)</text>
+  <text x="377" y="225" text-anchor="middle" class="s">keywords: characters, glossary,</text>
+  <text x="377" y="241" text-anchor="middle" class="s">Foundry actor names (max 150)</text>
+
+  <rect x="510" y="180" width="225" height="80" rx="8" class="b2"/>
+  <text x="622" y="206" text-anchor="middle" class="h">transcript.partial.jsonl</text>
+  <text x="622" y="225" text-anchor="middle" class="s">append-only per-clip cache</text>
+  <text x="622" y="241" text-anchor="middle" class="s">WAV deleted once its text is saved</text>
+
+  <rect x="755" y="180" width="225" height="80" rx="8" class="b2"/>
+  <text x="867" y="206" text-anchor="middle" class="h">Session job at /scrib stop</text>
+  <text x="867" y="225" text-anchor="middle" class="s">POST /jobs/transcribe: cache + leftovers</text>
+  <text x="867" y="241" text-anchor="middle" class="s">→ transcript.json + transcript.md</text>
+
+  <path d="M245,220 H263" class="ln"/>
+  <path d="M490,220 H508" class="ln"/>
+  <path d="M735,220 H753" class="ln"/>
+
+  <!-- connector 2 → 3 -->
+  <path d="M867,260 V280 H10 V355 H18" class="ln"/>
+
+  <!-- Band 3: summarize -->
+  <text x="20" y="303" class="band">3  Summarize (bot/src/summarize)</text>
+  <rect x="20" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="93" y="341" text-anchor="middle" class="h">Event stream</text>
+  <text x="93" y="360" text-anchor="middle" class="s">transcript lines +</text>
+  <text x="93" y="376" text-anchor="middle" class="s">Foundry chat/rolls/combat</text>
+
+  <rect x="183" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="256" y="341" text-anchor="middle" class="h">Chunking</text>
+  <text x="256" y="360" text-anchor="middle" class="s">about 25 min per chunk</text>
+  <text x="256" y="376" text-anchor="middle" class="s">SUMMARY_CHUNK_MINUTES</text>
+
+  <rect x="346" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="419" y="341" text-anchor="middle" class="h">Pass 1: notes</text>
+  <text x="419" y="360" text-anchor="middle" class="s">ChunkNotes JSON</text>
+  <text x="419" y="376" text-anchor="middle" class="s">max 3 chunks in parallel</text>
+
+  <rect x="509" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="582" y="341" text-anchor="middle" class="h">Pass 2: merge</text>
+  <text x="582" y="360" text-anchor="middle" class="s">Summary JSON</text>
+  <text x="582" y="376" text-anchor="middle" class="s">+ combat round counts</text>
+
+  <rect x="672" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="745" y="341" text-anchor="middle" class="h">Quote check</text>
+  <text x="745" y="360" text-anchor="middle" class="s">word LCS coverage ≥ 0.8</text>
+  <text x="745" y="376" text-anchor="middle" class="s">misses → droppedQuotes</text>
+
+  <rect x="835" y="315" width="146" height="80" rx="8" class="b3"/>
+  <text x="908" y="341" text-anchor="middle" class="h">Outputs</text>
+  <text x="908" y="360" text-anchor="middle" class="s">notes.json</text>
+  <text x="908" y="376" text-anchor="middle" class="s">summary.json + .md</text>
+
+  <path d="M166,355 H181" class="ln"/>
+  <path d="M329,355 H344" class="ln"/>
+  <path d="M492,355 H507" class="ln"/>
+  <path d="M655,355 H670" class="ln"/>
+  <path d="M818,355 H833" class="ln"/>
+
+  <!-- connector 3 → 4 -->
+  <path d="M908,395 V415 H10 V480 H18" class="ln"/>
+
+  <!-- Band 4: deliver -->
+  <text x="20" y="438" class="band">4  Deliver</text>
+  <rect x="20" y="450" width="306" height="62" rx="8" class="b4"/>
+  <text x="173" y="475" text-anchor="middle" class="h">Discord</text>
+  <text x="173" y="494" text-anchor="middle" class="s">embed (recap, quotes, threads) + summary.md</text>
+
+  <rect x="346" y="450" width="306" height="62" rx="8" class="b4"/>
+  <text x="499" y="475" text-anchor="middle" class="h">FoundryVTT journal</text>
+  <text x="499" y="494" text-anchor="middle" class="s">WS summary.ready → JournalEntry pages</text>
+
+  <rect x="672" y="450" width="308" height="62" rx="8" class="b4"/>
+  <text x="826" y="475" text-anchor="middle" class="h">API + dashboard</text>
+  <text x="826" y="494" text-anchor="middle" class="s">GET /sessions/:id/summary · /transcript</text>
+</svg>

@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "startT": {
+            "type": "string",
+            "description": "Time from session start, \"HH:MM:SS\""
+          },
+          "title": {
+            "type": "string"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "description": "What happened in the scene, 2-5 sentences, past tense."
+          }
+        },
+        "required": [
+          "startT",
+          "title",
+          "location",
+          "summary"
+        ]
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "description": "Time from session start, \"HH:MM:SS\""
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "action",
+              "dialogue",
+              "combat",
+              "discovery",
+              "decision",
+              "loot",
+              "travel",
+              "rest",
+              "other"
+            ]
+          },
+          "actors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Character/NPC names involved."
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "t",
+          "kind",
+          "actors",
+          "description"
+        ]
+      }
+    },
+    "combats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "startT": {
+            "type": "string",
+            "description": "Time from session start, \"HH:MM:SS\""
+          },
+          "endT": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "Time from session start, \"HH:MM:SS\""
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null if the fight continues past this chunk."
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Player characters who fought."
+          },
+          "enemies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keyMoments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Big hits, crits, clutch saves, downs, clever tactics."
+          },
+          "outcome": {
+            "description": "null if unresolved in this chunk.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "startT",
+          "endT",
+          "location",
+          "participants",
+          "enemies",
+          "keyMoments",
+          "outcome"
+        ]
+      }
+    },
+    "quotes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "description": "Time from session start, \"HH:MM:SS\""
+          },
+          "character": {
+            "type": "string",
+            "description": "Character name (not the player's name). NPC name if the GM voiced it."
+          },
+          "text": {
+            "type": "string",
+            "description": "Verbatim in-character words, copied from the transcript. Filler words may be dropped."
+          },
+          "context": {
+            "type": "string",
+            "description": "One short sentence: what was happening when this was said."
+          }
+        },
+        "required": [
+          "t",
+          "character",
+          "text",
+          "context"
+        ]
+      },
+      "description": "Memorable IN-CHARACTER lines only. Never table talk."
+    },
+    "npcs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "Who they are and what they did this session."
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ]
+      }
+    },
+    "loot": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "recipient": {
+            "description": "Character who took it, or null if unclear.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "item",
+          "recipient"
+        ]
+      }
+    },
+    "openThreads": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Unresolved mysteries, promises, plans, and plot hooks."
+    }
+  },
+  "required": [
+    "scenes",
+    "events",
+    "combats",
+    "quotes",
+    "npcs",
+    "loot",
+    "openThreads"
+  ]
+}

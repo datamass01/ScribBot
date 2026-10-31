@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 335" width="920" height="335" role="img" aria-labelledby="title desc">
+  <title id="title">Session status lifecycle</title>
+  <desc id="desc">A session moves from recording to transcribing, summarizing and complete. Errors move it to failed, and slash commands resume or redo work.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#424a53"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .st { font-size: 13px; font-weight: 600; }
+    .lbl { font-size: 10.5px; fill: #424a53; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+    .code { font-family: Consolas, "SF Mono", Menlo, monospace; }
+    .ln { stroke: #424a53; stroke-width: 1.4; fill: none; marker-end: url(#arr); }
+    .dash { stroke-dasharray: 6 4; }
+    .s { fill: #ffffff; stroke: #57606a; stroke-width: 1.4; }
+  </style>
+
+  <rect x="0" y="0" width="920" height="335" fill="#ffffff"/>
+
+  <!-- start -->
+  <circle cx="22" cy="150" r="8" fill="#424a53"/>
+  <path d="M30,150 H58" class="ln"/>
+
+  <!-- states -->
+  <rect x="60"  y="125" width="140" height="50" rx="25" class="s" style="fill:#eef0ff;stroke:#5865f2"/>
+  <text x="130" y="155" text-anchor="middle" class="st">recording</text>
+  <rect x="270" y="125" width="150" height="50" rx="25" class="s" style="fill:#fff6e5;stroke:#bf8700"/>
+  <text x="345" y="155" text-anchor="middle" class="st">transcribing</text>
+  <rect x="490" y="125" width="150" height="50" rx="25" class="s" style="fill:#f5f0fe;stroke:#8250df"/>
+  <text x="565" y="155" text-anchor="middle" class="st">summarizing</text>
+  <rect x="720" y="125" width="150" height="50" rx="25" class="s" style="fill:#eef7f0;stroke:#2da44e"/>
+  <text x="795" y="155" text-anchor="middle" class="st">complete</text>
+  <rect x="385" y="245" width="150" height="50" rx="25" class="s" style="fill:#fdf0f0;stroke:#cf222e"/>
+  <text x="460" y="275" text-anchor="middle" class="st">failed</text>
+
+  <!-- happy path -->
+  <path d="M200,150 H268" class="ln"/>
+  <text x="234" y="143" text-anchor="middle" class="lbl code">/scrib stop</text>
+  <path d="M420,150 H488" class="ln"/>
+  <text x="454" y="143" text-anchor="middle" class="lbl">transcript</text>
+  <text x="454" y="168" text-anchor="middle" class="lbl">written</text>
+  <path d="M640,150 H718" class="ln"/>
+  <text x="679" y="143" text-anchor="middle" class="lbl">summary</text>
+  <text x="679" y="168" text-anchor="middle" class="lbl">written</text>
+
+  <!-- errors -->
+  <path d="M375,175 L428,243" class="ln"/>
+  <path d="M545,175 L492,243" class="ln"/>
+  <text x="460" y="204" text-anchor="middle" class="lbl">errors</text>
+  <path d="M130,175 V270 H383" class="ln"/>
+  <text x="140" y="262" class="lbl">bot restarted mid-session</text>
+
+  <!-- resume -->
+  <path d="M410,245 L330,177" class="ln dash"/>
+  <path d="M510,245 L590,177" class="ln dash"/>
+  <text x="300" y="222" text-anchor="end" class="lbl"><tspan class="code">/scrib process</tspan></text>
+  <text x="620" y="222" class="lbl"><tspan class="code">/scrib process</tspan></text>
+  <text x="460" y="318" text-anchor="middle" class="lbl"><tspan class="code">/scrib process</tspan> resumes at the first missing output: it skips transcription when transcript.json exists.</text>
+
+  <!-- redo from complete -->
+  <path d="M770,125 Q680,60 590,123" class="ln dash"/>
+  <text x="680" y="112" text-anchor="middle" class="lbl"><tspan class="code">/scrib summarize</tspan></text>
+  <path d="M820,125 Q590,-10 345,123" class="ln dash"/>
+  <text x="560" y="40" text-anchor="middle" class="lbl"><tspan class="code">/scrib process retranscribe</tspan> (only if audio was kept)</text>
+
+  <path d="M20,26 H48" class="ln"/>
+  <text x="54" y="30" class="lbl" style="font-size:11.5px">automatic</text>
+  <path d="M130,26 H158" class="ln dash"/>
+  <text x="164" y="30" class="lbl" style="font-size:11.5px">started by a slash command</text>
+</svg>
