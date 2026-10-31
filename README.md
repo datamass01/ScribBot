@@ -54,8 +54,13 @@ npm run register     # registers /scrib with Discord (once, and after command ch
 npm start
 ```
 
+Once steps 1–4 are done, `.\start.ps1` at the repo root starts both: the worker in its own window (waiting until `/health` answers), then the bot. Add `-Register` to re-register the slash commands first. If PowerShell blocks scripts, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
+
 ### 5. Foundry module (v12/v13)
-1. Copy or symlink `foundry-module/` into `{FoundryData}/Data/modules/scribbot-bridge`, then enable **ScribBot Bridge** in your world.
+1. In Foundry's setup screen, go to **Add-on Modules → Install Module** and paste this **Manifest URL**, then enable **ScribBot Bridge** in your world:
+   `https://raw.githubusercontent.com/datamass01/ScribBot/main/foundry-module/module.json`
+   (For development, copy or symlink `foundry-module/` into `{FoundryData}/Data/modules/scribbot-bridge` instead.)
+   To publish a module update: bump `version` in `foundry-module/module.json`, run `.\package-foundry-module.ps1` to rebuild `releases/scribbot-bridge.zip`, and commit both to `main`.
 2. As GM, open module settings and set **ScribBot URL** (`http://localhost:7420`) and **API token** (`API_TOKEN` from `.env`). Both are stored only in your browser.
 3. Add your Foundry URL to `FOUNDRY_ORIGINS` in `.env` (e.g. `http://localhost:30000`, or `https://yourgame.forge-vtt.com`).
 4. Optional: open **Link Discord accounts** in the module settings and paste each player's Discord user ID. Players are then mapped automatically. Otherwise use `/scrib map`.

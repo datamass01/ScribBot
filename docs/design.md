@@ -68,6 +68,7 @@ ScribBot turns a tabletop RPG session played over Discord into a written record 
 | Code | Browser JavaScript ES modules (`scripts/main.js`, `scripts/journal.js`), no build step |
 | Transport | `fetch` with a bearer token, plus a native `WebSocket` to the bot |
 | Storage | Foundry settings (client scope for URL and token) and user flags (`discordId`) |
+| Distribution | Manifest URL install: `module.json` on `main` points `download` at `releases/scribbot-bridge.zip`, built by `package-foundry-module.ps1` |
 
 ### Cross-cutting
 
