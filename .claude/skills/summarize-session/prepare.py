@@ -292,10 +292,14 @@ def load_session(sid: str, row: dict, mapped: dict[str, tuple[str | None, bool]]
         return character or p.get("character") or fallback
 
     lines: list[Line] = []
+    gaps: list[float] = []
     tpath = folder / "transcript.json"
     if tpath.exists():
         tr = json.loads(tpath.read_text(encoding="utf-8"))
         for l in tr["lines"]:
+            if l["discordId"] == "scribbot":   # /scrib merge's marker where the recording resumed
+                gaps.append(l["t"])
+                continue
             is_gm = l["isGm"] or bool(parts.get(l["discordId"], {}).get("isGm"))
             lines.append(Line(l["t"], l["end"], label(l["discordId"], l["speaker"], l.get("character"), l["isGm"]),
                               l["discordId"], is_gm, l["text"]))
@@ -331,7 +335,7 @@ def load_session(sid: str, row: dict, mapped: dict[str, tuple[str | None, bool]]
         summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
     return {
         "id": sid, "row": row, "timeline": timeline, "participants": list(parts.values()),
-        "lines": lines, "chat": chat, "summary": summary, "source": source,
+        "lines": lines, "gaps": gaps, "chat": chat, "summary": summary, "source": source,
         "start_ms": iso_ms(timeline.get("startedAt")) or 0, "end_ms": iso_ms(timeline.get("endedAt")),
     }
 
@@ -513,6 +517,10 @@ def powers_used(sessions: list[dict]) -> list[dict]:
             if who not in entry["users"]:
                 entry["users"].append(who)
     return list(found.values())
+
+
+GAP_HINT = ("some play here was not captured. Bridge it from what comes before and after; "
+            "never mention the recording or the gap in the story (PROMPT.md, \"Gaps in the recording\")")
 
 
 def foundry_events(sess: dict, offset: float):
@@ -913,7 +921,9 @@ def main():
         all_lines += s["lines"]
         events += foundry_events(s, off)[0]
         if s is not sessions[0]:
-            markers.append((off, f"[RECORDING RESUMED as session {s['row'].get('number')}: speech between the two recordings was not captured]"))
+            markers.append((off, f"[RECORDING RESUMED as session {s['row'].get('number')}: {GAP_HINT}]"))
+        for g in s.get("gaps", []):
+            markers.append((g + off, f"[RECORDING GAP: {GAP_HINT}]"))
     events += markers
     all_lines.sort(key=lambda l: l.t)
     for i, l in enumerate(all_lines, 1):
@@ -1003,7 +1013,7 @@ def main():
     notes = []
     for s in sessions:
         if not s["end_ms"]:
-            notes.append(f"- Session #{s['row'].get('number')} has no end time: the recording was interrupted (bot crash), so the story stops mid-scene at {fmt(max((l.end for l in s['lines']), default=0) + (s['start_ms'] - t0) / 1000)}.")
+            notes.append(f"- Session #{s['row'].get('number')} has no end time: the recording was interrupted (bot crash), so the record stops mid-scene. Close the story on the last moment it supports, as a natural pause, without mentioning the recording, at {fmt(max((l.end for l in s['lines']), default=0) + (s['start_ms'] - t0) / 1000)}.")
         if not s["chat"]:
             notes.append(f"- Session #{s['row'].get('number')} has no Foundry chat log: no dice totals or combat tracker data. Judge how big a moment was from what people said.")
         notes.append(f"- Session #{s['row'].get('number')} text comes from {s['source']}.")
@@ -1026,16 +1036,17 @@ def main():
         style_lines += [
             f"**Game system: {sysname}** (Foundry system `{sysinfo['id']}`{ver}; {sysinfo['source']}).",
             "",
-            f"Capture the flavor of {sysname}: call spells, class features, monster abilities and conditions by their "
-            f"{sysname} names, capitalized as proper nouns (\"the beholder cast Implosion\", \"Malar called down an Ice Storm\"), "
-            "never a vague paraphrase (\"a folding spell\", \"a storm of hail\"). A spell named in speech counts too. "
-            "Name the spell and show what it did; leave out its numbers (level, DC, damage, range).",
+            f"Capture the flavor of {sysname} without breaking the story's flow. Tell magic mostly by its effect. "
+            f"Name a spell, with its {sysname} name as a proper noun, only where it is a one-off that turns the scene "
+            "(the killing spell, the spell that ends the fight, a monster's signature power). Preparations, standing "
+            "protections, utility spells and repeat castings are told by what they did. Never list spell names: at most "
+            "one in a sentence. Never use an archaic stand-in (\"a folding spell\"), and leave out a spell's numbers.",
             "",
         ]
     else:
         style_lines += ["Game system: unknown (no Foundry chat log). Still call spells and abilities by the names the table uses for them.", ""]
     if powers:
-        style_lines += ["Spells and abilities Foundry recorded (use these names):", ""]
+        style_lines += ["Spells and abilities Foundry recorded (their exact names, for the ones worth naming):", ""]
         style_lines += [f"- {p['name']} ({p['kind']}; {', '.join(p['users'])})" for p in powers]
         style_lines.append("")
 

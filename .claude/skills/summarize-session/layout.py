@@ -70,6 +70,28 @@ JARGON = re.compile(
 )
 
 
+# The recording itself, which never belongs in the story: gaps are bridged, not announced.
+RECORDING_TALK = re.compile(
+    r"\b(recording|recorded|transcri(?:pt|bed|ption)s?|scribbot|the bot|"
+    r"(?:lost|missing|unrecorded) (?:minutes|stretch|part)|(?:minutes|stretch) (?:of [\w ]{1,20})?(?:was|were) lost|"
+    r"never (?:caught|captured)|not captured|the (?:tale|thread|record) (?:breaks|broke)(?: off)?)\b",
+    re.I,
+)
+
+# A stand-in name made from how a creature moves ("the floater", "the walker", "the crawling
+# thing"), which drops what kind of creature it is (PROMPT.md: a second name keeps the kind).
+CREATURE_STANDIN = re.compile(
+    r"\bthe (?:(?:float|fl[iy]|walk|crawl|swimm?|slither|hover|drift|creep|glid|lurk|stalk|"
+    r"shambl|lumber|scuttl|skitter|burrow|climb)(?:er|ers|ing (?:thing|one|shape)s?)|flyers?)\b",
+    re.I,
+)
+
+# Three or more Title Case names in a comma/"and" list: "Shield, Fly, See Invisibility and
+# Invisibility". verify.py drops people from the items before counting them as spells.
+_TITLE = r"[A-Z][\w'/-]*(?:\s+(?:of|from|to|the|[A-Z][\w'/-]*))*"
+TITLE_LIST = re.compile(rf"\b{_TITLE}(?:,\s*{_TITLE})+,?\s+and\s+{_TITLE}")
+
+
 def class_text(classes: list[dict]) -> str:
     """'Rogue 5 / Shadowdancer 4' from Foundry's class list; Unknown when there is none."""
     parts = [f"{c['name']} {c['level']}" if c.get("level") is not None else c["name"] for c in classes or []]

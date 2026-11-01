@@ -296,12 +296,37 @@ def main():
             fails.append(f"engineering or game-mechanics wording ('{m.group(0)}') in a high-fantasy tale; "
                          f"tell it as a bard would: {line_of(prose, m.start())}")
 
-    # Spells Foundry shows were cast should be named, not paraphrased ("a folding spell").
-    told = story_side.lower()
-    for name in data.get("spellsUsed") or []:
-        if not re.search(r"\b" + re.escape(name.lower()), told):
-            warns.append(f"Foundry shows {name} was cast, but the story never names it; "
-                         f"call it by its {((data.get('gameSystem') or {}).get('name')) or 'game system'} name where it happens")
+    unquoted = re.sub(r"“[^”]*”", lambda q: " " * len(q.group(0)), story_side)   # same offsets as story_side
+    for m in layout.RECORDING_TALK.finditer(unquoted):
+        fails.append(f"the story mentions the recording ('{m.group(0)}'); bridge the gap from what comes before and "
+                     f"after, and put it in Chronicler's notes: {line_of(story_side, m.start())}")
+
+    seen_standins = set()
+    for m in layout.CREATURE_STANDIN.finditer(unquoted):
+        word = m.group(0).lower()
+        if word not in seen_standins:
+            seen_standins.add(word)
+            warns.append(f"'{m.group(0)}' names a creature by how it moves; keep its kind "
+                         f"(\"the beholder\", \"the floating aberration\"): {line_of(story_side, m.start())}")
+
+    # Magic is told by its effect; a spell is named only where it turns the scene. A sentence
+    # that lists spell names ("under Shield, Fly, See Invisibility and Invisibility") reads as
+    # a spellbook. People and places in such a list are fine ("Sparrow, Malar and Fade").
+    people = {n.lower() for n in data.get("characters", [])}
+    people |= {a["name"].lower() for a in data.get("actorDetails", {}).get("npcs", [])}
+    people |= set(re.findall(r"^\|\s*([^|]+?)\s*\|", layout.section(story, "NPCs in Session") or "", re.M))
+    people = {p.lower() for p in people} | {w for p in people for w in p.lower().split()}
+    spells = {s.lower() for s in data.get("spellsUsed") or []}
+    prose = re.sub(r"“[^”]*”|\"[^\"\n]*\"", " ", story_side)
+    prose = "\n".join(l for l in prose.splitlines() if not l.lstrip().startswith("|"))
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", prose):
+        items = [i for m in layout.TITLE_LIST.finditer(sentence)
+                 for i in re.split(r",\s*(?:and\s+)?|\s+and\s+", m.group(0))
+                 if i.strip() and i.strip().lower() not in people]
+        named = {s for s in spells if re.search(r"\b" + re.escape(s) + r"\b", sentence.lower())}
+        if len(items) >= 3 or len(named) >= 2:
+            warns.append("a sentence lists spells; tell what they did and name at most one: "
+                         f"{sentence.strip()[:100]}")
 
     def section(name):
         return layout.section(story, name)
