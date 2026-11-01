@@ -534,6 +534,8 @@ def foundry_events(sess: dict, offset: float):
     for m in chat.get("messages", []):
         if m.get("whisper"):
             continue  # GM secrets stay secret
+        if "scribbot-announce" in (m.get("content") or ""):
+            continue  # ScribBot's own join/leave notices
         who = m.get("alias") or m.get("userName") or "Unknown"
         t = rel(m["timestamp"])
         if m.get("isRoll") or m.get("rolls"):

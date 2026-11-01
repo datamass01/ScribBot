@@ -2,13 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type FoundryPage, HeadlessFoundry, type ImportResult, JoinError } from "../src/foundry/client.js";
+import { type FoundryPage, HeadlessFoundry, type ImportResult, JoinError, joinAnnouncement, leaveAnnouncement } from "../src/foundry/client.js";
 import { classifyLanding, desktopUserAgent, pickUser } from "../src/foundry/playwright.js";
 
 /** A fake browser session: records calls, and can be "kicked" like Foundry closing the page. */
 function fakeLauncher(opts: { fail?: JoinError[]; importResult?: ImportResult } = {}) {
   const failures = [...(opts.fail ?? [])];
-  const pages: (FoundryPage & { closed: boolean; imports: string[]; exports: string[]; kick: (r: string) => void })[] = [];
+  const pages: (FoundryPage & { closed: boolean; imports: string[]; exports: string[]; said: string[]; kick: (r: string) => void })[] = [];
   const launch = vi.fn(async () => {
     const err = failures.shift();
     if (err) throw err;
@@ -17,6 +17,11 @@ function fakeLauncher(opts: { fail?: JoinError[]; importResult?: ImportResult } 
       closed: false,
       imports: [] as string[],
       exports: [] as string[],
+      said: [] as string[],
+      announce: async (text: string) => {
+        if (page.closed) throw new Error("page closed");
+        page.said.push(text);
+      },
       exportChatlog: async (id: string) => {
         page.exports.push(id);
       },
@@ -169,6 +174,43 @@ describe("HeadlessFoundry lifecycle", () => {
     await vi.waitFor(() => expect(pages[0]?.closed).toBe(true));
     expect(pages[0]!.imports).toEqual(["story:s1"]);
     expect(c.status().pendingImports).toEqual([]);
+  });
+
+  it("announces in chat when it joins and leaves, but not when the page is gone", async () => {
+    const { launch, pages } = fakeLauncher();
+    const c = make(launch, { announce: true });
+    c.onEvent(started("s1", 12));
+    await vi.waitFor(() => expect(pages[0]?.said).toEqual(["ScribBot joined to record session 12."]));
+    c.onEvent(stopped("s1", 12));
+    c.onEvent({ type: "chatlog.received", sessionId: "s1" });
+    await vi.waitFor(() => expect(pages[0]!.closed).toBe(true));
+    expect(pages[0]!.said).toEqual(["ScribBot joined to record session 12.", "ScribBot has finished and is leaving."]);
+
+    const always = fakeLauncher();
+    const a = make(always.launch, { mode: "always", announce: true });
+    a.start();
+    await vi.waitFor(() => expect(always.pages[0]?.said).toEqual(["ScribBot joined and is standing by."]));
+    always.pages[0]!.kick("Foundry navigated to /join");
+    await vi.waitFor(() => expect(always.launch).toHaveBeenCalledTimes(2));
+    expect(always.pages[0]!.said).toHaveLength(1); // kicked: nothing to say goodbye with
+    await vi.waitFor(() => expect(always.pages[1]?.said).toHaveLength(1));
+    await a.stop();
+    expect(always.pages[1]!.said.at(-1)).toBe("ScribBot is shutting down and leaving.");
+  });
+
+  it("stays quiet unless announcing is on", async () => {
+    const { launch, pages } = fakeLauncher();
+    const c = make(launch);
+    c.onEvent({ type: "summary.ready", sessionId: "s1", number: 1, title: "t" });
+    await vi.waitFor(() => expect(pages[0]?.closed).toBe(true));
+    expect(pages[0]!.said).toEqual([]);
+  });
+
+  it("words the join message by why it joined", () => {
+    expect(joinAnnouncement("ScribBot", ["session 12", "import"])).toBe("ScribBot joined to record session 12 and to import a session journal.");
+    expect(joinAnnouncement("ScribBot", ["always", "session 3"])).toBe("ScribBot joined to record session 3, and is standing by.");
+    expect(joinAnnouncement("ScribBot", [])).toBe("ScribBot joined.");
+    expect(leaveAnnouncement("ScribBot", "no longer needed")).toBe("ScribBot has finished and is leaving.");
   });
 
   it("leaves the import to the module while joined", async () => {

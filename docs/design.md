@@ -133,6 +133,8 @@ With `FOUNDRY_HEADLESS=session|always`, the bot joins the world itself instead o
 
 While joined, the module handles `summary.ready` and `story.ready` itself. Otherwise the client joins, calls the module's `api.importSummary()` for each pending summary (unless **Import summaries automatically** is off) or `api.importStory()` for each pending story (always: a story is only announced on request), and leaves. An import no GM could take stays in `DATA_DIR/foundry-headless.json` (stories as `story:<id>`) and is retried on the next join. A failed join is retried with backoff (15 s doubling to 5 min; 5 min for configuration errors such as a wrong password or the wrong bridge user), and the error is shown on `/status`. Every 30 s the client checks the page; two failed checks in a row, a crash, or Foundry sending it back to `/join` makes it log out and join again. All browser work runs on one serialized queue, and nothing on it can throw into the recording path.
 
+**Chat announcements.** With `FOUNDRY_ANNOUNCE=true` (the default), the client posts an out-of-character chat message as its user once it has joined, saying why from its reasons ("ScribBot joined to record session 12.", "…to import a session journal.", "…and is standing by."), and another just before it logs out ("ScribBot has finished and is leaving.", or "…is shutting down…" when the bot stops). When the page is already gone (kicked, crashed, Foundry restarted) it leaves without a word. The messages carry the `scribbot-announce` class, and the summarizer (`summarize/format.ts`) and the story skill's `prepare.py` skip them in the chat log. They need no module change.
+
 **Chat log before summarizing.** `processSession()` calls `beforeSummary`, which waits on `awaitChatlog()` for a session the client joined for and that has just stopped. Other sessions (and a later `/scrib summarize`) never wait.
 
 `npm run foundry` (`bot/scripts/foundry-join.ts`) joins once with the same settings and prints the result (`-- --stay` keeps it joined, `-- --headed` shows the window).
@@ -352,7 +354,7 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Discord | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` |
 | Storage | `DATA_DIR`, `CAMPAIGN_DIR` |
 | API | `API_HOST`, `API_PORT`, `API_TOKEN`, `FOUNDRY_ORIGINS` |
-| Headless Foundry client | `FOUNDRY_HEADLESS` (`off`/`session`/`always`), `FOUNDRY_URL`, `FOUNDRY_USER` (`ScribBot`), `FOUNDRY_PASSWORD`, `FOUNDRY_BROWSER`, `FOUNDRY_BOT_URL`, `FOUNDRY_CHATLOG_WAIT_SECONDS` (120) |
+| Headless Foundry client | `FOUNDRY_HEADLESS` (`off`/`session`/`always`), `FOUNDRY_URL`, `FOUNDRY_USER` (`ScribBot`), `FOUNDRY_PASSWORD`, `FOUNDRY_BROWSER`, `FOUNDRY_BOT_URL`, `FOUNDRY_CHATLOG_WAIT_SECONDS` (120), `FOUNDRY_ANNOUNCE` (true) |
 | Worker | `WORKER_URL`, `STT_LANGUAGE`, `WHISTLE_WEIGHTS`, `STT_ENGINE` (`whistle`/`whisper`), `WHISPER_MODEL`, `WHISPER_DEVICE` (`cuda`/`cpu`), `WHISPER_COMPUTE_TYPE`, `WHISPER_BEAM_SIZE`, `WHISPER_MAX_HOTWORDS`, `WHISPER_HOTWORDS_MIN_SECONDS`, `WHISPER_VAD`, `WHISPER_VAD_THRESHOLD`, `WHISPER_FILLER_MAX_SECONDS`, `WHISPER_FILLER_MAX_PROBABILITY`, `WORKER_RECOVER_HOURS`, `WORKER_RELOAD_AFTER_FAILURES`, `WORKER_SLOW_CLIP_SECONDS` (also reads `DELETE_AUDIO_AFTER_TRANSCRIBE`, `CAMPAIGN_DIR`, `LOG_RETENTION_DAYS`) |
 | Recovery and logs | `RESUME_WINDOW_MINUTES` (30), `BACKLOG_WARN_MINUTES` (10), `LOG_RETENTION_DAYS` (14, shared by bot and worker) |
 | Watchdog (optional) | `MONITOR_PORT`, `MONITOR_LOG_DIR` |

@@ -34,6 +34,8 @@ export interface FoundryPage {
   importStory(sessionId: string): Promise<ImportResult>;
   /** Has the module upload a session's chat and combat log (it normally does so on session.stopped). */
   exportChatlog(sessionId: string): Promise<void>;
+  /** Posts an out-of-character chat message as this user, marked so chat log readers skip it. */
+  announce(text: string): Promise<void>;
   /** Called once if the browser or page goes away on its own. */
   onClosed(fn: (reason: string) => void): void;
   close(): Promise<void>;
@@ -87,6 +89,8 @@ export interface ClientOptions {
   launch: FoundryLauncher;
   /** How long to keep the client after `/scrib stop` while the chat log hasn't arrived. */
   chatlogWaitMs: number;
+  /** Post in Foundry's chat on joining (with why) and before leaving. Default: off. */
+  announce?: boolean;
   /** Imports still to do, kept across restarts: summary session ids, and "story:<id>" for stories. Omit to keep them in memory only. */
   stateFile?: string;
   log?: (msg: string) => void;
@@ -97,6 +101,25 @@ export interface ClientOptions {
 
 /** Pending-import keys for stories; summaries are keyed by the bare session id (older state files too). */
 const STORY_PREFIX = "story:";
+
+/** "ScribBot joined to record session 12 and to import a session journal." */
+export function joinAnnouncement(user: string, reasons: string[]): string {
+  const why = reasons.map((r) => {
+    if (r === "always") return "and is standing by";
+    if (r === "import") return "to import a session journal";
+    const n = r.match(/^session (\d+)$/)?.[1];
+    return n ? `to record session ${n}` : r;
+  });
+  const standing = why.includes("and is standing by");
+  const purposes = why.filter((w) => w !== "and is standing by");
+  const text = purposes.length ? ` ${purposes.join(" and ")}` : "";
+  return `${user} joined${text}${standing ? (text ? ", and is standing by" : " and is standing by") : ""}.`;
+}
+
+/** Said just before logging out. Not said when the page is already gone (kicked, crashed). */
+export function leaveAnnouncement(user: string, reason: string): string {
+  return reason === "bot shutting down" ? `${user} is shutting down and leaving.` : `${user} has finished and is leaving.`;
+}
 
 const defaultRetry = (attempt: number, kind: JoinErrorKind | null) =>
   kind && SLOW_RETRY.includes(kind) ? 5 * 60_000 : Math.min(15_000 * 2 ** attempt, 5 * 60_000);
@@ -270,6 +293,9 @@ export class HeadlessFoundry {
     const st = await page.status().catch(() => null);
     this.world = st?.world ?? null;
     this.log(`joined world ${this.world ?? "?"} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    if (this.opts.announce) {
+      await page.announce(joinAnnouncement(this.opts.user, [...this.reasons])).catch((err) => this.log(`could not post the join message: ${err instanceof Error ? err.message : err}`));
+    }
     page.onClosed((reason) => void this.enqueue(() => this.lost(page, reason)));
     this.healthTimer = setInterval(() => void this.enqueue(() => this.checkHealth(page)), this.opts.healthCheckMs ?? 30_000);
     this.healthTimer.unref?.();
@@ -322,12 +348,15 @@ export class HeadlessFoundry {
   private async lost(page: FoundryPage, reason: string) {
     if (this.page !== page) return;
     this.log(`lost the Foundry session: ${reason}`);
-    await this.closePage(reason);
+    await this.closePage(reason, { pageGone: true });
     this.error = reason;
     this.reconcile();
   }
 
-  private async closePage(reason: string) {
+  private async closePage(reason: string, { pageGone = false } = {}) {
+    if (this.page && this.opts.announce && !pageGone) {
+      await this.page.announce(leaveAnnouncement(this.opts.user, reason)).catch((err) => this.log(`could not post the leave message: ${err instanceof Error ? err.message : err}`));
+    }
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.healthTimer = null;
     const page = this.page;

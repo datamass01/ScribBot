@@ -93,7 +93,7 @@ The module talks to the bot from the bridge user's browser. Browsers treat `http
 
 **Let ScribBot join Foundry by itself (optional).** Instead of keeping someone's browser open, the bot can log in to the world as its own player in a headless browser:
 1. In Foundry, create a player user named `ScribBot` with a password. As GM, set the module's **Bridge user** to `ScribBot` (module 0.4.0+).
-2. In `.env`, set `FOUNDRY_HEADLESS=session` (join while recording, leave once the chat log is uploaded) or `always` (stay joined), plus `FOUNDRY_PASSWORD`. `FOUNDRY_URL` defaults to the first `FOUNDRY_ORIGINS` entry; `FOUNDRY_USER` defaults to `ScribBot`.
+2. In `.env`, set `FOUNDRY_HEADLESS=session` (join while recording, leave once the chat log is uploaded) or `always` (stay joined), plus `FOUNDRY_PASSWORD`. `FOUNDRY_URL` defaults to the first `FOUNDRY_ORIGINS` entry; `FOUNDRY_USER` defaults to `ScribBot`. ScribBot says in Foundry's chat when it joins and why ("ScribBot joined to record session 12.") and before it leaves; set `FOUNDRY_ANNOUNCE=false` to keep it quiet. Those messages are left out of the chat log used for summaries.
 3. Check it with `cd bot && npm run foundry` (needs the bot running for the module's connection check). It joins, prints what it sees, and logs out. On Windows it drives the installed Edge; elsewhere set `FOUNDRY_BROWSER=chrome`, or run `npx playwright-core install chromium` in `bot/`.
 
 The bot sets the module's URL and token in its own browser, waits for the chat log before summarizing, and joins briefly to import a summary if it isn't connected when the summary is ready. The player-bridge rules below apply to it. The dashboard's Foundry card shows its state, and `/status` explains a failed join.

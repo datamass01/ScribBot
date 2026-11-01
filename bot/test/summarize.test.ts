@@ -50,6 +50,11 @@ describe("buildEventStream", () => {
         id: "m2", timestamp: start + 20_000, alias: "Bob", actorId: null, userName: "Bob",
         inCharacter: false, isRoll: false, whisper: true, flavor: null, content: "secret trap", rolls: [],
       },
+      {
+        id: "m3", timestamp: start + 1_000, alias: "ScribBot", actorId: null, userName: "ScribBot",
+        inCharacter: false, isRoll: false, whisper: false, flavor: null,
+        content: '<p class="scribbot-announce"><i class="fas fa-feather-pointed"></i> ScribBot joined to record session 4.</p>', rolls: [],
+      },
     ],
     combats: [
       {
@@ -71,6 +76,7 @@ describe("buildEventStream", () => {
     expect(text).toContain("[00:00:14] [FOUNDRY ROLL] Thorin: Greataxe - Attack Roll (1d20+5 = 19)");
     expect(text).toContain("after 3 round(s). Defeated: Goblin.");
     expect(text).not.toContain("secret trap"); // whispers are excluded
+    expect(text).not.toContain("ScribBot joined"); // its own join/leave notices too
   });
 
   it("chunks by elapsed time", () => {

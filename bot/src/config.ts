@@ -35,6 +35,11 @@ const EnvSchema = z.object({
   FOUNDRY_BROWSER: optionalString,
   FOUNDRY_BOT_URL: optionalString,
   FOUNDRY_CHATLOG_WAIT_SECONDS: z.coerce.number().min(0).default(120),
+  // Post in Foundry's chat when the headless client joins (and why) and before it leaves.
+  FOUNDRY_ANNOUNCE: z.preprocess(
+    (v) => (typeof v === "string" ? !/^(false|0|no|off)$/i.test(v.trim()) : v),
+    z.boolean().default(true),
+  ),
 
   WORKER_URL: z.string().default("http://127.0.0.1:7421"),
 
@@ -100,6 +105,7 @@ export const config = {
     browser: env.FOUNDRY_BROWSER ?? (process.platform === "win32" ? "msedge" : "chromium"),
     botUrl: (env.FOUNDRY_BOT_URL ?? `http://${loopbackHost.includes(":") ? `[${loopbackHost}]` : loopbackHost}:${env.API_PORT}`).replace(/\/+$/, ""),
     chatlogWaitMs: env.FOUNDRY_CHATLOG_WAIT_SECONDS * 1000,
+    announce: env.FOUNDRY_ANNOUNCE,
   },
   workerUrl: env.WORKER_URL.replace(/\/$/, ""),
   llm: {

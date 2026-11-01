@@ -59,6 +59,7 @@ export function buildEventStream(
 
     for (const m of chatlog.messages) {
       if (m.whisper) continue; // GM secrets and private notes stay private
+      if (m.content.includes("scribbot-announce")) continue; // ScribBot's own join/leave notices
       const who = m.alias ?? m.userName ?? "Unknown";
       const t = rel(m.timestamp);
       if (m.isRoll || m.rolls.length) {

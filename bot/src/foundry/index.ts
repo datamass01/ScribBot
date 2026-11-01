@@ -11,6 +11,7 @@ export function createHeadlessFoundry() {
     url: f.url,
     user: f.user,
     chatlogWaitMs: f.chatlogWaitMs,
+    announce: f.announce,
     stateFile: path.join(config.dataDir, "foundry-headless.json"),
     launch: playwrightLauncher({
       url: f.url,

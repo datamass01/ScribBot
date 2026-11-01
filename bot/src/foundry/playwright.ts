@@ -179,6 +179,7 @@ async function joinWorld(browser: Browser, opts: LaunchOptions, log: (msg: strin
     status: () => readStatus(page),
     importSummary: (sessionId) => importSummary(page, sessionId),
     importStory: (sessionId) => importStory(page, sessionId),
+    announce: (text) => announce(page, text),
     exportChatlog: async (sessionId) => {
       await page.evaluate(({ module, sessionId }) => (globalThis as any).game.modules.get(module).api.exportChatlog(sessionId), { module: MODULE, sessionId });
     },
@@ -301,6 +302,27 @@ async function importStory(page: Page, sessionId: string): Promise<ImportResult>
       return result ? ({ imported: true, name: String(result.name) } as const) : ({ imported: false, reason: "no-gm" } as const);
     },
     { module: MODULE, sessionId },
+  );
+}
+
+/** Marks ScribBot's own chat messages; the summarizer and the story skill skip them in the chat log. */
+export const ANNOUNCE_CLASS = "scribbot-announce";
+
+async function announce(page: Page, text: string) {
+  if (page.isClosed()) return;
+  await page.evaluate(
+    async ({ text, cls }) => {
+      const g = globalThis as any;
+      const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+      const ooc = g.CONST?.CHAT_MESSAGE_STYLES?.OOC ?? g.CONST?.CHAT_MESSAGE_TYPES?.OOC;
+      await g.ChatMessage.create({
+        content: `<p class="${cls}"><i class="fas fa-feather-pointed"></i> ${esc(text)}</p>`,
+        speaker: { alias: g.game.user.name },
+        // v12+ calls it style; v11 and older, type
+        ...(g.CONST?.CHAT_MESSAGE_STYLES ? { style: ooc } : { type: ooc }),
+      });
+    },
+    { text, cls: ANNOUNCE_CLASS },
   );
 }
 
