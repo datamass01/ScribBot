@@ -7,7 +7,7 @@ Discord voice ──► bot/ (Node)  ── one WAV per speech burst per speaker
                     │ HTTP+WS :7420
                     ├──► worker/ (Python, Cactus Whistle on the CPU) ──► transcript.json / .md
                     ├──► summarizer (Claude / Grok / OpenAI-compatible) ──► summary.json / .md
-                    └◄─► foundry-module/ (GM's browser): roster in, chat+combat log in, journal out
+                    └◄─► foundry-module/ (bridge user's browser): roster in, chat+combat log in, journal out
 ```
 
 Discord sends each person's audio as a separate stream, so ScribBot always knows exactly who is speaking. No speaker diarization is needed.
@@ -61,11 +61,18 @@ Once steps 1–4 are done, `.\start.ps1` at the repo root starts both: the worke
    `https://raw.githubusercontent.com/datamass01/ScribBot/main/foundry-module/module.json`
    (For development, copy or symlink `foundry-module/` into `{FoundryData}/Data/modules/scribbot-bridge` instead.)
    To publish a module update: bump `version` in `foundry-module/module.json`, run `.\package-foundry-module.ps1` to rebuild `releases/scribbot-bridge.zip`, and commit both to `main`.
-2. As GM, open module settings and set **ScribBot URL** (`http://localhost:7420`) and **API token** (`API_TOKEN` from `.env`). Both are stored only in your browser.
-3. Add your Foundry URL to `FOUNDRY_ORIGINS` in `.env` (e.g. `http://localhost:30000`, or `https://yourgame.forge-vtt.com`).
-4. Optional: open **Link Discord accounts** in the module settings and paste each player's Discord user ID. Players are then mapped automatically. Otherwise use `/scrib map`.
+2. Pick the **bridge user**, whose browser talks to the bot. By default that's the active GM. If a player runs the bot instead, the GM sets **Bridge user** in the module settings to that player.
+3. As the bridge user, open module settings and set **ScribBot URL** (`http://localhost:7420`) and **API token** (`API_TOKEN` from `.env`). Both are stored only in that browser.
+4. Add your Foundry URL to `FOUNDRY_ORIGINS` in `.env` (e.g. `http://localhost:30000`, or `https://yourgame.forge-vtt.com`).
+5. Optional: as GM, open **Link Discord accounts** in the module settings and paste each player's Discord user ID. Players are then mapped automatically. Otherwise use `/scrib map`.
 
-The module talks to the bot from the GM's browser. Browsers treat `http://localhost` as secure, so this works even when Foundry is served over HTTPS (Forge, etc.), **as long as the bot runs on the GM's own computer**. If it runs elsewhere, put it behind HTTPS (a reverse proxy or a tunnel such as Cloudflare Tunnel or Tailscale Funnel) and use that URL.
+The module talks to the bot from the bridge user's browser. Browsers treat `http://localhost` as secure, so this works even when Foundry is served over HTTPS (Forge, etc.), **as long as the bot runs on the bridge user's own computer**. If it runs elsewhere, put it behind HTTPS (a reverse proxy or a tunnel such as Cloudflare Tunnel or Tailscale Funnel) and use that URL.
+
+**When the bridge user is a player:**
+- The GM's client still creates the journal entries. The player's browser fetches each summary and hands it to the active GM's client over Foundry's socket, and the GM needs module version 0.2.0 or later.
+- If no GM is online, the summary is imported once one connects. If the player has Foundry's **Create Journal Entries** permission, it's created right away instead, at the top level if they can't create folders.
+- The chat log only includes messages everyone could see. Whispers and blind rolls are left out.
+- The combat log is still recorded by the GM's client, so a GM should be online during play.
 
 ## Monitoring dashboard
 

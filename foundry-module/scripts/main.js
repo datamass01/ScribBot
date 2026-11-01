@@ -1,19 +1,29 @@
 /**
  * ScribBot Bridge: connects this world to the ScribBot Discord recorder.
  *
- * Only the active GM's browser talks to the bot:
+ * One browser, the "bridge", talks to the bot: the active GM's by default, or the user
+ * picked in the "Bridge user" setting (which may be a player, e.g. whoever runs the bot):
  *  - pushes the user → character roster (so Discord voices map to actors)
- *  - logs combats as they happen (Foundry deletes a Combat when it ends)
  *  - when recording stops, uploads that window's chat messages and combats
- *  - when the summary is ready, builds a JournalEntry from it
+ *  - when the summary is ready, fetches it and gets a JournalEntry created
+ *
+ * GM-only work stays with the active GM's client:
+ *  - logs combats as they happen (Foundry deletes a Combat when it ends)
+ *  - creates the journal entry, relayed over Foundry's socket when the bridge is a player
  */
 import { buildJournalPages } from "./journal.js";
+import { bridgeRole, journalTarget, shouldExportMessage } from "./roles.js";
 
 const MODULE = "scribbot-bridge";
+const SOCKET = `module.${MODULE}`;
 const COMBAT_LOG_DAYS = 14;
+const RELAY_TIMEOUT_MS = 30_000;
 
 const setting = (key) => game.settings.get(MODULE, key);
 const isActiveGM = () => game.user.isGM && (game.users.activeGM ?? game.user) === game.user;
+const bridgeUserId = () => setting("bridgeUser") || null;
+const role = () =>
+  bridgeRole({ bridgeUserId: bridgeUserId(), userId: game.user.id, isGM: game.user.isGM, activeGMId: game.users.activeGM?.id ?? null });
 const log = (...args) => console.log("ScribBot |", ...args);
 
 // ---------------------------------------------------------------- settings
@@ -22,6 +32,8 @@ Hooks.once("init", () => {
   const reg = (key, data) => game.settings.register(MODULE, key, { config: true, ...data });
   reg("botUrl", { name: "SCRIBBOT.Settings.BotUrl.Name", hint: "SCRIBBOT.Settings.BotUrl.Hint", scope: "client", type: String, default: "http://localhost:7420", onChange: () => bridge.reconnect() });
   reg("apiToken", { name: "SCRIBBOT.Settings.Token.Name", hint: "SCRIBBOT.Settings.Token.Hint", scope: "client", type: String, default: "", onChange: () => bridge.reconnect() });
+  // Choices are filled in on "ready", once game.users exists.
+  reg("bridgeUser", { name: "SCRIBBOT.Settings.BridgeUser.Name", hint: "SCRIBBOT.Settings.BridgeUser.Hint", scope: "world", type: String, default: "", choices: {}, onChange: () => bridge.reconnect() });
   reg("journalFolder", { name: "SCRIBBOT.Settings.Folder.Name", hint: "SCRIBBOT.Settings.Folder.Hint", scope: "world", type: String, default: "ScribBot Sessions" });
   reg("autoImport", { name: "SCRIBBOT.Settings.AutoImport.Name", hint: "SCRIBBOT.Settings.AutoImport.Hint", scope: "world", type: Boolean, default: true });
   reg("includeTranscript", { name: "SCRIBBOT.Settings.Transcript.Name", hint: "SCRIBBOT.Settings.Transcript.Hint", scope: "world", type: Boolean, default: false });
@@ -44,8 +56,20 @@ Hooks.once("ready", () => {
     exportChatlog: (sessionId = "latest") => bridge.exportChatlog(sessionId),
     importSummary: (sessionId = "latest") => bridge.importSummary(sessionId),
   };
-  if (game.user.isGM) bridge.connect();
+  refreshBridgeUserChoices();
+  game.socket.on(SOCKET, (msg) => relay.onMessage(msg).catch((e) => console.error("ScribBot |", e)));
+  if (role().connect) bridge.connect();
 });
+
+function refreshBridgeUserChoices() {
+  const cfg = game.settings.settings.get(`${MODULE}.bridgeUser`);
+  if (!cfg) return;
+  const choices = { "": game.i18n.localize("SCRIBBOT.Settings.BridgeUser.ActiveGM") };
+  for (const u of game.users.contents) choices[u.id] = u.isGM ? `${u.name} (GM)` : u.name;
+  cfg.choices = choices;
+}
+Hooks.on("createUser", refreshBridgeUserChoices);
+Hooks.on("updateUser", refreshBridgeUserChoices);
 
 // ---------------------------------------------------------------- bot API client
 
@@ -80,7 +104,7 @@ class Bridge {
     socket.addEventListener("open", () => {
       log("connected to", this.baseUrl);
       this.retryMs = 2000;
-      if (isActiveGM()) this.syncRoster().catch((e) => console.error(e));
+      if (role().act) this.syncRoster().catch((e) => console.error(e));
     });
     socket.addEventListener("message", (ev) => {
       let msg;
@@ -101,15 +125,17 @@ class Bridge {
     });
   }
 
+  // Also runs on every client when the world's bridge user changes, so the old bridge
+  // disconnects and the new one connects.
   reconnect() {
-    if (!game.user.isGM) return;
     this.closedByUs = true;
     this.socket?.close();
-    this.connect();
+    this.socket = null;
+    if (role().connect) this.connect();
   }
 
   async onEvent(msg) {
-    if (!isActiveGM()) return; // with several GMs online, only one acts
+    if (!role().act) return; // with several GMs online and no bridge user, only the active GM acts
     switch (msg.type) {
       case "session.started":
         ui.notifications.info(`ScribBot is recording session ${msg.number}.`);
@@ -173,7 +199,8 @@ class Bridge {
           total: Number.isFinite(r.total) ? r.total : null,
           flavor: r.options?.flavor ?? null,
         })),
-      }));
+      }))
+      .filter((m) => shouldExportMessage(m, game.user.isGM));
 
     const combats = combatTracker.entries().filter((c) => (c.startedAt ?? c.createdAt) <= to && (c.endedAt ?? Date.now()) >= from);
     const res = await this.api(`/sessions/${sessionId}/chatlog`, {
@@ -186,43 +213,133 @@ class Bridge {
 
   // ---- journal import
 
+  /** Summaries waiting for a GM to come online (bridge is a player who can't create journals). */
+  pendingImports = new Set();
+
   async importSummary(sessionId = "latest") {
     const file = await this.api(`/sessions/${sessionId}/summary`);
     let transcript = null;
     if (setting("includeTranscript")) transcript = await this.api(`/sessions/${file.sessionId}/transcript`).catch(() => null);
 
-    const folder = await this.ensureFolder();
-    const pages = buildJournalPages(file, transcript, game.actors.contents);
-    const name = `Session ${file.sessionNumber}: ${file.summary.title}`;
-    const ownership = { default: setting("playersCanView") ? CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER : CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE };
-
-    let entry = game.journal.find((j) => j.getFlag(MODULE, "sessionId") === file.sessionId);
-    if (entry) {
-      await entry.deleteEmbeddedDocuments("JournalEntryPage", entry.pages.map((p) => p.id));
-      await entry.update({ name, folder: folder?.id ?? null });
-      await entry.createEmbeddedDocuments("JournalEntryPage", pages);
-    } else {
-      entry = await JournalEntry.create({
-        name,
-        folder: folder?.id ?? null,
-        ownership,
-        pages,
-        flags: { [MODULE]: { sessionId: file.sessionId, sessionNumber: file.sessionNumber } },
-      });
+    const target = journalTarget({
+      isGM: game.user.isGM,
+      activeGMId: game.users.activeGM?.id ?? null,
+      canCreate: JournalEntry.canUserCreate(game.user),
+    });
+    if (target === "none") {
+      this.pendingImports.add(file.sessionId);
+      ui.notifications.warn(`ScribBot: session ${file.sessionNumber}'s summary is ready, but no GM is online to create the journal entry. It will be imported when a GM connects.`);
+      return null;
     }
-    ui.notifications.info(`ScribBot: imported "${name}".`);
-    entry.sheet.render(true);
-    return entry;
+    const result = target === "self" ? await createSessionJournal(file, transcript) : await relay.request("createJournal", { file, transcript });
+    this.pendingImports.delete(file.sessionId);
+    if (target === "gm") ui.notifications.info(`ScribBot: the GM's client imported "${result.name}".`);
+    return result;
   }
 
-  async ensureFolder() {
-    const name = setting("journalFolder");
-    if (!name) return null;
-    return game.folders.find((f) => f.type === "JournalEntry" && f.name === name) ?? Folder.create({ name, type: "JournalEntry" });
+  async retryPendingImports() {
+    for (const sessionId of [...this.pendingImports]) {
+      await this.importSummary(sessionId).catch((err) => ui.notifications.error(`ScribBot: ${err.message}`));
+    }
   }
 }
 
 const bridge = new Bridge();
+
+// A player bridge hands queued summaries to the first GM who connects.
+Hooks.on("userConnected", (user, connected) => {
+  if (!connected || !user.isGM || !role().act || !bridge.pendingImports.size) return;
+  setTimeout(() => bridge.retryPendingImports(), 3000); // let that GM's client finish loading
+});
+
+// ---------------------------------------------------------------- journal creation
+
+/** Creates (or refreshes) the session's journal entry. Runs on a GM's client, or a player's allowed to create journals. */
+async function createSessionJournal(file, transcript) {
+  const folder = await ensureFolder();
+  const pages = buildJournalPages(file, transcript, game.actors.contents);
+  const name = `Session ${file.sessionNumber}: ${file.summary.title}`;
+  const ownership = { default: setting("playersCanView") ? CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER : CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE };
+
+  let entry = game.journal.find((j) => j.getFlag(MODULE, "sessionId") === file.sessionId);
+  if (entry) {
+    await entry.deleteEmbeddedDocuments("JournalEntryPage", entry.pages.map((p) => p.id));
+    await entry.update({ name, folder: folder?.id ?? null });
+    await entry.createEmbeddedDocuments("JournalEntryPage", pages);
+  } else {
+    entry = await JournalEntry.create({
+      name,
+      folder: folder?.id ?? null,
+      ownership,
+      pages,
+      flags: { [MODULE]: { sessionId: file.sessionId, sessionNumber: file.sessionNumber } },
+    });
+  }
+  ui.notifications.info(`ScribBot: imported "${name}".`);
+  entry.sheet.render(true);
+  return { id: entry.id, name };
+}
+
+async function ensureFolder() {
+  const name = setting("journalFolder");
+  if (!name) return null;
+  const existing = game.folders.find((f) => f.type === "JournalEntry" && f.name === name);
+  if (existing) return existing;
+  // Players usually can't create folders; put the entry at the top level instead.
+  return Folder.canUserCreate?.(game.user) === false ? null : Folder.create({ name, type: "JournalEntry" });
+}
+
+// ---------------------------------------------------------------- relay to the GM's client
+//
+// Module socket messages reach every connected client, so payloads must be fine for any
+// player to see: only the summary and transcript travel this way, never whispers. The GM's
+// client rebuilds the pages itself with buildJournalPages, which escapes all text.
+
+const relay = {
+  pending: new Map(),
+
+  /** Ask the active GM's client to run an action; resolves with its result. */
+  request(action, data) {
+    const gm = game.users.activeGM;
+    if (!gm) return Promise.reject(new Error("no GM is online"));
+    const id = foundry.utils.randomID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${gm.name}'s client didn't respond. Is ScribBot Bridge enabled and up to date there?`));
+      }, RELAY_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      game.socket.emit(SOCKET, { kind: "request", id, action, data, from: game.user.id, to: gm.id });
+    });
+  },
+
+  async onMessage(msg) {
+    if (!msg || msg.to !== game.user.id) return;
+
+    if (msg.kind === "reply") {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      clearTimeout(p.timer);
+      this.pending.delete(msg.id);
+      if (msg.error) p.reject(new Error(msg.error));
+      else p.resolve(msg.data);
+      return;
+    }
+
+    // Requests: only the active GM serves them, and only for the configured bridge user.
+    if (msg.kind !== "request" || !isActiveGM() || !bridgeUserId() || msg.from !== bridgeUserId()) return;
+    let data = null;
+    let error = null;
+    try {
+      if (msg.action !== "createJournal") throw new Error(`unknown action "${msg.action}"`);
+      if (!msg.data?.file?.summary || !msg.data.file.sessionId) throw new Error("malformed summary");
+      data = await createSessionJournal(msg.data.file, msg.data.transcript ?? null);
+    } catch (err) {
+      error = err.message;
+    }
+    game.socket.emit(SOCKET, { kind: "reply", id: msg.id, data, error, from: game.user.id, to: msg.from });
+  },
+};
 
 // ---------------------------------------------------------------- combat tracking
 
@@ -278,7 +395,7 @@ Hooks.on("deleteCombat", (combat) => combatTracker.save(combat, { endedAt: Date.
 
 // Keep the roster fresh when characters are assigned or renamed.
 const resync = foundry.utils.debounce(() => {
-  if (isActiveGM() && bridge.socket?.readyState === WebSocket.OPEN) bridge.syncRoster().catch((e) => console.error(e));
+  if (role().act && bridge.socket?.readyState === WebSocket.OPEN) bridge.syncRoster().catch((e) => console.error(e));
 }, 2000);
 Hooks.on("updateUser", resync);
 Hooks.on("createActor", resync);
@@ -286,8 +403,10 @@ Hooks.on("updateActor", (actor, changes) => "name" in changes && resync());
 
 // ---------------------------------------------------------------- journal sidebar button
 
+// Shown to whoever holds the bot connection (a player bridge included), since the button
+// needs the bot's URL and token.
 Hooks.on("renderJournalDirectory", (app, html) => {
-  if (!game.user.isGM) return;
+  if (!role().connect) return;
   const root = html instanceof HTMLElement ? html : html[0];
   if (root.querySelector(".scribbot-import")) return;
   const button = document.createElement("button");

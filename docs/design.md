@@ -88,7 +88,7 @@ ScribBot is three processes plus Foundry:
 |---|---|---|
 | **Bot** (`bot/src/index.ts`) | Discord client, voice recording, pipeline orchestration, summarization, API for Foundry, dashboard | `127.0.0.1:7420` |
 | **Worker** (`worker/scribworker`) | Loads Whistle once and transcribes clips on a single background thread | `127.0.0.1:7421` |
-| **Foundry module** | Runs in the GM's browser. It pushes the roster and chat log to the bot and pulls summaries into the journal | (client only) |
+| **Foundry module** | Runs in the bridge user's browser (the active GM's by default, or a player chosen in the **Bridge user** setting). It pushes the roster and chat log to the bot and pulls summaries into the journal. GM-only writes (journal entries, combat log) stay on the active GM's client, reached over Foundry's module socket when the bridge is a player | (client only) |
 | **LLM provider** | Remote or local model behind `LLMProvider.generateJson()` | (external) |
 
 ### 3.1 Bot modules
@@ -113,7 +113,7 @@ ScribBot is three processes plus Foundry:
 
 1. **Start.** `/scrib start` creates a session row (`recording`), joins the caller's voice channel muted and undeafened, posts a recording notice with the speaker-to-character map, and emits `session.started`.
 2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. `timeline.json` is rewritten atomically *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
-3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The active GM's Foundry module responds by uploading the chat, roll and combat log for the session's time window.
+3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The bridge user's Foundry module responds by uploading the chat, roll and combat log for the session's time window.
 4. **Transcribe.** The bot submits a session job. The worker reuses every cached clip result, transcribes any leftovers (for example, clips recorded while it was down), and writes `transcript.json` and `transcript.md`.
 5. **Summarize.** Two LLM passes produce `summary.json`, and quotes are verified (see §8).
 6. **Deliver.** The bot posts an embed with `summary.md` attached, and emits `summary.ready`. If auto-import is enabled, the module fetches the summary and transcript and creates or replaces a `JournalEntry` in the configured folder.
@@ -229,7 +229,7 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 - **Consent.** `/scrib start` posts a recording notice. Groups must agree to be recorded before play.
 - **Local audio.** WAVs never leave the machine. By default each one is deleted seconds after it's transcribed.
 - **Network exposure.** Both services bind to `127.0.0.1`. Remote Foundry hosts (Forge and others) work because browsers treat `http://localhost` as a secure origin. To expose the bot elsewhere, put it behind an HTTPS proxy or tunnel.
-- **Authentication.** A shared `API_TOKEN` is compared with `timingSafeEqual`. `/status` warns while it is still `change-me`. The token is stored only in each GM's browser (Foundry client-scope setting) and never returned by the API.
+- **Authentication.** A shared `API_TOKEN` is compared with `timingSafeEqual`. `/status` warns while it is still `change-me`. The token is stored only in the bridge user's browser (Foundry client-scope setting) and never returned by the API.
 - **CORS.** Only `FOUNDRY_ORIGINS` is allowed, with methods limited to GET and POST.
 - **Path safety.** Session IDs are resolved through the database before any file access. The worker confines paths to `DATA_DIR`.
 - **Secrets in status.** `/status` reports which kind of credential each provider has (for example `api key` or `ant profile`), never the value. A provider without credentials raises a warning before the session ends, not when summarizing fails.
@@ -245,7 +245,9 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 | LLM error, rate limit or refusal | Session marked `failed` with the error posted to Discord. `/scrib summarize` retries without re-transcribing. The Anthropic adapter retries on the API's fallback model for refusals. |
 | Partial writes | `timeline.json` and `transcript.json` are written to `.tmp` and renamed. |
 | Voice disconnect | The recorder waits up to 5 s to reconnect before giving up. Clips already written are kept. |
-| Several GMs online | Only the active GM's module handles WebSocket events. |
+| Several GMs online | With no bridge user set, only the active GM's module handles WebSocket events. With one set, only that user's module connects. |
+| Player bridge, no GM online | Summaries are queued and handed to the first GM who connects, or created by the player if Foundry lets them create journal entries. The chat log excludes whispers and blind rolls. |
+| Player bridge, relay | Module socket messages reach every client, so only the summary and transcript are relayed, never whispers. The GM's client accepts requests only from the configured bridge user and rebuilds pages with `buildJournalPages`, which escapes all text. |
 | Disk growth | Audio retention (`AUDIO_RETENTION_DAYS`) is checked at startup and every 6 hours. The dashboard warns below 1 GB free. |
 
 ## 12. Configuration

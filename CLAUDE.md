@@ -61,7 +61,7 @@ LLM credentials: `LLM_PROVIDER=anthropic` needs `ANTHROPIC_API_KEY` (or an `ant 
 - TypeScript imports use `.js` extensions (ESM). Log lines use a `[module]` prefix (`[api]`, `[pipeline]`, `[summarize]`); the dashboard filters on them.
 - Never expose secrets: `/status` reports a credential *source* (e.g. `api key`), never the value. The API token comparison stays timing-safe.
 - Tests are hermetic: `new Store(":memory:")`, a fake `LLMProvider`, temp `DATA_DIR`, and no real credentials (see the env setup at the top of `bot/test/api.test.ts`).
-- The Foundry module acts only as the active GM (`isActiveGM()`), and must keep working on both Foundry v12 and v13.
+- The Foundry module talks to the bot only from the bridge client (`role()` in `scripts/main.js`, logic in `scripts/roles.js`): the active GM by default, or the **Bridge user** setting. GM-only writes (journals, the combat log) stay with the active GM, relayed over the module socket. It must keep working on both Foundry v12 and v13.
 - Whistle isn't thread-safe: the worker runs all transcription on one background thread. Keep it that way.
 - Keep `README.md` and `docs/design.md` in sync with behavior changes (commands, env vars, endpoints, file layout).
 
