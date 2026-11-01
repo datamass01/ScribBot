@@ -23,6 +23,19 @@ const EnvSchema = z.object({
   API_TOKEN: z.string().default("change-me"),
   FOUNDRY_ORIGINS: z.string().default("http://localhost:30000"),
 
+  // Headless Foundry client (bot/src/foundry/): off | session (joins while recording, and to
+  // import a summary) | always (stays joined while the bot runs).
+  FOUNDRY_HEADLESS: z.preprocess(
+    (v) => (typeof v === "string" ? (/^(true|1|yes|on)$/i.test(v.trim()) ? "session" : /^(false|0|no|off|)$/i.test(v.trim()) ? "off" : v.trim().toLowerCase()) : v),
+    z.enum(["off", "session", "always"]).default("off"),
+  ),
+  FOUNDRY_URL: optionalString,
+  FOUNDRY_USER: z.string().default("ScribBot"),
+  FOUNDRY_PASSWORD: z.string().default(""),
+  FOUNDRY_BROWSER: optionalString,
+  FOUNDRY_BOT_URL: optionalString,
+  FOUNDRY_CHATLOG_WAIT_SECONDS: z.coerce.number().min(0).default(120),
+
   WORKER_URL: z.string().default("http://127.0.0.1:7421"),
 
   LLM_PROVIDER: z.enum(["anthropic", "xai", "openai-compatible"]).default("anthropic"),
@@ -56,6 +69,10 @@ const EnvSchema = z.object({
 
 const env = EnvSchema.parse(process.env);
 
+const origins = env.FOUNDRY_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean);
+/** The URL a browser on this machine uses to reach the bot's API. */
+const loopbackHost = ["0.0.0.0", "::", "localhost", ""].includes(env.API_HOST) ? "127.0.0.1" : env.API_HOST;
+
 const resolveFromRoot = (p: string) => (path.isAbsolute(p) ? p : path.resolve(REPO_ROOT, p));
 
 export const config = {
@@ -71,7 +88,18 @@ export const config = {
     host: env.API_HOST,
     port: env.API_PORT,
     token: env.API_TOKEN,
-    origins: env.FOUNDRY_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean),
+    origins,
+  },
+  /** The headless Foundry client that joins the world as the bridge user (docs/design.md §3.2). */
+  foundry: {
+    headless: env.FOUNDRY_HEADLESS,
+    url: (env.FOUNDRY_URL ?? origins[0] ?? "http://localhost:30000").replace(/\/+$/, ""),
+    user: env.FOUNDRY_USER,
+    password: env.FOUNDRY_PASSWORD,
+    /** msedge | chrome | chromium, or a path to a Chromium-based browser executable. */
+    browser: env.FOUNDRY_BROWSER ?? (process.platform === "win32" ? "msedge" : "chromium"),
+    botUrl: (env.FOUNDRY_BOT_URL ?? `http://${loopbackHost.includes(":") ? `[${loopbackHost}]` : loopbackHost}:${env.API_PORT}`).replace(/\/+$/, ""),
+    chatlogWaitMs: env.FOUNDRY_CHATLOG_WAIT_SECONDS * 1000,
   },
   workerUrl: env.WORKER_URL.replace(/\/$/, ""),
   llm: {

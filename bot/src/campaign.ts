@@ -3,6 +3,29 @@ import path from "node:path";
 import { config } from "./config.js";
 import { foundryActorsFile } from "./paths.js";
 
+/** Committed templates; the real files are git-ignored so a campaign is never pushed by accident. */
+const CAMPAIGN_FILES = ["context.md", "glossary.md"] as const;
+
+/**
+ * Create campaign/context.md and glossary.md from their `.example.md` templates when missing,
+ * so there is a local file to edit. Never overwrites. Returns the files it created.
+ */
+export function ensureCampaignFiles(dir = config.campaignDir): string[] {
+  const created: string[] = [];
+  for (const name of CAMPAIGN_FILES) {
+    const file = path.join(dir, name);
+    const template = path.join(dir, name.replace(/\.md$/, ".example.md"));
+    if (fs.existsSync(file) || !fs.existsSync(template)) continue;
+    try {
+      fs.copyFileSync(template, file, fs.constants.COPYFILE_EXCL);
+      created.push(file);
+    } catch {
+      // created meanwhile, or the folder is read-only: the bot works without it
+    }
+  }
+  return created;
+}
+
 /** Read a campaign file, dropping <!-- comments --> (template instructions). */
 const readIfExists = (file: string) =>
   fs.existsSync(file) ? fs.readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "").trim() : "";

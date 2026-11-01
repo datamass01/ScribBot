@@ -8,6 +8,7 @@ import { resolveParticipant } from "../participants.js";
 import { readTimeline } from "../timeline.js";
 import { workerHealth } from "../worker-client.js";
 import { PipelineTracker } from "./pipeline.js";
+import type { HeadlessStatus } from "../foundry/client.js";
 
 export interface DiscordStatus {
   ready: boolean;
@@ -34,6 +35,8 @@ export interface RecordingStatus {
 export interface MonitorSources {
   discord?: () => DiscordStatus;
   recordings?: () => RecordingStatus[];
+  /** The headless Foundry client (FOUNDRY_HEADLESS), when the bot runs one. */
+  foundryHeadless?: () => HeadlessStatus;
 }
 
 /** Foundry module activity, tracked by the API routes. */
@@ -213,6 +216,14 @@ function speakerMapping(store: Store, rows: SessionRow[], recordings: RecordingS
   return { session: sessionNumber, total: resolved.length, mapped: resolved.length - unmapped.length, unmapped };
 }
 
+function safeOrigin(url: string) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 export async function buildStatus(store: Store, sources: MonitorSources, foundry: FoundryActivity) {
   const worker = await workerStatus();
   const discord = sources.discord?.() ?? null;
@@ -263,6 +274,22 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
     const cmds = failed.slice(0, 3).map((s) => `/scrib process session:${s.number}`).join(", ");
     warnings.push(`${failed.length} session(s) failed. Run ${cmds}${failed.length > 3 ? ", …" : ""} to resume.`);
   }
+  const headless = sources.foundryHeadless?.() ?? null;
+  if (headless && headless.mode !== "off") {
+    if (headless.state === "retrying" && headless.error) {
+      warnings.push(`ScribBot couldn't join Foundry as ${headless.user}: ${headless.error}`);
+    }
+    const origin = safeOrigin(headless.url);
+    if (origin && !config.api.origins.includes(origin)) {
+      warnings.push(`FOUNDRY_ORIGINS doesn't include ${origin}, so the headless Foundry client can't reach the bot's API.`);
+    }
+    if (config.foundry.password === "") {
+      warnings.push(`FOUNDRY_PASSWORD is empty. Give the ${headless.user} Foundry user a password and set it in .env.`);
+    }
+    if (headless.pendingImports.length) {
+      warnings.push(`${headless.pendingImports.length} summary(ies) are waiting for a GM to be online in Foundry to be imported.`);
+    }
+  }
   const disk = diskStatus();
   if (disk.freeBytes !== null && disk.freeBytes < 1024 ** 3) warnings.push("Less than 1 GB free in the data directory.");
 
@@ -277,6 +304,7 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
     llm,
     foundry: {
       ...foundry,
+      headless,
       rosterUsers: roster.length,
       /** Foundry users with the module's "Discord ID" flag set. Not the whole story: see `speakers`. */
       rosterLinked: roster.filter((r) => r.discord_id).length,

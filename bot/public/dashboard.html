@@ -214,6 +214,15 @@
   const rows = (pairs) => `<dl>${pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
   const card = (title, status, body) => `<div class="card"><h2>${esc(title)}${status}</h2>${body}</div>`;
 
+  const headlessText = (h) => {
+    const who = `<span class="muted">as ${esc(h.user)}, ${esc(h.mode)}</span>`;
+    const pending = h.pendingImports.length ? `<br><span class="muted">${h.pendingImports.length} summary(ies) waiting for a GM</span>` : "";
+    if (h.state === "connected") return `joined ${esc(h.world ?? "")} ${esc(ago(h.since))} ${who}${pending}`;
+    if (h.state === "joining") return `joining… ${who}${pending}`;
+    if (h.state === "retrying") return `<span class="error-text">can't join: ${esc(h.error ?? "")}</span> ${who}${pending}`;
+    return `idle${h.mode === "session" ? ' <span class="muted">(joins when recording starts)</span>' : ""} ${who}${pending}`;
+  };
+
   // ---------- rendering ----------
   function renderComponents(s) {
     const d = s.discord;
@@ -266,6 +275,7 @@
         ["Discord IDs in Foundry", `${f.rosterLinked} <span class="muted" title="Foundry users with the module's Discord ID set; /scrib map fills these in">of ${f.rosterUsers}</span>`],
         ["Last roster sync", esc(ago(f.lastRosterAt))],
         ["Last chat log", esc(ago(f.lastChatlogAt))],
+        ...(f.headless && f.headless.mode !== "off" ? [["Headless client", headlessText(f.headless)]] : []),
       ]));
 
     const p = s.process, k = s.disk;

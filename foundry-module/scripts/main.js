@@ -57,6 +57,8 @@ Hooks.once("ready", () => {
     syncRoster: () => bridge.syncRoster(),
     exportChatlog: (sessionId = "latest") => bridge.exportChatlog(sessionId),
     importSummary: (sessionId = "latest") => bridge.importSummary(sessionId),
+    /** Read by ScribBot's headless client to check this client is the bridge and connected. */
+    status: () => ({ ...role(), botSocket: bridge.socket?.readyState === WebSocket.OPEN }),
   };
   refreshBridgeUserChoices();
   game.socket.on(SOCKET, (msg) => relay.onMessage(msg).catch((e) => console.error("ScribBot |", e)));

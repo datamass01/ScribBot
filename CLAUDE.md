@@ -8,7 +8,7 @@ ScribBot records tabletop RPG sessions on Discord, transcribes them locally with
 - Commit under the repository owner's existing git identity. Never change `git config user.name`/`user.email` and never pass `--author`.
 - Write commit messages as a normal human contributor would: a short imperative subject line (≤ 72 chars), a blank line, then what changed and why.
 - Only commit or push when asked. The default branch is `main`. Create a feature branch rather than committing to `main`/`master` directly.
-- Never commit `.env`, anything under `data/` except `data/sessions/fixture-tts/`, databases, or audio from real sessions. `.gitignore` already enforces this; don't weaken it.
+- Never commit `.env`, anything under `data/` except `data/sessions/fixture-tts/`, `campaign/` files other than the `*.example.md` templates, databases, or audio from real sessions. `.gitignore` already enforces this; don't weaken it.
 
 ## Layout
 
@@ -19,7 +19,7 @@ ScribBot records tabletop RPG sessions on Discord, transcribes them locally with
 | `monitor/` | Optional read-only watchdog on :7422 (`scribmonitor.py`, stdlib only): redirects to the bot's dashboard, or shows a fallback page while the bot is down. Nothing may depend on it |
 | `foundry-module/` | FoundryVTT v12/v13 module (plain browser ES modules, no build step) |
 | `shared/schemas/` | JSON Schemas **generated** from the Zod types; don't hand-edit |
-| `campaign/` | `glossary.md` (names fed to STT and the LLM) and `context.md` (story so far) |
+| `campaign/` | `glossary.md` (names fed to STT and the LLM) and `context.md` (story so far). Both are git-ignored and local only; change the committed `*.example.md` templates instead |
 | `docs/design.md` | Design document; diagrams are standalone SVGs in `docs/diagrams/` |
 | `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/` |
 
@@ -34,6 +34,7 @@ The shell is Windows; use these forms.
 cd bot && npm test                 # vitest (also covers foundry-module/scripts/journal.js)
 cd bot && npm run typecheck        # strict tsc over src/, scripts/, test/
 cd bot && npm run schemas          # regenerate shared/schemas after changing Zod types
+cd bot && npm run foundry          # join Foundry once as the headless bridge user (FOUNDRY_* in .env)
 cd bot && npm start                # needs DISCORD_TOKEN etc. in .env
 
 # Worker

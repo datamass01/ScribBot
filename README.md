@@ -91,6 +91,13 @@ Both scripts **supervise** what they start: if the bot or worker exits with an e
 
 The module talks to the bot from the bridge user's browser. Browsers treat `http://localhost` as secure, so this works even when Foundry is served over HTTPS (Forge, etc.), **as long as the bot runs on the bridge user's own computer**. If it runs elsewhere, put it behind HTTPS (a reverse proxy or a tunnel such as Cloudflare Tunnel or Tailscale Funnel) and use that URL.
 
+**Let ScribBot join Foundry by itself (optional).** Instead of keeping someone's browser open, the bot can log in to the world as its own player in a headless browser:
+1. In Foundry, create a player user named `ScribBot` with a password. As GM, set the module's **Bridge user** to `ScribBot` (module 0.4.0+).
+2. In `.env`, set `FOUNDRY_HEADLESS=session` (join while recording, leave once the chat log is uploaded) or `always` (stay joined), plus `FOUNDRY_PASSWORD`. `FOUNDRY_URL` defaults to the first `FOUNDRY_ORIGINS` entry; `FOUNDRY_USER` defaults to `ScribBot`.
+3. Check it with `cd bot && npm run foundry` (needs the bot running for the module's connection check). It joins, prints what it sees, and logs out. On Windows it drives the installed Edge; elsewhere set `FOUNDRY_BROWSER=chrome`, or run `npx playwright-core install chromium` in `bot/`.
+
+The bot sets the module's URL and token in its own browser, waits for the chat log before summarizing, and joins briefly to import a summary if it isn't connected when the summary is ready. The player-bridge rules below apply to it. The dashboard's Foundry card shows its state, and `/status` explains a failed join.
+
 **When the bridge user is a player:**
 - The GM's client still creates the journal entries. The player's browser fetches each summary and hands it to the active GM's client over Foundry's socket, and the GM needs module version 0.2.0 or later.
 - If no GM is online, the summary is imported once one connects. If the player has Foundry's **Create Journal Entries** permission, it's created right away instead, at the top level if they can't create folders.
@@ -153,6 +160,7 @@ By default (`DELETE_AUDIO_AFTER_TRANSCRIBE=true`) each clip is transcribed while
 Set `DELETE_AUDIO_AFTER_TRANSCRIBE=false` to keep audio. It is then deleted `AUDIO_RETENTION_DAYS` after the session is summarized.
 
 ### Campaign context
+Your campaign files are **git-ignored**, so they're never pushed. The repo only has templates (`campaign/*.example.md`); the bot copies them to the real names on first start, or you can copy them yourself.
 - `campaign/glossary.md`: names of characters, NPCs and places. These are fed to Whistle as keywords so it spells them right, and to the summarizer to fix mis-hearings. Foundry actor names are added automatically.
 - `campaign/context.md`: setting, party, and the story so far. Sent with every summary.
 

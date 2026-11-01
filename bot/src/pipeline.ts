@@ -13,6 +13,8 @@ import { transcribe, transcribeClip } from "./worker-client.js";
 export interface PipelineHooks {
   notify?: (text: string) => Promise<unknown> | void;
   onSummary?: (file: SummaryFile) => Promise<unknown> | void;
+  /** Runs before summarizing, e.g. to wait for the Foundry chat log of a session just stopped. */
+  beforeSummary?: () => Promise<unknown>;
   log?: (msg: string) => void;
 }
 
@@ -109,6 +111,7 @@ export async function processSession(
       return null;
     }
 
+    await opts.beforeSummary?.();
     setStatus("summarizing");
     const file = await summarizeSession(store, sessionId, { log });
     store.markSummarized(sessionId);

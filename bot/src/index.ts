@@ -1,6 +1,7 @@
 import { generateDependencyReport } from "@discordjs/voice";
 import { Client, Events, GatewayIntentBits } from "discord.js";
 import { startApi } from "./api/server.js";
+import { ensureCampaignFiles } from "./campaign.js";
 import { CommandHandler } from "./commands.js";
 import { config, requireDiscordConfig } from "./config.js";
 import { Store } from "./db.js";
@@ -9,11 +10,14 @@ import { DailyLog } from "./logfile.js";
 import { installLogCapture, writeLogFile } from "./monitor.js";
 import { sessionPaths } from "./paths.js";
 import { purgeExpiredAudio } from "./pipeline.js";
+import { createHeadlessFoundry } from "./foundry/index.js";
 import { planRestart } from "./recovery.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 installLogCapture(config.logRetentionDays > 0 ? new DailyLog(config.logDir, config.logRetentionDays) : undefined);
 const { token } = requireDiscordConfig();
 const store = new Store();
+for (const f of ensureCampaignFiles()) console.log(`[scribbot] created ${f} from its template; fill in your campaign there (it is git-ignored)`);
 
 // ---------- process-level safety nets (docs/assessment/02 S1, S9) ----------
 
@@ -44,6 +48,11 @@ if (process.env.SCRIBBOT_DEBUG_VOICE) console.log(generateDependencyReport());
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const commands = new CommandHandler(client, store);
+
+// Optional headless Foundry client that joins as the module's bridge user (FOUNDRY_HEADLESS).
+const foundry = createHeadlessFoundry();
+bus.onEvent((e) => foundry.onEvent(e));
+commands.awaitChatlog = (id) => foundry.awaitChatlog(id);
 
 // An `error` with no listener is thrown and ends the process (02 S2); discord.js reconnects by itself.
 client.on(Events.Error, (err) => console.error("[discord] client error:", err));
@@ -81,8 +90,10 @@ await startApi(store, () => commands.currentRecording(), {
     readySince: client.readyAt?.toISOString() ?? null,
   }),
   recordings: () => commands.activeRecordings(),
+  foundryHeadless: () => foundry.status(),
 });
 await client.login(token);
+foundry.start();
 
 purgeExpiredAudio(store, config.audioRetentionDays);
 setInterval(() => purgeExpiredAudio(store, config.audioRetentionDays), 6 * 3600_000).unref();
@@ -104,6 +115,7 @@ async function shutdown(reason: string, code: number) {
   } catch (err) {
     console.error("[scribbot] stopping recordings failed:", err);
   }
+  await Promise.race([foundry.stop(), sleep(5000)]).catch(() => {});
   bus.removeAllListeners();
   await client.destroy().catch(() => {});
   process.exit(code);

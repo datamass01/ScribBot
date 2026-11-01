@@ -104,12 +104,18 @@ describe("Foundry API", () => {
 
   it("accepts a chat log for a session and reports missing summaries", async () => {
     const s = store.createSession({ id: "s1", guildId: "g", channelId: "c", textChannelId: null, startedAt: new Date().toISOString() });
+    const { bus } = await import("../src/events.js");
+    const events: unknown[] = [];
+    const off = bus.onEvent((e) => events.push(e));
     const res = await fetch(`${base}/sessions/latest/chatlog`, {
       method: "POST",
       headers: auth,
       body: JSON.stringify({ messages: [{ id: "m1", timestamp: Date.now(), content: "<p>hi</p>" }], combats: [] }),
     });
+    off();
     expect(await res.json()).toMatchObject({ ok: true, messages: 1 });
+    // The headless Foundry client waits for this before letting the summary run.
+    expect(events).toContainEqual({ type: "chatlog.received", sessionId: "s1" });
     expect(fs.existsSync(path.join(dataDir, "sessions", s.id, "chatlog.json"))).toBe(true);
 
     const summary = await fetch(`${base}/sessions/s1/summary`, { headers: auth });

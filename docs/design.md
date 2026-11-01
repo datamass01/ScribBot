@@ -89,7 +89,7 @@ ScribBot is three processes plus Foundry:
 |---|---|---|
 | **Bot** (`bot/src/index.ts`) | Discord client, voice recording, pipeline orchestration, summarization, API for Foundry, dashboard | `127.0.0.1:7420` |
 | **Worker** (`worker/scribworker`) | Loads Whistle once and transcribes clips on a single background thread | `127.0.0.1:7421` |
-| **Foundry module** | Runs in the bridge user's browser (the active GM's by default, or a player chosen in the **Bridge user** setting). It pushes the roster and chat log to the bot and pulls summaries into the journal. GM-only writes (journal entries, combat log) stay on the active GM's client, reached over Foundry's module socket when the bridge is a player | (client only) |
+| **Foundry module** | Runs in the bridge user's browser (the active GM's by default, or a player chosen in the **Bridge user** setting, which can be the bot's own headless client, §3.2). It pushes the roster and chat log to the bot and pulls summaries into the journal. GM-only writes (journal entries, combat log) stay on the active GM's client, reached over Foundry's module socket when the bridge is a player | (client only) |
 | **LLM provider** | Remote or local model behind `LLMProvider.generateJson()` | (external) |
 
 ### 3.1 Bot modules
@@ -112,7 +112,28 @@ ScribBot is three processes plus Foundry:
 | `events.ts` | In-process `EventEmitter` bus. Its events are forwarded to Foundry over the WebSocket. |
 | `api/server.ts`, `api/status.ts`, `api/pipeline.ts` | Fastify routes, token auth, CORS, `/status` health aggregation with warnings, and its `pipeline` block (queue, conversion, quality, alerts, shutdown advice). |
 | `monitor.ts` | Captures console output into a ring buffer for `/logs` and the dashboard, and into the daily log file. |
-| `campaign.ts` | Loads `campaign/glossary.md` and `context.md` and builds STT keyword lists. |
+| `campaign.ts` | Loads `campaign/glossary.md` and `context.md` and builds STT keyword lists. Both are git-ignored; `ensureCampaignFiles()` creates them at startup from the committed `*.example.md` templates. |
+| `foundry/` | Optional headless Foundry client (§3.2): `client.ts` is the lifecycle, `playwright.ts` the browser driver, `index.ts` builds it from config. |
+
+### 3.2 Headless Foundry client
+
+With `FOUNDRY_HEADLESS=session|always`, the bot joins the world itself instead of relying on a person's browser. It drives a headless Chromium-family browser with `playwright-core` (an optional dependency, imported only when this is on; on Windows it uses the installed Edge, so nothing is downloaded) and logs in as a dedicated Foundry player, `FOUNDRY_USER` (default `ScribBot`), which the GM selects as the module's **Bridge user**. The module doesn't change: it runs in the bot's browser, so a player bridge's rules apply (no whispers or blind rolls in the chat log; journals and the combat log are written by the active GM's client).
+
+**Join** (`playwrightLauncher()`): open `FOUNDRY_URL/join` (a redirect to `/setup` or `/auth` means no world is running), pick the user from the join list by name, log in, and wait for `game.ready`. The canvas is turned off for that client (`core.noCanvas`, written to `localStorage` before Foundry's scripts run), since the bridge only reads game data and WebGL in a headless browser costs CPU. The bot then checks that the module is active and that this user is the bridge user, writes the module's client settings (`botUrl` = `FOUNDRY_BOT_URL`, `apiToken` = `API_TOKEN`) in a throwaway browser profile, and waits until the module's WebSocket to the bot is open (`api.status()`, module 0.4.0+; older modules are assumed connected). The user agent is a normal desktop Chrome one, and private-network checks are off so a page served from the internet can reach the bot on loopback.
+
+**Lifecycle** (`HeadlessFoundry`): the client is wanted for a set of reasons, and stays joined while any is present.
+
+| Reason | Added | Removed |
+|---|---|---|
+| `always` | at start, in `always` mode | at shutdown |
+| `session N` | `session.started` | the module's `POST /chatlog` for that session (`chatlog.received`), or `FOUNDRY_CHATLOG_WAIT_SECONDS` after `session.stopped` |
+| `import` | `summary.ready` while not joined, or summaries left over from a previous run | after trying each pending import |
+
+While joined, the module handles `summary.ready` itself. Otherwise the client joins, calls the module's `api.importSummary()` for each pending summary (unless **Import summaries automatically** is off), and leaves. A summary no GM could take stays in `DATA_DIR/foundry-headless.json` and is retried on the next join. A failed join is retried with backoff (15 s doubling to 5 min; 5 min for configuration errors such as a wrong password or the wrong bridge user), and the error is shown on `/status`. Every 30 s the client checks the page; two failed checks in a row, a crash, or Foundry sending it back to `/join` makes it log out and join again. All browser work runs on one serialized queue, and nothing on it can throw into the recording path.
+
+**Chat log before summarizing.** `processSession()` calls `beforeSummary`, which waits on `awaitChatlog()` for a session the client joined for and that has just stopped. Other sessions (and a later `/scrib summarize`) never wait.
+
+`npm run foundry` (`bot/scripts/foundry-join.ts`) joins once with the same settings and prints the result (`-- --stay` keeps it joined, `-- --headed` shows the window).
 
 ## 4. Session lifecycle
 
@@ -120,7 +141,7 @@ ScribBot is three processes plus Foundry:
 
 1. **Start.** `/scrib start` creates a session row (`recording`), joins the caller's voice channel muted and undeafened, posts a recording notice with the speaker-to-character map, and emits `session.started`.
 2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. The segment is appended (and fsynced) to `timeline.segments.jsonl` *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. `timeline.json` itself is a snapshot, written atomically on a new speaker, every 30 s while clips arrive, and at stop; readers (`readTimeline()` in the bot, `load_timeline()` in the worker, the watchdog) union the two by file. This keeps the I/O linear instead of rewriting a growing file per clip, and makes a failed rename (Windows `EPERM`/`EBUSY` while another process holds the file; retried with backoff) harmless. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
-3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The bridge user's Foundry module responds by uploading the chat, roll and combat log for the session's time window.
+3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The bridge user's Foundry module responds by uploading the chat, roll and combat log for the session's time window. With the headless client (§3.2), the summary waits for that upload.
 4. **Transcribe.** The bot submits a session job. The worker reuses every cached clip result, transcribes any leftovers (for example, clips recorded while it was down), and writes `transcript.json` and `transcript.md`. The Markdown is self-contained for any LLM or reader: an "About this transcript" section (what it is, when, the speech-to-text model and language, the line format, that names may be misheard), a player-to-character table, then the timed lines. With `AUTO_SUMMARIZE=false` (the default) the session is marked `complete` here, the bot posts where the transcript is saved, and nothing is sent to an LLM; steps 5 and 6 run only on `/scrib summarize`.
 5. **Summarize.** Two LLM passes produce `summary.json`, and quotes are verified (see §8).
 6. **Deliver.** The bot posts an embed with `summary.md` attached, and emits `summary.ready`. If auto-import is enabled, the module fetches the summary and transcript and creates or replaces a `JournalEntry` in the configured folder.
@@ -292,6 +313,8 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 | LLM error, rate limit or refusal | Session marked `failed` with the error posted to Discord. `/scrib summarize` retries without re-transcribing. The Anthropic adapter retries on the API's fallback model for refusals. |
 | Partial writes | `timeline.json`, `transcript.json`, `chatlog.json`, `actors.json` and `foundry-actors.json` are written to `.tmp` and renamed; the bot retries the rename on `EPERM`/`EBUSY`/`EACCES` for about 2 s. A clip callback never throws: a failed snapshot is logged and the journal still lists the clip. |
 | Voice disconnect | The recorder waits 5 s for the connection to recover, then closes open clips and rejoins after 2, 5, 10, 20 and 30 s, then every minute, posting in the text channel when it drops, comes back, or isn't back after 5 tries. `/status` shows the connection state and warns while nothing is being recorded. |
+| Headless Foundry client can't join | Retried with backoff; `/status` shows why (no world running, wrong password, not the bridge user, module can't reach the bot). Recording is unaffected; the summary goes without the chat log after at most `FOUNDRY_CHATLOG_WAIT_SECONDS`. |
+| Headless client kicked or Foundry restarted | Detected by the 30 s health check or the page leaving `/game`; the client logs out and joins again. |
 | Several GMs online | With no bridge user set, only the active GM's module handles WebSocket events. With one set, only that user's module connects. |
 | Player bridge, no GM online | Summaries are queued and handed to the first GM who connects, or created by the player if Foundry lets them create journal entries. The chat log excludes whispers and blind rolls. |
 | Player bridge, relay | Module socket messages reach every client, so only the summary and transcript are relayed, never whispers. The GM's client accepts requests only from the configured bridge user and rebuilds pages with `buildJournalPages`, which escapes all text. |
@@ -306,6 +329,7 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Discord | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` |
 | Storage | `DATA_DIR`, `CAMPAIGN_DIR` |
 | API | `API_HOST`, `API_PORT`, `API_TOKEN`, `FOUNDRY_ORIGINS` |
+| Headless Foundry client | `FOUNDRY_HEADLESS` (`off`/`session`/`always`), `FOUNDRY_URL`, `FOUNDRY_USER` (`ScribBot`), `FOUNDRY_PASSWORD`, `FOUNDRY_BROWSER`, `FOUNDRY_BOT_URL`, `FOUNDRY_CHATLOG_WAIT_SECONDS` (120) |
 | Worker | `WORKER_URL`, `STT_LANGUAGE`, `WHISTLE_WEIGHTS`, `STT_ENGINE` (`whistle`/`whisper`), `WHISPER_MODEL`, `WHISPER_DEVICE` (`cuda`/`cpu`), `WHISPER_COMPUTE_TYPE`, `WHISPER_BEAM_SIZE`, `WHISPER_MAX_HOTWORDS`, `WHISPER_HOTWORDS_MIN_SECONDS`, `WHISPER_VAD`, `WHISPER_VAD_THRESHOLD`, `WHISPER_FILLER_MAX_SECONDS`, `WHISPER_FILLER_MAX_PROBABILITY`, `WORKER_RECOVER_HOURS`, `WORKER_RELOAD_AFTER_FAILURES`, `WORKER_SLOW_CLIP_SECONDS` (also reads `DELETE_AUDIO_AFTER_TRANSCRIBE`, `CAMPAIGN_DIR`, `LOG_RETENTION_DAYS`) |
 | Recovery and logs | `RESUME_WINDOW_MINUTES` (30), `BACKLOG_WARN_MINUTES` (10), `LOG_RETENTION_DAYS` (14, shared by bot and worker) |
 | Watchdog (optional) | `MONITOR_PORT`, `MONITOR_LOG_DIR` |
@@ -316,7 +340,8 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 
 | Suite | Command | Covers |
 |---|---|---|
-| Bot | `cd bot && npm test` | API auth, roster and `roster.link`, chat log, status and warnings, the pipeline block, participant resolution, pipeline with a fake provider, chunking, quote verification, merge, rename retries, clip finalization when `timeline.json` can't be written, the segment journal, resume and shutdown plans, worker polling across a restart, log files, Foundry journal page building (`journal.test.js`) and Discord-link planning (`roles.test.js`) |
+| Bot | `cd bot && npm test` | API auth, roster and `roster.link`, chat log, status and warnings, the pipeline block, participant resolution, pipeline with a fake provider, chunking, quote verification, merge, rename retries, clip finalization when `timeline.json` can't be written, the segment journal, resume and shutdown plans, worker polling across a restart, log files, Foundry journal page building (`journal.test.js`), Discord-link planning (`roles.test.js`), and the headless Foundry client's lifecycle and join helpers with a fake browser (`foundry-headless.test.ts`) |
+| Headless join | `cd bot && npm run foundry` | A real login to Foundry as `FOUNDRY_USER` with the configured browser |
 | Bot types | `cd bot && npm run typecheck` | Strict TypeScript across `src/`, `scripts/` and `test/` |
 | Worker | `cd worker && .venv\Scripts\python -m pytest` | Clip-to-line conversion and labels, noise filtering, pause splitting, cache resume, live clip then delete, 48 to 16 kHz resampling, path confinement in the API, the segment journal, the filler filter, queue priorities, model reload after repeated errors, log files |
 | Monitor | `cd monitor && ..\worker\.venv\Scripts\python -m pytest` | `.env` parsing, relaying with the token, offline fallback shape, read-only database access, pipeline (conversion counts, rate/ETA, shutdown verdict, quality, alerts, no live `timeline.json` reads), log copy across restarts, redirect to the bot's dashboard while it's up and the fallback page while it's down, loopback `Host` check, token never in responses |
@@ -325,7 +350,8 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 
 ## 14. Known limitations and open questions
 
-- **Chat log upload races transcription.** The pipeline starts as soon as `/scrib stop` emits `session.stopped`, and doesn't wait for the module's `POST /chatlog`. Live transcription makes the transcribe step short, so a slow Foundry upload could arrive after summarization has read the folder. Consider waiting a few seconds for the chat log when a module is connected.
+- **Chat log upload races transcription (without the headless client).** With a person's browser as the bridge, the pipeline doesn't wait for the module's `POST /chatlog`, so a slow upload could arrive after summarization has read the folder. The headless client (§3.2) closes this: the summary waits for the upload, up to `FOUNDRY_CHATLOG_WAIT_SECONDS`.
+- **Headless client limits.** It joins as a player, so the combat log still needs a GM online during play, and journals are created only while a GM is online. Login pages other than Foundry's own (e.g. The Forge's account login) aren't supported. Foundry allows one login per user, so nobody else may use the `ScribBot` user while the bot needs it.
 - **One transcriber thread.** Neither engine is shared across threads (Whistle isn't thread-safe), so the worker loads the model and processes one clip at a time on a single thread. The model is loaded at startup on that thread; a load failure is reported as `loadError` in `GET /health` and as a `/status` warning. That is plenty for a single table, but several simultaneous guilds would queue.
 - **No re-transcription after deletion.** With the default live deletion, adding glossary names later can't improve an old transcript. Only the summary can be redone.
 - **Single machine.** The bot, worker and data directory are assumed to share a filesystem: the worker receives local paths, not audio bytes.

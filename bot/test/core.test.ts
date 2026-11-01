@@ -94,3 +94,20 @@ describe("glossaryNames", async () => {
     ]);
   });
 });
+
+describe("ensureCampaignFiles", async () => {
+  const { ensureCampaignFiles } = await import("../src/campaign.js");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  it("creates missing campaign files from their templates and never overwrites", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scrib-campaign-"));
+    fs.writeFileSync(path.join(dir, "glossary.example.md"), "- Thorin\n");
+    fs.writeFileSync(path.join(dir, "context.example.md"), "template\n");
+    fs.writeFileSync(path.join(dir, "context.md"), "my campaign\n");
+    expect(ensureCampaignFiles(dir)).toEqual([path.join(dir, "glossary.md")]);
+    expect(fs.readFileSync(path.join(dir, "glossary.md"), "utf8")).toBe("- Thorin\n");
+    expect(fs.readFileSync(path.join(dir, "context.md"), "utf8")).toBe("my campaign\n");
+    expect(ensureCampaignFiles(dir)).toEqual([]);
+  });
+});

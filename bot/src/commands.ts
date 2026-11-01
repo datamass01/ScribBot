@@ -453,12 +453,16 @@ export class CommandHandler {
     this.runPipeline(active.session.id, i.channelId);
   }
 
+  /** Set by index.ts when the headless Foundry client is on: waits for a just-stopped session's chat log. */
+  awaitChatlog: ((sessionId: string) => Promise<void>) | null = null;
+
   /** `summarize` defaults to AUTO_SUMMARIZE; `/scrib summarize` passes true explicitly. */
   private runPipeline(sessionId: string, channelId: string | null, opts: { retranscribe?: boolean; summarize?: boolean } = {}) {
     const { summarize = config.autoSummarize, ...rest } = opts;
     void processSession(this.store, sessionId, {
       ...rest,
       skipSummary: !summarize,
+      beforeSummary: () => this.awaitChatlog?.(sessionId) ?? Promise.resolve(),
       notify: (text) => this.send(channelId, text),
       onSummary: (file) => this.postSummary(channelId, file),
     }).catch(() => {

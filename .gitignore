@@ -16,6 +16,11 @@
 /data/sessions/*
 !/data/sessions/fixture-tts/
 
+# Your campaign notes (names, lore, story so far) stay local. Only the templates are committed;
+# the bot copies them to glossary.md / context.md on first start.
+/campaign/*
+!/campaign/*.example.md
+
 # SQLite files anywhere (e.g. when DATA_DIR points somewhere inside the repo)
 *.db
 *.db-journal

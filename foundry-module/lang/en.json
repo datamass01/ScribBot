@@ -4,7 +4,7 @@
   "SCRIBBOT.Settings.Token.Name": "ScribBot API token",
   "SCRIBBOT.Settings.Token.Hint": "The API_TOKEN from ScribBot's .env file. Stored per browser; only the bridge user needs it.",
   "SCRIBBOT.Settings.BridgeUser.Name": "Bridge user",
-  "SCRIBBOT.Settings.BridgeUser.Hint": "Whose browser connects to ScribBot. Pick the player who runs the bot if the GM can't reach it; the GM's client still creates the journal entries while a GM is online. That user sets the URL and token in their own settings.",
+  "SCRIBBOT.Settings.BridgeUser.Hint": "Whose browser connects to ScribBot. Pick the player who runs the bot if the GM can't reach it; the GM's client still creates the journal entries while a GM is online. That user sets the URL and token in their own settings. To have ScribBot join by itself, create a player named ScribBot, pick it here, and turn on FOUNDRY_HEADLESS in the bot's .env.",
   "SCRIBBOT.Settings.BridgeUser.ActiveGM": "Active GM (default)",
   "SCRIBBOT.Settings.Folder.Name": "Journal folder",
   "SCRIBBOT.Settings.Folder.Hint": "Session summaries are created in this journal folder.",

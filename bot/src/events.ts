@@ -8,6 +8,8 @@ export type BotEvent =
   | { type: "session.stopped"; sessionId: string; number: number; startedAt: string; endedAt: string }
   | { type: "session.status"; sessionId: string; status: SessionStatus; error?: string | null }
   | { type: "summary.ready"; sessionId: string; number: number; title: string }
+  /** The module uploaded a session's chat and combat log (the headless client waits for it). */
+  | { type: "chatlog.received"; sessionId: string }
   | { type: "roster.request" }
   /** Store these Discord IDs as the Foundry users' "Discord ID" flag (05 C11). GM-only in Foundry. */
   | { type: "roster.link"; links: RosterLink[] };

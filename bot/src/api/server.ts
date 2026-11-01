@@ -136,6 +136,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     fs.mkdirSync(sessionPaths(s.id).dir, { recursive: true });
     writeFileAtomic(sessionPaths(s.id).chatlog, JSON.stringify(parsed.data, null, 2));
     foundry.lastChatlogAt = new Date().toISOString();
+    bus.emitEvent({ type: "chatlog.received", sessionId: s.id });
     return { ok: true, messages: parsed.data.messages.length, combats: parsed.data.combats.length };
   });
 
