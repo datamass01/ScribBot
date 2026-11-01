@@ -39,6 +39,7 @@ describe("buildEventStream", () => {
   const start = Date.parse("2026-01-01T18:00:00Z");
   const chatlog: ChatLog = {
     world: "w",
+    system: null,
     messages: [
       {
         id: "m1", timestamp: start + 14_000, alias: "Thorin", actorId: "a1", userName: "Alice",

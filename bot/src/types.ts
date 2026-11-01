@@ -94,8 +94,18 @@ export const CombatSchema = z.object({
 });
 export type Combat = z.infer<typeof CombatSchema>;
 
+/** The world's game system (Foundry's `game.system`), e.g. { id: "pf1", title: "Pathfinder 1", version: "11.8" }. */
+export const GameSystemSchema = z.object({
+  id: z.string(),
+  title: z.string().nullable().default(null),
+  version: z.string().nullable().default(null),
+});
+export type GameSystem = z.infer<typeof GameSystemSchema>;
+
 export const ChatLogSchema = z.object({
   world: z.string().nullable().default(null),
+  /** Absent in logs from modules before 0.5.0. */
+  system: GameSystemSchema.nullable().default(null),
   exportedAt: z.number().optional(),
   messages: z.array(ChatMessageSchema).default([]),
   combats: z.array(CombatSchema).default([]),

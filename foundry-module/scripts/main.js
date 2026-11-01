@@ -240,7 +240,13 @@ class Bridge {
     const combats = combatTracker.entries().filter((c) => (c.startedAt ?? c.createdAt) <= to && (c.endedAt ?? Date.now()) >= from);
     const res = await this.api(`/sessions/${sessionId}/chatlog`, {
       method: "POST",
-      body: { world: game.world.id, exportedAt: Date.now(), messages, combats },
+      body: {
+        world: game.world.id,
+        system: { id: game.system.id, title: game.system.title ?? null, version: game.system.version ?? null },
+        exportedAt: Date.now(),
+        messages,
+        combats,
+      },
     });
     log(`chat log sent: ${res.messages} messages, ${res.combats} combats`);
     ui.notifications.info(`ScribBot: sent ${res.messages} chat messages and ${res.combats} combats for the summary.`);

@@ -9,6 +9,39 @@
         "null"
       ]
     },
+    "system": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "exportedAt": {
       "type": "number"
     },

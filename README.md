@@ -196,12 +196,12 @@ If a game still ends up as two sessions (a restart after the resume window, or a
 Long sessions are summarized in two passes. Each ~25-minute chunk (`SUMMARY_CHUNK_MINUTES`) is turned into structured notes, separating in-character from out-of-character speech. The notes are then merged into the final summary. Output is schema-constrained JSON (see `shared/schemas/`).
 
 ### Story summaries with any LLM (agent skill)
-`.claude/skills/summarize-session/` writes a high-fantasy, story-style write-up in a fixed section order (high level summary, characters with class, level and player from Foundry, NPCs, objectives completed, then the full story), plus a brief table-talk summary and action items, of a session (`data/sessions/<id>/story/summary.story.md`) with any model, separate from `/scrib summarize`:
+`.claude/skills/summarize-session/` writes a high-fantasy, story-style write-up in a fixed section order (high level summary, characters with class, level and player from Foundry, named NPCs, objectives completed, then the full story), plus a brief table-talk summary, of a session (`data/sessions/<id>/story/summary.story.md`) with any model, separate from `/scrib summarize`:
 ```sh
 python .claude/skills/summarize-session/prepare.py <number|id|latest> [more sessions to stitch]   # drop Whisper hallucinations, build the evidence pack
-python .claude/skills/summarize-session/verify.py data/sessions/<id>/story/summary.story.md       # check quotes, citations, real names and damage numbers
+python .claude/skills/summarize-session/verify.py data/sessions/<id>/story/summary.story.md       # check quotes, layout, real names and damage numbers
 ```
-If the transcript uses nicknames or names of people who aren't in Discord or Foundry ("Becca", "Robbie"), `prepare.py` stops with exit code 2 and suggests who each one is. Confirm with `--nickname "Becca=Alessandra Deiana"` (or `absent` / `not-a-person`), or answer the prompts when run in a terminal. Answers are kept in `data/nicknames.json`. `PROMPT.md` holds the instructions for the writing model. See the skill's `SKILL.md` for small-context models and the hallucination rules.
+If the transcript uses nicknames or names of people who aren't in Discord or Foundry ("Becca", "Robbie"), `prepare.py` stops with exit code 2 and suggests who each one is. Confirm with `--nickname "Becca=Alessandra Deiana"` (or `absent` / `not-a-person`), or answer the prompts when run in a terminal. Answers are kept in `data/nicknames.json`. `prepare.py` starts `summary.story.md` from the skill's `template.md` (whose headings fix the sections) and never overwrites one that exists; delete it to start over. The pack names the Foundry game system and the spells and abilities cast, so the story calls them by their in-game names (Implosion, Power Word Blind) rather than paraphrasing. `PROMPT.md` holds the instructions for the writing model. See the skill's `SKILL.md` for small-context models and the hallucination rules.
 
 ## Development
 ```sh

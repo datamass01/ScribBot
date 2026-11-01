@@ -1,20 +1,24 @@
 ---
 name: summarize-session
-description: Write a high-fantasy, story-style summary of a recorded ScribBot game session in a fixed section order (high level summary, characters with class/level/player, NPCs, objectives completed, the story, battles told without damage numbers, quotes, items) plus a brief summary of the table discussion and action items for the players and GM, from its transcript, Foundry chat log and timeline, after removing Whisper hallucinations ("Thank you", "Thanks for watching", caption credits, decoder loops) and table talk. Use when asked to summarize, recap, chronicle or write up a session, to "tell the story" of session N, to list what the players need to do before next session, to clean a transcript of hallucinations, or to check a written summary's quotes. Works with any LLM.
+description: Write a high-fantasy, story-style summary of a recorded ScribBot game session in a fixed section order (high level summary, characters with class/level/player, named NPCs in a table, objectives completed, the story, battles told without damage numbers, quotes, items) plus a brief summary of the table discussion (rulings, agreements, follow-ups) for the players and GM, from its transcript, Foundry chat log and timeline, after removing Whisper hallucinations ("Thank you", "Thanks for watching", caption credits, decoder loops) and table talk. Use when asked to summarize, recap, chronicle or write up a session, to "tell the story" of session N, to note what was agreed or promised at the table, to clean a transcript of hallucinations, or to check a written summary's quotes. Works with any LLM.
 ---
 
 # Summarize a ScribBot session as a story
 
-Two stdlib Python scripts do the parts a model is bad at, and one prompt does the part a model is good at. A shared `layout.py` holds the fixed section order, the 800-character summary limit and the story template, so every story comes out in the same shape. Any LLM can be the writer: you, another agent, or a chat model the user pastes into.
+Two stdlib Python scripts do the parts a model is bad at, and one prompt does the part a model is good at. The skill's **`template.md`** is the story skeleton: its headings, in order, are the fixed sections, and each `<note>` says what goes there. A shared `layout.py` reads it and holds the 800-character summary limit and the table columns, so every story comes out in the same shape. Any LLM can be the writer: you, another agent, or a chat model the user pastes into.
 
 1. `prepare.py` reads the session's outputs and writes an **evidence pack**. It drops Whisper hallucinations with a stated reason for each, tags table-talk, damage and item hints, merges Foundry rolls and combats, and numbers every line (`L0123`).
-2. The model follows **`PROMPT.md`** on the pack and fills in `template.md` as `summary.story.md`. The sections always come in this order: **High level summary** (≤ 800 characters), **Characters in Session** (Character | Class(es) | Level | Player, pre-filled from Foundry), **NPCs in Session**, **Objectives Completed**, The story, Major events, Battles, Iconic items and loot, Memorable quotes, Deeds of the party, Loose threads. Then, kept apart from the story, **At the table** (rulings, table agreements, tech problems, absences, with no private life) and **Action items** (`- [ ] **Owner:** task [Lxxxx]`, or "None this session."). The rules that shape it:
-   - **High fantasy voice.** Told as a bard would tell it, with no engineering, software or game-mechanics wording ("triggered", "deployed", "buffed", "aggro"). `--style sci-fi` allows technical language for a science-fiction campaign.
+2. The model follows **`PROMPT.md`** on the pack and fills in `summary.story.md`, which `prepare.py` starts from `template.md`. The sections always come in this order: **High level summary** (≤ 800 characters), **Characters in Session** (Character | Class(es) | Level | Player, pre-filled from Foundry), **NPCs in Session** (NPC | Race | Class(es) | Level | Part in the session, named NPCs only; monsters are Foes in Battles), **Objectives Completed**, The story, Major events, Battles, Iconic items and loot, Memorable quotes, Deeds of the party, Loose threads. Then, kept apart from the story, **At the table** (rulings, table agreements, follow-ups someone promised, tech problems, absences, with no private life) and **Chronicler's notes**. The rules that shape it:
+   - **High fantasy voice, in modern English.** Vivid but not archaic, with no engineering, software or game-mechanics wording ("triggered", "deployed", "buffed", "aggro"). `--style sci-fi` allows technical language for a science-fiction campaign.
+   - **The game system's own names.** `prepare.py` puts the Foundry game system (sent with the chat log by module 0.5.0+, else inferred from the chat log's `systems/<id>/` and compendium links) and every spell and ability card Foundry posted into the pack's "Style" section. Spells and abilities are called by those names, as proper nouns (Implosion, Power Word Blind, Ice Storm), never paraphrased ("a folding spell", "a word of blindness"); their numbers stay out.
+   - **A short story, not a length limit.** "The story" is one continuous tale with no subheadings, as long as the session needs, from two hours to ten. It is told third-person omniscient, in the past tense, one beat per paragraph, with scene changes carried in the prose (PROMPT.md, "Readable prose").
+   - **Dialogue vs. described action.** Words a character speaks aloud are quoted as dialogue (Sparrow said, “Enjoy the view, boys!”). What a player *describes* their character doing or feeling ("I grit as my body…") is retold as narration, never quoted.
+   - **No line IDs in the document.** `[L0123]` is for the writer to find lines in the pack. `verify.py` finds each quote's source on its own and prints it.
    - **No damage numbers.** Fights are told thematically, true to each character and what they've done in the session, never "dealt 61 damage" or "rolled a 20".
    - **Off-topic talk and people are left out of every section**: other games, news, gossip, and anyone not at the table.
    - **In character → character name; out of character → player name.** Role-played speech and actions belong to the character. Rules talk, tech problems, absences and to-dos belong to the player, named by the pack's "Player (out of character)" column (the GM is "the GM").
-   - **The story side never mentions the players.** Player names, "the players" and "the GM" appear only in the Player column of "Characters in Session" and in "At the table", "Action items" and "Chronicler's notes".
-3. `verify.py` checks the result. Every section must be present exactly once and in order, the high level summary must fit in 800 characters, the character table must match Foundry, NPCs and objectives can't be empty, quotes must be verbatim and must not come from dropped lines, cited IDs must exist, each action item needs an owner, and a fantasy story fails on engineering or game-mechanics words outside quotes. The story side may contain no real names and no damage, hit-point or dice numbers. Names of people not at the table fail anywhere. Mentions of players or the GM on the story side, and private life in "At the table", get a warning. Fix and re-run until it prints `PASS`.
+   - **The story side never mentions the players.** Player names, "the players" and "the GM" appear only in the Player column of "Characters in Session" and in "At the table" and "Chronicler's notes".
+3. `verify.py` checks the result. Every section must be present exactly once and in order, the high level summary must fit in 800 characters, the character table must match Foundry, the NPC table must have the right columns, list no player character and match any Foundry sheet, objectives can't be empty, quotes must be verbatim and must not come from dropped lines, the document may contain no line IDs, "The story" may have no subheadings, and a fantasy story fails on engineering or game-mechanics words outside quotes. The story side may contain no real names and no damage, hit-point or dice numbers. Names of people not at the table fail anywhere. Mentions of players or the GM on the story side, private life in "At the table", and an NPC row named only by creature kind or role ("Duergar Taskmaster") get a warning. Fix and re-run until it prints `PASS`.
 
 Paths below are relative to the repo root. The skill lives in `.claude/skills/summarize-session/`.
 
@@ -58,28 +62,28 @@ Output goes to `data/sessions/<id>/story/` (git-ignored):
 | `pack.md` | The whole session for the model, about 12k tokens for 55 minutes |
 | `chunks/NN.md` | The same stream in self-contained parts, for small-context models |
 | `noise.md` | Every dropped line and why. Rescue a line only if the story needs it |
-| `template.md` | The story skeleton: every heading in order, the character table filled in. Start `summary.story.md` from it |
+| `summary.story.md` | The story to write: the skill's `template.md` with the byline, the Foundry character table and the Deeds rows filled in. Created only when it doesn't exist, so re-running `prepare.py` never overwrites a story. To start over, rename or delete it and re-run |
 | `lines.json` | Input for `verify.py` (also holds the Foundry sheet details used, under `actorDetails`) |
-| `prompt-full.md` | `PROMPT.md`, `pack.md` and `template.md` in one file, to paste into any chat model |
+| `prompt-full.md` | `PROMPT.md`, `pack.md` and the filled-in template in one file, to paste into any chat model |
 
 Then write the story:
 
 1. Read `.claude/skills/summarize-session/PROMPT.md` and `data/sessions/<id>/story/pack.md` in full.
-2. Copy `data/sessions/<id>/story/template.md` to `summary.story.md` and fill in every section. Keep the headings and their order exactly as they are.
+2. Fill in every section of `data/sessions/<id>/story/summary.story.md`, replacing each `<note>`. Keep the headings and their order exactly as they are.
 3. Verify it:
 
 ```sh
 python .claude/skills/summarize-session/verify.py data/sessions/2026-11-01-6ae0bcc6/story/summary.story.md
 ```
 
-The command exits 0 with `PASS`. Each `FAIL` names the quote or ID to fix. `WARN` lines (a quote with no ID, a cite pointing a few lines off) are worth fixing but don't fail the run.
+The command exits 0 with `PASS`. It lists the source line of every verified quote, so a reviewer can check them against the pack. Each `FAIL` names what to fix. `WARN` lines (a quote that reads like a described action, a quote from a mechanics line, an overlong paragraph) are worth fixing but don't fail the run.
 
 **Interrupted game recorded as two sessions** (bot crash, then a new `/scrib start`): pass both, e.g. `prepare.py 12 13` once #13 has stopped (tested on #10 and #11). They're stitched in time order into one story. It inserts a `[RECORDING RESUMED …]` marker and de-duplicates the chat logs, which overlap.
 
 ## Other LLMs
 
 - **Big context (≥ 32k tokens):** give the model `prompt-full.md` as the message. Save its reply as `summary.story.md` and run `verify.py`.
-- **Small context (8k):** run `prepare.py … --chunk-minutes 15`, which makes parts of about 3k tokens. Send `PROMPT.md` plus one `chunks/NN.md` at a time and ask for the "Part notes" format at the end of `PROMPT.md`. Then send all the part notes and ask for the final story.
+- **Small context (8k):** run `prepare.py … --chunk-minutes 15`, which makes parts of about 3k tokens. Send `PROMPT.md` plus one `chunks/NN.md` at a time and ask for the "Part notes" format at the end of `PROMPT.md`. Then send all the part notes with the filled-in template from the end of `prompt-full.md` and ask for the final story.
 - Pasting into a hosted model sends the transcript to that provider. Get the table's consent, as the README requires for `/scrib summarize`. A local model (Ollama at `OPENAI_BASE_URL`) keeps it on the machine.
 - This doesn't replace the bot's `/scrib summarize` (which writes `summary.json` and imports it into Foundry). The story is a separate file. Paste it into a Foundry journal by hand if wanted.
 
@@ -97,7 +101,7 @@ Measured on session #12 (720 lines): 80 lines dropped as hallucinations and 16 a
 | Another script when the language is English | "K нажми и нажми на колокольчик!" |
 | Filler and laughter | "Um", "Mm-hmm", "Ha, ha, ha" |
 
-It **trims rather than drops** when real speech carries an outro ("…a drop off, and Alif, as always, thanks for watching" keeps the narration and is tagged `boilerplate-trimmed`). It **tags** (the model decides) `noise?`, `timing?`, `repeated xN?`, `low-confidence`, `ooc?:names a player`, `ooc?:real world`, `ooc?:mic check`, `mech`, `dmg`, `item?`, `todo?` (a follow-up, fix, promise or scheduling, which feeds the action items) and `ruling?` (a rules question or ruling, which feeds "At the table").
+It **trims rather than drops** when real speech carries an outro ("…a drop off, and Alif, as always, thanks for watching" keeps the narration and is tagged `boilerplate-trimmed`). It **tags** (the model decides) `noise?`, `timing?`, `repeated xN?`, `low-confidence`, `ooc?:names a player`, `ooc?:real world`, `ooc?:mic check`, `mech`, `dmg`, `item?`, `todo?` (a follow-up, fix, promise or scheduling, which feeds "At the table") and `ruling?` (a rules question or ruling, which feeds "At the table").
 
 ## Character and NPC details from Foundry
 
@@ -129,14 +133,22 @@ If `prepare.py` warns `no class/level from Foundry for …`, or the details tabl
 
 | Symptom | Fix |
 |---|---|
-| `FAIL sections out of order` / `unexpected section` | Start again from `template.md`. The headings and their order are fixed in `layout.py`; change them there, not in a story |
+| `FAIL sections out of order` / `unexpected section` | Restore the headings from the skill's `template.md`. The headings and their order are fixed in the skill's `template.md`; change them there, not in a story |
 | `FAIL High level summary is N characters` | Cut it to 800 or fewer, spaces included. Detail belongs in "The story" |
 | `FAIL engineering or game-mechanics wording` | Retell it in the world's words ("the ward awoke", not "the trap triggered"). For a sci-fi campaign, run `prepare.py … --style sci-fi` |
-| `FAIL Characters in Session: … Foundry says …` | Copy the row from `template.md`. If Foundry is wrong, fix the sheet, let it re-sync, and re-run `prepare.py` |
+| `FAIL Characters in Session: … Foundry says …` | Copy the row from the pack's "Characters in Session" table. If Foundry is wrong, fix the sheet, let it re-sync, and re-run `prepare.py` |
 | `FAIL quote matches a line dropped as noise` | The quote is a hallucination (often "Thank you for watching"). Remove it, or rescue the line from `noise.md` only if it is clearly real |
 | `FAIL quote …` for words you quoted in "Chronicler's notes" | That section is exempt from quote checks; check the heading is exactly `## Chronicler's notes` |
 | `Session 13 (…) is still recording` | Expected. Wait for `/scrib stop` |
 | `… has no transcript yet. Run /scrib process first.` | No `transcript.json` and no `transcript.partial.jsonl`: the clips were never transcribed |
 | `FAIL game numbers in the story sections` | Rewrite the moment without the number ("the bolt tore through its wing", not "18 damage"). Quotes with numbers in them don't belong in the story either |
-| `FAIL real name in the story sections` for a player | That line is out of character: move it to "At the table" or "Action items", or write it as the character |
+| `FAIL N line ID(s) in the document` | Delete every `[Lxxxx]`. Quotes are checked without them |
+| `FAIL The story is one continuous tale: remove its subheadings` | Drop the `###` lines and carry the scene change in a transition sentence |
+| `FAIL NPCs in Session needs a table` | Use the table from the skill's `template.md`: NPC, Race, Class(es), Level, Part in the session. Write "None this session." if no named NPC appeared |
+| `WARN NPCs in Session: '…' reads as a kind of creature or a role` | It's a monster or a nameless extra. Delete the row and make sure it's in the Foes of its fight in "Battles" |
+| `FAIL NPCs in Session: … Foundry says …` | Copy Race, Class(es) and Level from the pack's NPC details table |
+| `WARN quote reads like a player describing an action` | Take the quotation marks off and retell it as narration: “I grit as my body…” becomes "Sparrow gritted her teeth…" |
+| `WARN Foundry shows <spell> was cast, but the story never names it` | Name the spell where it happens ("the beholder turned Implosion on her"), instead of a paraphrase. Ignore it if the spell doesn't belong in the tale |
+| `WARN The story: a N-word paragraph` | It holds more than one beat. Split it where the action turns |
+| `FAIL real name in the story sections` for a player | That line is out of character: move it to "At the table", or write it as the character |
 | A real name is in the story but `verify.py` passes | `prepare.py` didn't spot the nickname. Re-run it with `--nickname "<Nick>=<character or absent>"`, then run `verify.py` again. A one-off check also works: `verify.py … --real-name <Nick>` |

@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 965" width="1000" height="965" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1080" width="1000" height="1080" role="img" aria-labelledby="title desc">
   <title id="title">Recording session sequence</title>
-  <desc id="desc">Messages between the players on Discord, the bot, the transcription worker, the Foundry module and the LLM provider from /scrib start to the journal import.</desc>
+  <desc id="desc">Messages between the players on Discord, the bot, the transcription worker, the Foundry module and the LLM provider from /scrib start to the journal import, including the roster syncs and the optional headless Foundry login.</desc>
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#424a53"/>
@@ -14,17 +14,19 @@
     .h { font-size: 13px; font-weight: 600; }
     .hs { font-size: 10.5px; fill: #57606a; }
     .m { font-size: 11px; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+    .opt { font-style: italic; fill: #57606a; }
     .code { font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 10.5px; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; }
     .fl { font-size: 10.5px; font-weight: 700; fill: #424a53; }
     .life { stroke: #8c959f; stroke-width: 1.2; stroke-dasharray: 5 4; }
     .msg { stroke: #424a53; stroke-width: 1.4; fill: none; marker-end: url(#arr); }
+    .omsg { stroke: #8c959f; stroke-width: 1.4; fill: none; stroke-dasharray: 2 3; marker-end: url(#arr); }
     .ret { stroke: #424a53; stroke-width: 1.3; fill: none; stroke-dasharray: 6 4; marker-end: url(#open); }
     .frame { fill: none; stroke: #8c959f; stroke-width: 1.2; }
     .tag { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; }
     .phase { font-size: 11px; font-weight: 700; fill: #6e7781; }
   </style>
 
-  <rect x="0" y="0" width="1000" height="965" fill="#ffffff"/>
+  <rect x="0" y="0" width="1000" height="1080" fill="#ffffff"/>
 
   <!-- Participants -->
   <rect x="15"  y="14" width="150" height="46" rx="7" fill="#eef0ff" stroke="#5865f2" stroke-width="1.3"/>
@@ -35,20 +37,20 @@
   <text x="300" y="50" text-anchor="middle" class="hs">Node.js</text>
   <rect x="425" y="14" width="150" height="46" rx="7" fill="#fff6e5" stroke="#bf8700" stroke-width="1.3"/>
   <text x="500" y="34" text-anchor="middle" class="h">Worker</text>
-  <text x="500" y="50" text-anchor="middle" class="hs">Python + Whistle</text>
+  <text x="500" y="50" text-anchor="middle" class="hs">Python · Whistle / Whisper</text>
   <rect x="625" y="14" width="150" height="46" rx="7" fill="#fdf0f0" stroke="#cf222e" stroke-width="1.3"/>
   <text x="700" y="34" text-anchor="middle" class="h">Foundry module</text>
-  <text x="700" y="50" text-anchor="middle" class="hs">GM's browser</text>
+  <text x="700" y="50" text-anchor="middle" class="hs">bridge user's client</text>
   <rect x="825" y="14" width="150" height="46" rx="7" fill="#f5f0fe" stroke="#8250df" stroke-width="1.3"/>
   <text x="900" y="34" text-anchor="middle" class="h">LLM provider</text>
   <text x="900" y="50" text-anchor="middle" class="hs">Claude / Grok / …</text>
 
   <!-- Lifelines -->
-  <line x1="90"  y1="60" x2="90"  y2="950" class="life"/>
-  <line x1="300" y1="60" x2="300" y2="950" class="life"/>
-  <line x1="500" y1="60" x2="500" y2="950" class="life"/>
-  <line x1="700" y1="60" x2="700" y2="950" class="life"/>
-  <line x1="900" y1="60" x2="900" y2="950" class="life"/>
+  <line x1="90"  y1="60" x2="90"  y2="1065" class="life"/>
+  <line x1="300" y1="60" x2="300" y2="1065" class="life"/>
+  <line x1="500" y1="60" x2="500" y2="1065" class="life"/>
+  <line x1="700" y1="60" x2="700" y2="1065" class="life"/>
+  <line x1="900" y1="60" x2="900" y2="1065" class="life"/>
 
   <!-- Start -->
   <text x="985" y="84" text-anchor="end" class="phase">START</text>
@@ -56,78 +58,87 @@
   <text x="195" y="86" text-anchor="middle" class="code">/scrib start</text>
   <path d="M300,120 H92" class="ret"/>
   <text x="195" y="114" text-anchor="middle" class="m">joins voice muted; recording notice</text>
-  <path d="M300,148 H698" class="msg"/>
-  <text x="500" y="142" text-anchor="middle" class="code">WS session.started</text>
+  <path d="M300,148 H698" class="omsg"/>
+  <text x="500" y="142" text-anchor="middle" class="m opt">headless only: log in as FOUNDRY_USER</text>
+  <path d="M300,176 H698" class="msg"/>
+  <text x="500" y="170" text-anchor="middle" class="code">WS session.started</text>
+  <path d="M700,204 H302" class="msg"/>
+  <text x="500" y="198" text-anchor="middle" class="code">POST /roster (users + actor details)</text>
+  <path d="M300,218 h34 v16 h-32" class="msg"/>
+  <text x="342" y="230" class="m">voice → character map; actors.json</text>
 
   <!-- Loop: speech bursts -->
-  <rect x="20" y="166" width="680" height="134" class="frame"/>
-  <rect x="20" y="166" width="158" height="18" class="tag"/>
-  <text x="28" y="179" class="fl">loop  each speech burst</text>
-  <path d="M90,200 H298" class="msg"/>
-  <text x="195" y="194" text-anchor="middle" class="m">voice (Opus, per speaker)</text>
-  <path d="M300,214 h34 v16 h-32" class="msg"/>
-  <text x="342" y="226" class="m">WAV clip + timeline.json</text>
-  <path d="M300,256 H498" class="msg"/>
-  <text x="400" y="250" text-anchor="middle" class="code">POST /clips/transcribe</text>
-  <path d="M500,268 h34 v16 h-32" class="msg"/>
-  <text x="542" y="280" class="m">Whistle → cache, delete WAV</text>
+  <rect x="20" y="250" width="680" height="134" class="frame"/>
+  <rect x="20" y="250" width="158" height="18" class="tag"/>
+  <text x="28" y="263" class="fl">loop  each speech burst</text>
+  <path d="M90,284 H298" class="msg"/>
+  <text x="195" y="278" text-anchor="middle" class="m">voice (Opus, per speaker)</text>
+  <path d="M300,298 h34 v16 h-32" class="msg"/>
+  <text x="342" y="310" class="m">WAV clip + timeline.segments.jsonl</text>
+  <path d="M300,340 H498" class="msg"/>
+  <text x="400" y="334" text-anchor="middle" class="code">POST /clips/transcribe</text>
+  <path d="M500,352 h34 v16 h-32" class="msg"/>
+  <text x="542" y="364" class="m">STT → cache, delete WAV</text>
 
   <!-- Stop -->
-  <text x="985" y="322" text-anchor="end" class="phase">STOP</text>
-  <path d="M90,330 H298" class="msg"/>
-  <text x="195" y="324" text-anchor="middle" class="code">/scrib stop</text>
-  <path d="M300,344 h34 v16 h-32" class="msg"/>
-  <text x="342" y="356" class="m">flush streams, finalize timeline</text>
-  <path d="M300,388 H698" class="msg"/>
-  <text x="500" y="382" text-anchor="middle" class="code">WS session.stopped</text>
-  <path d="M700,416 H302" class="msg"/>
-  <text x="500" y="410" text-anchor="middle" class="code">POST /sessions/:id/chatlog</text>
+  <text x="985" y="406" text-anchor="end" class="phase">STOP</text>
+  <path d="M90,414 H298" class="msg"/>
+  <text x="195" y="408" text-anchor="middle" class="code">/scrib stop</text>
+  <path d="M300,428 h34 v16 h-32" class="msg"/>
+  <text x="342" y="440" class="m">flush streams, finalize timeline.json</text>
+  <path d="M300,472 H698" class="msg"/>
+  <text x="500" y="466" text-anchor="middle" class="code">WS session.stopped</text>
+  <path d="M700,500 H302" class="msg"/>
+  <text x="500" y="494" text-anchor="middle" class="code">POST /roster (end-of-session details)</text>
+  <path d="M700,528 H302" class="msg"/>
+  <text x="500" y="522" text-anchor="middle" class="code">POST /sessions/:id/chatlog</text>
 
   <!-- Transcribe -->
-  <text x="985" y="440" text-anchor="end" class="phase">TRANSCRIBE</text>
-  <path d="M300,448 H498" class="msg"/>
-  <text x="400" y="442" text-anchor="middle" class="code">POST /jobs/transcribe</text>
-  <path d="M500,462 h34 v16 h-32" class="msg"/>
-  <text x="542" y="474" class="m">cache + leftover clips → transcript.json/.md</text>
+  <text x="985" y="552" text-anchor="end" class="phase">TRANSCRIBE</text>
+  <path d="M300,560 H498" class="msg"/>
+  <text x="400" y="554" text-anchor="middle" class="code">POST /jobs/transcribe</text>
+  <path d="M500,574 h34 v16 h-32" class="msg"/>
+  <text x="542" y="586" class="m">cache + leftover clips → transcript.json/.md</text>
 
-  <rect x="230" y="494" width="340" height="72" class="frame"/>
-  <rect x="230" y="494" width="168" height="18" class="tag"/>
-  <text x="238" y="507" class="fl">loop  every 1 s until done</text>
-  <path d="M300,528 H498" class="msg"/>
-  <text x="400" y="522" text-anchor="middle" class="code">GET /jobs/:id</text>
-  <path d="M500,554 H302" class="ret"/>
-  <text x="400" y="548" text-anchor="middle" class="m">status, progress</text>
+  <rect x="230" y="606" width="340" height="72" class="frame"/>
+  <rect x="230" y="606" width="168" height="18" class="tag"/>
+  <text x="238" y="619" class="fl">loop  every 1 s until done</text>
+  <path d="M300,640 H498" class="msg"/>
+  <text x="400" y="634" text-anchor="middle" class="code">GET /jobs/:id</text>
+  <path d="M500,666 H302" class="ret"/>
+  <text x="400" y="660" text-anchor="middle" class="m">status, progress</text>
 
-  <path d="M300,590 H92" class="ret"/>
-  <text x="195" y="584" text-anchor="middle" class="m">"Session N transcribed"</text>
+  <path d="M300,702 H92" class="ret"/>
+  <text x="195" y="696" text-anchor="middle" class="m">"Session N transcribed"</text>
 
   <!-- Summarize -->
-  <text x="985" y="606" text-anchor="end" class="phase">SUMMARIZE</text>
-  <rect x="230" y="612" width="745" height="78" class="frame"/>
-  <rect x="230" y="612" width="236" height="18" class="tag"/>
-  <text x="238" y="625" class="fl">loop  each ~25 min chunk (3 at once)</text>
-  <path d="M300,648 H898" class="msg"/>
-  <text x="600" y="642" text-anchor="middle" class="m">pass 1: chunk_notes (transcript + rolls, context, glossary)</text>
-  <path d="M900,676 H302" class="ret"/>
-  <text x="600" y="670" text-anchor="middle" class="m">ChunkNotes JSON</text>
+  <text x="985" y="718" text-anchor="end" class="phase">SUMMARIZE</text>
+  <text x="300" y="718" text-anchor="middle" class="m opt">headless: waits for the chat log first</text>
+  <rect x="230" y="728" width="745" height="78" class="frame"/>
+  <rect x="230" y="728" width="236" height="18" class="tag"/>
+  <text x="238" y="741" class="fl">loop  each ~25 min chunk (3 at once)</text>
+  <path d="M300,764 H898" class="msg"/>
+  <text x="600" y="758" text-anchor="middle" class="m">pass 1: chunk_notes (transcript + rolls, context, glossary)</text>
+  <path d="M900,792 H302" class="ret"/>
+  <text x="600" y="786" text-anchor="middle" class="m">ChunkNotes JSON</text>
 
-  <path d="M300,716 H898" class="msg"/>
-  <text x="600" y="710" text-anchor="middle" class="m">pass 2: session_summary (all notes, combat rounds)</text>
-  <path d="M900,744 H302" class="ret"/>
-  <text x="600" y="738" text-anchor="middle" class="m">Summary JSON</text>
-  <path d="M300,758 h34 v16 h-32" class="msg"/>
-  <text x="342" y="770" class="m">verify quotes; write summary.json/.md</text>
+  <path d="M300,832 H898" class="msg"/>
+  <text x="600" y="826" text-anchor="middle" class="m">pass 2: session_summary (all notes, combat rounds)</text>
+  <path d="M900,860 H302" class="ret"/>
+  <text x="600" y="854" text-anchor="middle" class="m">Summary JSON</text>
+  <path d="M300,874 h34 v16 h-32" class="msg"/>
+  <text x="342" y="886" class="m">verify quotes; write summary.json/.md</text>
 
   <!-- Deliver -->
-  <text x="985" y="796" text-anchor="end" class="phase">DELIVER</text>
-  <path d="M300,806 H92" class="msg"/>
-  <text x="195" y="800" text-anchor="middle" class="m">embed + summary.md</text>
-  <path d="M300,836 H698" class="msg"/>
-  <text x="500" y="830" text-anchor="middle" class="code">WS summary.ready</text>
-  <path d="M700,866 H302" class="msg"/>
-  <text x="500" y="860" text-anchor="middle" class="code">GET /sessions/:id/summary + /transcript</text>
-  <path d="M300,894 H698" class="ret"/>
-  <text x="500" y="888" text-anchor="middle" class="m">summary.json, transcript.json</text>
-  <path d="M700,908 h34 v16 h-32" class="msg"/>
-  <text x="742" y="920" class="m">create / replace JournalEntry</text>
+  <text x="985" y="912" text-anchor="end" class="phase">DELIVER</text>
+  <path d="M300,922 H92" class="msg"/>
+  <text x="195" y="916" text-anchor="middle" class="m">embed + summary.md</text>
+  <path d="M300,952 H698" class="msg"/>
+  <text x="500" y="946" text-anchor="middle" class="code">WS summary.ready</text>
+  <path d="M700,982 H302" class="msg"/>
+  <text x="500" y="976" text-anchor="middle" class="code">GET /sessions/:id/summary + /transcript</text>
+  <path d="M300,1010 H698" class="ret"/>
+  <text x="500" y="1004" text-anchor="middle" class="m">summary.json, transcript.json</text>
+  <path d="M700,1024 h34 v16 h-32" class="msg"/>
+  <text x="742" y="1036" class="m">create / replace JournalEntry</text>
 </svg>

@@ -117,11 +117,25 @@ describe("Foundry API", () => {
     // The headless Foundry client waits for this before letting the summary run.
     expect(events).toContainEqual({ type: "chatlog.received", sessionId: "s1" });
     expect(fs.existsSync(path.join(dataDir, "sessions", s.id, "chatlog.json"))).toBe(true);
+    // Older modules send no game system; it is stored as null.
+    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", s.id, "chatlog.json"), "utf8")).system).toBeNull();
 
     const summary = await fetch(`${base}/sessions/s1/summary`, { headers: auth });
     expect(summary.status).toBe(404);
     const info = await (await fetch(`${base}/sessions/s1`, { headers: auth })).json();
     expect(info).toMatchObject({ number: 1, status: "recording", hasChatlog: true, hasSummary: false });
+  });
+
+  it("keeps the game system sent with a chat log", async () => {
+    const s = { id: "s1" }; // the session from the previous test; a newer one would change "latest" for later tests
+    const system = { id: "pf1", title: "Pathfinder 1", version: "11.8" };
+    const res = await fetch(`${base}/sessions/${s.id}/chatlog`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ world: "w", system, messages: [], combats: [] }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", s.id, "chatlog.json"), "utf8")).system).toEqual(system);
   });
 
   it("serves the dashboard page without the token", async () => {

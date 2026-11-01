@@ -67,11 +67,11 @@ describe("mergeSessions", () => {
     const t0 = Date.parse("2026-10-31T18:00:00.000Z");
     const a = makeSession("2026-10-31T18:00:00.000Z", {
       endedAt: null, // crashed: A's end comes from its last clip
-      chat: { world: "w", exportedAt: t0, messages: [msg("m1", t0 + 5000), msg("m2", t0 + 50_000)], combats: [combat("c1", 2)] },
+      chat: { world: "w", system: null, exportedAt: t0, messages: [msg("m1", t0 + 5000), msg("m2", t0 + 50_000)], combats: [combat("c1", 2)] },
     });
     const b = makeSession("2026-10-31T18:10:00.000Z", {
       extra: true,
-      chat: { world: "w", exportedAt: t0 + 900_000, messages: [msg("m2", t0 + 50_000), msg("m3", t0 + 610_000)], combats: [combat("c1", 5), combat("c2", 1)] },
+      chat: { world: "w", system: null, exportedAt: t0 + 900_000, messages: [msg("m2", t0 + 50_000), msg("m3", t0 + 610_000)], combats: [combat("c1", 5), combat("c2", 1)] },
     });
 
     const r = merge.mergeSessions(store, a.row.id, b.row.id);

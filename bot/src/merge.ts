@@ -188,7 +188,7 @@ export function mergeSessions(
   let chatAdded = 0;
   let combatsAdded = 0;
   if (chatA || chatB) {
-    const base = chatA ?? { world: null, messages: [], combats: [] };
+    const base = chatA ?? { world: null, system: null, messages: [], combats: [] };
     const msgIds = new Set(base.messages.map((m) => m.id));
     const newMsgs = (chatB?.messages ?? []).filter((m) => !msgIds.has(m.id));
     const combatIds = new Set(base.combats.map((c) => c.id));
@@ -200,6 +200,7 @@ export function mergeSessions(
     const exportedAt = Math.max(chatA?.exportedAt ?? 0, chatB?.exportedAt ?? 0);
     chatlog = {
       world: base.world ?? chatB?.world ?? null,
+      system: base.system ?? chatB?.system ?? null,
       ...(exportedAt ? { exportedAt } : {}),
       messages: [...base.messages, ...newMsgs].sort((x, y) => x.timestamp - y.timestamp),
       combats: [...base.combats.map((c) => laterCombat.get(c.id) ?? c), ...newCombats],

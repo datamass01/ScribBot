@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 530" width="1000" height="530" role="img" aria-labelledby="title desc">
   <title id="title">ScribBot data pipeline</title>
-  <desc id="desc">Four stages: capture audio during play, transcribe clips with Whistle, summarize with a two-pass LLM, and deliver to Discord and Foundry.</desc>
+  <desc id="desc">Four stages: capture audio during play, transcribe clips with Whistle or Whisper, summarize with a two-pass LLM, and deliver to Discord and Foundry.</desc>
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
@@ -30,7 +30,7 @@
   <rect x="265" y="42" width="225" height="80" rx="8" class="b1"/>
   <text x="377" y="68" text-anchor="middle" class="h">Opus decoder (prism-media)</text>
   <text x="377" y="87" text-anchor="middle" class="s">→ 16 kHz mono PCM, 20 ms frames</text>
-  <text x="377" y="103" text-anchor="middle" class="s">Whistle's native rate: no resampling</text>
+  <text x="377" y="103" text-anchor="middle" class="s">the STT models' native rate</text>
 
   <rect x="510" y="42" width="225" height="80" rx="8" class="b1"/>
   <text x="622" y="68" text-anchor="middle" class="h">WavFileWriter</text>
@@ -38,9 +38,9 @@
   <text x="622" y="103" text-anchor="middle" class="s">bursts under 250 ms are discarded</text>
 
   <rect x="755" y="42" width="225" height="80" rx="8" class="b1"/>
-  <text x="867" y="68" text-anchor="middle" class="h">timeline.json</text>
-  <text x="867" y="87" text-anchor="middle" class="s">participants + segments (start/end ms)</text>
-  <text x="867" y="103" text-anchor="middle" class="s">atomic rewrite: .tmp → rename</text>
+  <text x="867" y="68" text-anchor="middle" class="h">timeline journal + snapshot</text>
+  <text x="867" y="87" text-anchor="middle" class="s">.segments.jsonl: each clip, fsynced</text>
+  <text x="867" y="103" text-anchor="middle" class="s">timeline.json: snapshot every ~30 s</text>
 
   <path d="M245,82 H263" class="ln"/>
   <path d="M490,82 H508" class="ln"/>
@@ -57,9 +57,9 @@
   <text x="132" y="241" text-anchor="middle" class="s">about 1 s after the speaker pauses</text>
 
   <rect x="265" y="180" width="225" height="80" rx="8" class="b2"/>
-  <text x="377" y="206" text-anchor="middle" class="h">Cactus Whistle (CPU)</text>
-  <text x="377" y="225" text-anchor="middle" class="s">keywords: characters, glossary,</text>
-  <text x="377" y="241" text-anchor="middle" class="s">Foundry actor names (max 150)</text>
+  <text x="377" y="206" text-anchor="middle" class="h">Whistle or Whisper</text>
+  <text x="377" y="225" text-anchor="middle" class="s">STT_ENGINE · keywords: characters,</text>
+  <text x="377" y="241" text-anchor="middle" class="s">glossary, Foundry actor names</text>
 
   <rect x="510" y="180" width="225" height="80" rx="8" class="b2"/>
   <text x="622" y="206" text-anchor="middle" class="h">transcript.partial.jsonl</text>
@@ -67,7 +67,7 @@
   <text x="622" y="241" text-anchor="middle" class="s">WAV deleted once its text is saved</text>
 
   <rect x="755" y="180" width="225" height="80" rx="8" class="b2"/>
-  <text x="867" y="206" text-anchor="middle" class="h">Session job at /scrib stop</text>
+  <text x="867" y="206" text-anchor="middle" class="h">Session job after /scrib stop</text>
   <text x="867" y="225" text-anchor="middle" class="s">POST /jobs/transcribe: cache + leftovers</text>
   <text x="867" y="241" text-anchor="middle" class="s">→ transcript.json + transcript.md</text>
 
@@ -127,7 +127,7 @@
 
   <rect x="346" y="450" width="306" height="62" rx="8" class="b4"/>
   <text x="499" y="475" text-anchor="middle" class="h">FoundryVTT journal</text>
-  <text x="499" y="494" text-anchor="middle" class="s">WS summary.ready → JournalEntry pages</text>
+  <text x="499" y="494" text-anchor="middle" class="s">summary.ready → bridge client → JournalEntry</text>
 
   <rect x="672" y="450" width="308" height="62" rx="8" class="b4"/>
   <text x="826" y="475" text-anchor="middle" class="h">API + dashboard</text>

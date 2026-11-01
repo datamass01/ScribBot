@@ -21,6 +21,7 @@ ScribBot records tabletop RPG sessions on Discord, transcribes them locally with
 | `shared/schemas/` | JSON Schemas **generated** from the Zod types; don't hand-edit |
 | `campaign/` | `glossary.md` (names fed to STT and the LLM) and `context.md` (story so far). Both are git-ignored and local only; change the committed `*.example.md` templates instead |
 | `docs/design.md` | Design document; diagrams are standalone SVGs in `docs/diagrams/` |
+| `.claude/skills/summarize-session/` | Story write-up skill (stdlib Python + prompt, any LLM); `template.md` fixes the sections, `verify.py` checks the result. Writes to `data/sessions/<id>/story/` |
 | `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/` |
 
 Configuration is a single `.env` at the repo root (template: `.env.example`), validated by Zod in `bot/src/config.ts` and read by `worker/scribworker/config.py`.

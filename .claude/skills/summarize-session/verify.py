@@ -8,7 +8,8 @@ the same story/ folder). Fails (exit 1) when:
   - a quote is not in the transcript (fewer than 80% of its words, in order, in one
     to three consecutive lines from the same speaker): invented or paraphrased;
   - a quote matches a line prepare.py dropped as a hallucination;
-  - a cited line ID does not exist or points at a dropped line;
+  - the document contains line IDs ([L0123]): they are for the writer, not the reader;
+  - "The story" has subheadings (it is one continuous tale);
   - a real person's name (Discord or Foundry user, nickname, or --real-name) appears
     in the story sections (everything above "## At the table");
   - the name of someone not at the table appears anywhere;
@@ -17,13 +18,18 @@ the same story/ folder). Fails (exit 1) when:
   - "High level summary" is over 800 characters;
   - "Characters in Session" lacks the Character | Class(es) | Level | Player table, a
     character, or disagrees with Foundry's class/level;
-  - "NPCs in Session" or "Objectives Completed" is empty;
+  - "NPCs in Session" lacks the NPC | Race | Class(es) | Level | Part in the session table
+    (or "None this session."), lists a player character, leaves a part empty, or disagrees
+    with an NPC's Foundry sheet; "Objectives Completed" is empty;
   - a high-fantasy story (the default style) uses engineering or game-mechanics words
     outside quotes;
-Warns when a quote has no line ID, a cite is far from where the quote really is,
-the story sections mention players or the GM, or a player character is missing
-from "Deeds of the party". Player names are allowed in "Characters in Session" (the
-Player column), "At the table", "Action items" and "Chronicler's notes".
+Warns when a quote comes from a line tagged dmg/mech/ooc?, is the GM's narration credited
+to a character, or reads like a player describing an action ("I grit as my body…")
+instead of speech; when a paragraph of "The story" runs past 180 words; when the story
+sections mention players or the GM; when an NPC row's name is only a creature kind or a
+role ("Duergar Taskmaster"); or when a player character is missing from "Deeds of the
+party". It prints the source line of every verified quote. Player names are allowed in
+"Characters in Session" (the Player column), "At the table" and "Chronicler's notes".
 Standard library only.
 """
 from __future__ import annotations
@@ -48,6 +54,11 @@ NUMBERS = re.compile(rf"\b{_N}[\s-]*(points?\s+of\s+)?(damage|dmg|hp|hit\s+point
                      rf"|\b(nat(ural)?|rolled(\s+an?)?)\s*{_N}\b"
                      r"|\b(AC|DC|touch|initiative)\s*(of\s+)?\d+\b|\b\d*d(4|6|8|10|12|20|100)\b|\bhit\s+points?\b|\b\d+\s+to\s+hit\b", re.I)
 # Out-of-character references that don't belong in the story sections.
+# A quote that is a player narrating their character ("I grit as my body…", "I cast…") rather
+# than the character speaking. A hint only: a character can say "I cast you out!" aloud.
+DESCRIBED = re.compile(r"^\W*I\s+(grit|manage|try|attempt|cast|attack|move|roll|kick|throw|swing|shoot|fire|"
+                       r"step|run|fly|use|grab|search|charge|dodge|duck|leap|jump|climb|sneak|hide)\b|\bmy body\b",
+                       re.I)
 META = re.compile(r"\b(players?|the GM|game ?master|dungeon master|the table)\b", re.I)
 
 
@@ -153,18 +164,56 @@ def main():
             if e != layout.UNKNOWN and g != e:
                 fails.append(f"Characters in Session: {want['character']} {col} is '{g}', Foundry says '{e}'")
 
+    # NPCs: a table of named NPCs, like the character roster. Generic monsters belong to "Battles".
     npcs = layout.section(story, "NPCs in Session")
-    if not re.search(r"^- \*\*[^*]+:\*\*\s+\S", npcs, re.M) and "none this session" not in npcs.lower():
-        fails.append('NPCs in Session: list "- **Name:** their part", or write "None this session."')
+    npc_head = re.search(r"^\|(.+)\|\s*$", npcs, re.M)
+    npc_cols = [c.strip().lower() for c in npc_head.group(1).split("|")] if npc_head else []
+    if not npc_head and "none this session" not in npcs.lower():
+        fails.append("NPCs in Session needs a table with columns: " + " | ".join(layout.NPC_COLUMNS)
+                     + ', or "None this session."')
+    elif npc_head and npc_cols != [c.lower() for c in layout.NPC_COLUMNS]:
+        fails.append("NPCs in Session table columns must be: " + " | ".join(layout.NPC_COLUMNS))
+    elif npc_head:
+        foundry = {a["name"].lower(): a for a in data.get("actorDetails", {}).get("npcs", [])}
+        races = {w for a in foundry.values() for w in re.findall(r"[a-z]+", (a.get("race") or "").lower())}
+        generic = layout.GENERIC_NAME_WORDS | races
+        party = {c.lower() for c in data.get("characters", [])}
+        for r in re.findall(r"^\|(.+)\|\s*$", npcs, re.M)[2:]:
+            cells = [c.strip() for c in r.split("|")]
+            if len(cells) != len(layout.NPC_COLUMNS):
+                fails.append(f"NPCs in Session: row needs {len(layout.NPC_COLUMNS)} cells: |{r[:60]}|")
+                continue
+            name = cells[0].strip("*")
+            words = re.findall(r"[a-z']+", name.lower())
+            if name.lower() in party:
+                fails.append(f"NPCs in Session: {name} is a player character; they belong in Characters in Session")
+            elif not words or all(w in generic for w in words):
+                warns.append(f"NPCs in Session: '{name}' reads as a kind of creature or a role, not a name; "
+                             f"list only named NPCs and leave monsters to the Foes in Battles")
+            if not cells[4] or cells[4].startswith("<"):
+                fails.append(f"NPCs in Session: {name} needs their part in the session")
+            a = foundry.get(name.lower())
+            if a:   # an NPC with a Foundry sheet: its race, class and level come from it
+                lvl = str(a["level"]) if a.get("classes") and a.get("level") is not None else layout.UNKNOWN
+                for col, e, g in (("Race", a.get("race") or layout.UNKNOWN, cells[1]),
+                                  ("Class(es)", layout.class_text(a.get("classes", [])), cells[2]),
+                                  ("Level", lvl, cells[3])):
+                    if e != layout.UNKNOWN and g != e:
+                        fails.append(f"NPCs in Session: {name} {col} is '{g}', Foundry says '{e}'")
     objectives = layout.section(story, "Objectives Completed")
     if not re.search(r"^- \S", objectives, re.M) and "none this session" not in objectives.lower():
         fails.append('Objectives Completed is empty: list what the party achieved, or write "None this session."')
 
-    for cid in sorted(set(re.findall(r"\bL\d{4}\b", story))):
-        if cid not in index:
-            fails.append(f"{cid}: cited but no such line")
-        elif lines[index[cid]]["dropped"]:
-            fails.append(f"{cid}: cited, but prepare.py dropped it as noise ({lines[index[cid]]['dropped']})")
+    # Notes from template.md are instructions to the writer, never content.
+    for m in re.finditer(r"<[A-Za-z0-9][^<>\n]{2,}>", story):
+        fails.append(f"template note left in the document, replace it: {m.group(0)[:70]}")
+
+    # Line IDs are for the writer and for checking, not for the reader.
+    ids = re.findall(r"\[?\bL\d{4}\b\]?", story)
+    if ids:
+        first = ", ".join(dict.fromkeys(i.strip("[]") for i in ids[:5]))
+        fails.append(f"{len(ids)} line ID(s) in the document (first: {first}); remove every [Lxxxx], "
+                     f"verify.py finds each quote's line on its own")
 
     notes = re.search(r"^##\s+Chronicler's notes\s*$", story, re.M | re.I)
     checked = story[:notes.start()] if notes else story  # the notes may quote noise on purpose
@@ -173,14 +222,16 @@ def main():
         q = m.group(1) or m.group(2)
         if len(tokens(q)) < 3:
             continue
-        tail = story[m.end():m.end() + 200].split("\n\n")[0]
-        if story[m.end():].startswith("\n"):
-            tail = story[m.end():m.end() + 200]   # block quote: cite is on the "—" line below
-        cite = re.search(r"\bL\d{4}\b", tail)
-        quotes.append((q, cite.group(0) if cite else None))
+        who = None
+        if story[m.end():].startswith("\n"):   # block quote: attribution is on the "—" line below
+            by = re.match(r"\s*>\s*—\s*([^,\[\n]+)", story[m.end():m.end() + 200])
+            who = by.group(1).strip() if by else None
+        quotes.append((q, who))
 
     ok = 0
-    for q, cite in quotes:
+    party = data.get("characters", [])
+    sources = []   # (line ID, speaker, quote) for the report
+    for q, who in quotes:
         qt = tokens(q)
         best, at = best_match(qt, windows)
         short = q if len(q) < 70 else q[:67] + "..."
@@ -192,10 +243,24 @@ def main():
                 fails.append(f"quote not in transcript ({best:.0%} match): “{short}”")
             continue
         ok += 1
-        if not cite:
-            warns.append(f"quote has no line ID; it is {lines[at]['id']}: “{short}”")
-        elif cite in index and abs(index[cite] - at) > 3:
-            warns.append(f"quote cites {cite} but is {lines[at]['id']}: “{short}”")
+        # The window can start a line or two before the quote: report the line it best matches.
+        pos = kept.index(at)
+        run = [k for k in kept[pos:pos + 3] if lines[k]["discordId"] == lines[at]["discordId"]]
+        at = max(run, key=lambda k: lcs(qt, tokens(lines[k]["text"])))
+        if (lines[at]["id"], short) not in {(s[0], s[2]) for s in sources}:
+            sources.append((lines[at]["id"], lines[at]["speaker"], short))
+        if DESCRIBED.search(q):
+            warns.append(f"quote reads like a player describing an action ({lines[at]['id']}), not speech: "
+                         f"retell it as narration in the third person: “{short}”")
+        # Tags are regex hints, so these warn rather than fail. Older lines.json files have no tags.
+        hints = [t for t in lines[at].get("tags", []) if t in ("dmg", "mech") or t.startswith("ooc?")]
+        if hints:
+            warns.append(f"quote is from a line tagged {', '.join(hints)} ({lines[at]['id']}): quote only in-character "
+                         f"lines with no mechanics in them: “{short}”")
+        if who and lines[at]["speaker"] == "GM" and (who.lower().startswith("of ")
+                                                     or any(who == c or who == c.split()[0] for c in party)):
+            warns.append(f"quote is the GM narrating ({lines[at]['id']}) but is attributed to {who}: "
+                         f"tell it in the story instead, or attribute it to the NPC speaking: “{short}”")
 
     # Story side: everything above "## At the table". It is told in character only.
     table_at = re.search(r"^##\s+At the table\s*$", story, re.M | re.I)
@@ -231,21 +296,31 @@ def main():
             fails.append(f"engineering or game-mechanics wording ('{m.group(0)}') in a high-fantasy tale; "
                          f"tell it as a bard would: {line_of(prose, m.start())}")
 
+    # Spells Foundry shows were cast should be named, not paraphrased ("a folding spell").
+    told = story_side.lower()
+    for name in data.get("spellsUsed") or []:
+        if not re.search(r"\b" + re.escape(name.lower()), told):
+            warns.append(f"Foundry shows {name} was cast, but the story never names it; "
+                         f"call it by its {((data.get('gameSystem') or {}).get('name')) or 'game system'} name where it happens")
+
     def section(name):
         return layout.section(story, name)
 
     table = section("At the table")
     for word in sorted({w.lower() for w in PRIVATE.findall(table) for w in ([w] if isinstance(w, str) else [w[0]])}):
         warns.append(f"At the table mentions private life ('{word}'): keep only what matters to the game")
-    actions = section("Action items")
-    items = [l.strip() for l in actions.splitlines() if l.strip().startswith("- ")]
-    if not items and "none this session" not in actions.lower():
-        fails.append('Action items is empty: list items or write "None this session."')
-    for it in items:
-        if not re.match(r"^- \[[ xX]\] \*\*[^*]+:\*\*\s+\S", it):
-            fails.append(f"action item needs '- [ ] **Owner:** task': {it[:80]}")
-        elif not re.search(r"\bL\d{4}\b", it):
-            warns.append(f"action item has no line ID: {it[:80]}")
+
+    tale = section("The story")
+    paras = [p.strip() for p in re.split(r"\n\s*\n", tale) if p.strip() and not p.strip().startswith("<")]
+    prose = [p for p in paras if not p.startswith("#")]
+    subheads = [p.splitlines()[0] for p in paras if p.startswith("#")]
+    if subheads:
+        fails.append(f"The story is one continuous tale: remove its subheadings ({subheads[0][:60]}); "
+                     f"carry scene changes in the prose")
+    for p in prose:
+        words = len(p.split())
+        if words > layout.PARAGRAPH_MAX_WORDS:
+            warns.append(f"The story: a {words}-word paragraph, split it by beat: {p[:60]}…")
 
     deeds = section("Deeds of the party")
     for c in data.get("characters", []):
@@ -253,7 +328,8 @@ def main():
             warns.append(f"player character missing from Deeds of the party: {c}")
 
     print(f"quotes     {ok} of {len(quotes)} verified")
-    print(f"citations  {len(set(re.findall(r'\bL\d{4}\b', story)))} distinct line IDs")
+    for lid, speaker, short in sources:
+        print(f"  {lid} {speaker}: “{short}”")
     for w in warns:
         print(f"WARN  {w}")
     for f in fails:

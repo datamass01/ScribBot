@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Living document, describes the code as of 2026-10-31 |
-| **Components** | `bot/` (Node.js), `worker/` (Python), `foundry-module/` (FoundryVTT), `shared/schemas/` |
+| **Status** | Living document, describes the code as of 2026-11-01 |
+| **Components** | `bot/` (Node.js), `worker/` (Python), `foundry-module/` (FoundryVTT), `shared/schemas/`, `monitor/` (optional), `.claude/skills/summarize-session/` (story write-ups) |
 | **Audience** | Contributors and anyone deploying ScribBot for their table |
 
 ## 1. Purpose
@@ -78,6 +78,7 @@ ScribBot turns a tabletop RPG session played over Discord into a written record 
 | Data contracts | JSON Schema files in `shared/schemas/`, generated from the Zod types with `npm run schemas` |
 | Monitoring UI | Single static page `bot/public/dashboard.html` (plain HTML/JS, polls `/status` every 3 s) |
 | LLM providers | Anthropic Claude (default `claude-opus-5-5`), xAI Grok (`grok-4`), or any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, OpenRouter) |
+| Story write-ups | Agent skill `.claude/skills/summarize-session/`: standard-library Python scripts plus a prompt, usable with any LLM (§8.1) |
 
 ## 3. Architecture
 
@@ -187,10 +188,11 @@ The status is stored in `sessions.status` and broadcast as `session.status` even
 | `transcript.partial.jsonl` | Worker | Per-clip STT cache (append-only) | Removed once `transcript.json` is written |
 | `transcript.json` / `.md` | Worker (rewritten by a merge) | Timestamped lines with speaker, character and GM flag | Kept |
 | `*.premerge-<n>` | Bot (`/scrib merge`) | A's timeline, transcript and chat log before session `n` was merged in | Kept |
-| `chatlog.json` | Bot (from Foundry) | Chat messages, rolls, combats | Kept |
+| `chatlog.json` | Bot (from Foundry) | Chat messages, rolls, combats, and the world's game system (`system`: Foundry's `game.system` id, title and version; module 0.5.0+, else `null`) | Kept |
 | `actors.json` | Bot (from Foundry) | Character and NPC details as they stood this session: name, type, race, sex/gender, age, height, weight, class(es) and levels, max HP. Seeded from `data/foundry-actors.json` at `/scrib start`, then replaced by the roster syncs Foundry sends at session start, during play and at stop | Kept |
 | `notes.json` | Bot | Pass 1 chunk notes | Kept |
 | `summary.json` / `.md` | Bot | Final summary plus `droppedQuotes`, provider and model | Kept |
+| `story/` | `summarize-session` skill (§8.1) | Evidence pack (`pack.md`, `chunks/`, `noise.md`, `lines.json`, `prompt-full.md`) and the story `summary.story.md` | Kept; `prepare.py` never overwrites an existing `summary.story.md` |
 
 All JSON contracts are defined in Zod (`bot/src/types.ts`, `bot/src/summarize/schema.ts`) and exported to `shared/schemas/*.schema.json`. The worker mirrors them in Pydantic (`worker/scribworker/models.py`).
 
@@ -224,6 +226,20 @@ GMs (by `/scrib gm` or Foundry's `isGM`) are labelled `GM (Name)`. The prompt te
 - **Quote verification.** Each quote is scored by the longest common subsequence of words against windows of 1 to 3 consecutive lines by the same speaker (Whistle splits sentences at pauses). Quotes scoring below 0.8 are moved to `droppedQuotes`. In-character Foundry chat is also a valid quote source.
 - **Campaign context.** `context.md` (setting, party, story so far) and `glossary.md` go into every prompt, so the model can correct misheard names.
 
+### 8.1 Story write-ups (`summarize-session` skill)
+
+Separate from `/scrib summarize` and from the bot process, `.claude/skills/summarize-session/` turns a finished session into a high-fantasy, story-style write-up with any LLM: an agent, a chat model the user pastes into, or a local model. It reads the session's files and `data/scribbot.db` but writes only to `data/sessions/<id>/story/` and `data/nicknames.json`; nothing is imported into Foundry.
+
+| Piece | Role |
+|---|---|
+| `prepare.py <number\|id\|latest> [more…]` | Builds the evidence pack. Drops Whisper hallucinations (stock outros, caption credits, decoder loops, wrong-script lines, filler) with a reason each in `noise.md`, trims outros off real speech, tags lines for the writer (`ooc?`, `mech`, `dmg`, `item?`, `todo?`, `ruling?`…), merges Foundry rolls and combats, and numbers every line (`L0123`). Several sessions are stitched in time order with a `[RECORDING RESUMED …]` marker. Unknown nicknames stop it with exit code 2 until confirmed (`--nickname`, kept in `data/nicknames.json`). Names the game system (from `chatlog.json`, else inferred from `systems/<id>/` paths and compendium links in the chat HTML) and lists every spell and ability card Foundry posted, in the pack's "Style" section. Starts `summary.story.md` from `template.md` only if it doesn't exist |
+| `template.md` | The story skeleton. Its `##` headings, in order, are the fixed sections; each `<note>` tells the writer what goes there |
+| `layout.py` | Reads `template.md` and holds the 800-character summary limit and the table columns, shared by `prepare.py` and `verify.py` |
+| `PROMPT.md` | Instructions for the writing model: modern (not archaic) fantasy voice, spells and abilities called by the game system's names, in-character vs. table talk, dialogue vs. described action, no damage numbers, no line IDs in the output |
+| `verify.py <summary.story.md>` | Checks sections and order, the summary length, the character table against Foundry, the NPC table (named NPCs only, matching any Foundry sheet), verbatim quotes not taken from dropped lines, every spell Foundry shows was cast named in the story (a warning), no line IDs, no subheadings in "The story", no real names, game numbers or (for the fantasy style) engineering wording on the story side. Prints `PASS` or each `FAIL`/`WARN` |
+
+Sections, always in this order: High level summary, Characters in Session (from Foundry), NPCs in Session, Objectives Completed, The story, Major events, Battles, Iconic items and loot, Memorable quotes, Deeds of the party, Loose threads, then At the table and Chronicler's notes. Only the last two (and the Player column) may name players or the GM. See the skill's `SKILL.md` for small-context models and the full hallucination rules.
+
 ## 9. Interfaces
 
 ### 9.1 Slash commands
@@ -248,6 +264,9 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 | `GET /status`, `GET /logs?after=<seq>` | Component health, warnings, sessions, the `pipeline` block, and log lines |
 | `GET /ws` | WebSocket: `hello`, `session.started`, `session.stopped`, `session.status`, `summary.ready`, `roster.request`, `roster.link` |
 | `POST /roster` | Foundry users, assigned characters, Discord ID flags and actor names, plus for each character and NPC actor its race, sex/gender, age, height, weight, classes and levels, and max HP (`foundry-module/scripts/actors.js`), saved to `data/foundry-actors.json`. The actors are also saved as the session's `actors.json`: the session named by an optional `sessionId` (the module sends one on `session.started` and `session.stopped`), else the one recording. Replies with `links`: how many `roster.link` corrections it sent |
+| `GET /sessions`, `GET /sessions/:id` | Session list and detail (`:id` may be `latest`) |
+| `POST /sessions/:id/chatlog` | Upload chat, roll and combat log, plus the game system (body limit 25 MB) |
+| `GET /sessions/:id/summary`, `/transcript` | Serve `summary.json` and `transcript.json` |
 
 **`roster.link`** carries `links: [{ foundryUserId, discordId, ifDiscordId? }]`: Discord IDs to store as Foundry users' "Discord ID" flag. It is sent after a `/scrib map`, `/scrib unmap` or `/scrib gm` that touches a Foundry user, and after every `POST /roster` for each mapped Foundry user whose reported flag is missing or different, so mappings made while Foundry was offline fill in by themselves. `/scrib map` wins over a different flag. A clear (`discordId: null`) only removes the flag if it still holds `ifDiscordId`. The GM mapping is written only when the world has exactly one GM user. Names are never matched. In Foundry only a GM may edit other users, so a player bridge relays the event to the active GM's client (`linkDiscord` over the module socket); `planDiscordLinks()` in `roles.js` decides which flags change, and the bridge re-syncs the roster afterwards.
 
@@ -258,9 +277,6 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 - `shutdown`: `no` while a recording is live; `wait` while a session is being transcribed or summarized or the worker queue isn't empty; otherwise `safe`.
 
 `/status` also reports each recording's voice `connection` (`connected`, `reconnecting`, `lost`), and `foundry.speakers`: how many of the latest session's speakers resolve to a character or the GM by any route, next to `foundry.rosterLinked` (users with the Foundry flag set).
-| `GET /sessions`, `GET /sessions/:id` | Session list and detail (`:id` may be `latest`) |
-| `POST /sessions/:id/chatlog` | Upload chat, roll and combat log (body limit 25 MB) |
-| `GET /sessions/:id/summary`, `/transcript` | Serve `summary.json` and `transcript.json` |
 
 ### 9.2a Optional watchdog (`monitor/scribmonitor.py`, `:7422`)
 

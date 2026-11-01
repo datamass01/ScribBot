@@ -10,8 +10,11 @@ writes everything into <out>/ (default data/sessions/<first-id>/story/):
   chunks/NN.md    the same stream cut into ~N-minute parts, each self-contained,
                   for models with small context windows
   noise.md        every line dropped as a likely transcription hallucination, with why
-  lines.json      kept lines (id, time, speaker, text) for verify.py
-  prompt-full.md  PROMPT.md + pack.md in one file, to paste into any chat model
+  lines.json      every line (id, time, speaker, text, dropped, tags) for verify.py
+  summary.story.md  the story to write, started from the skill's template.md with this
+                  session's byline, Foundry roster and Deeds rows filled in. Created only
+                  when it doesn't exist yet, so a story in progress is never overwritten
+  prompt-full.md  PROMPT.md + pack.md + template.md in one file, to paste into any chat model
 
 Standard library only (Python 3.10+). Never writes outside <out>/. Refuses a
 session that is still recording (the bot is writing its files).
@@ -437,6 +440,79 @@ def strip_html(s: str | None) -> str:
     for a, b in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
         s = s.replace(a, b)
     return re.sub(r"\s+", " ", s).strip()
+
+
+# Display names for common Foundry system ids; anything else is shown by its id or title.
+SYSTEM_NAMES = {
+    "pf1": "Pathfinder First Edition",
+    "pf2e": "Pathfinder Second Edition",
+    "D35E": "D&D 3.5",
+    "dnd5e": "Dungeons & Dragons Fifth Edition",
+    "a5e": "Level Up: Advanced 5th Edition",
+    "sfrpg": "Starfinder",
+    "sf2e": "Starfinder Second Edition",
+    "swade": "Savage Worlds Adventure Edition",
+    "wfrp4e": "Warhammer Fantasy Roleplay 4th Edition",
+    "CoC7": "Call of Cthulhu 7th Edition",
+    "shadowrun5e": "Shadowrun 5th Edition",
+    "cyberpunk-red-core": "Cyberpunk RED",
+    "ose": "Old-School Essentials",
+    "archmage": "13th Age",
+}
+
+
+def game_system(sessions: list[dict]) -> dict | None:
+    """The Foundry game system: as the module reported it (chatlog.json "system", module 0.5.0+),
+    else inferred from system asset paths and compendium links in older chat logs."""
+    for s in sessions:
+        sysinfo = (s["chat"] or {}).get("system")
+        if isinstance(sysinfo, dict) and sysinfo.get("id"):
+            return {**sysinfo, "source": "Foundry"}
+    seen: Counter = Counter()
+    for s in sessions:
+        for m in (s["chat"] or {}).get("messages", []):
+            html = m.get("content") or ""
+            seen.update(re.findall(r"\bsystems/([\w-]+)/", html))
+            seen.update(x for x in re.findall(r"Compendium\.([\w-]+)\.", html) if x != "world")
+    if not seen:
+        return None
+    return {"id": seen.most_common(1)[0][0], "title": None, "version": None, "source": "inferred from the chat log"}
+
+
+def system_name(sysinfo: dict | None) -> str | None:
+    if not sysinfo:
+        return None
+    return SYSTEM_NAMES.get(sysinfo["id"]) or sysinfo.get("title") or sysinfo["id"]
+
+
+ITEM_NAME = re.compile(r'class="[^"]*\bitem-name\b[^"]*"[^>]*>(.*?)</', re.S)
+CARD_TYPE = re.compile(r'card-header[^"]*\btype-([\w-]+)|data-item-type="([\w-]+)"')
+NOT_POWERS = {"attack", "weapon", "equipment", "loot", "container", "consumable-ammo"}
+
+
+def powers_used(sessions: list[dict]) -> list[dict]:
+    """Spells and special abilities whose item cards Foundry posted, in order of first use:
+    [{name, kind: spell|ability, users: [...]}]. Weapon attacks are left out."""
+    found: dict[str, dict] = {}
+    for s in sessions:
+        for m in (s["chat"] or {}).get("messages", []):
+            html = m.get("content") or ""
+            if m.get("whisper") or "item-card" not in html:
+                continue
+            nm = ITEM_NAME.search(html)
+            if not nm:
+                continue
+            name = re.sub(r"(\s*\([^)]*\))+\s*$", "", strip_html(nm.group(1))).strip()
+            tm = CARD_TYPE.search(html)
+            kind = (tm.group(1) or tm.group(2)).lower() if tm else ""
+            if not name or kind in NOT_POWERS:
+                continue
+            kind = "spell" if kind == "spell" or re.search(r"<strong>School</strong>", html) else "ability"
+            entry = found.setdefault(name.lower(), {"name": name, "kind": kind, "users": []})
+            who = m.get("alias") or m.get("userName") or "Unknown"
+            if who not in entry["users"]:
+                entry["users"].append(who)
+    return list(found.values())
 
 
 def foundry_events(sess: dict, offset: float):
@@ -935,6 +1011,33 @@ def main():
     facts = []
     for s in sessions:
         facts += foundry_events(s, (s["start_ms"] - t0) / 1000)[1]
+    sysinfo = game_system(sessions)
+    sysname = system_name(sysinfo)
+    powers = powers_used(sessions)
+    style_lines = [
+        ("High fantasy, told in clear, modern English: vivid, but no old-fashioned or archaic wording. "
+         "No engineering, software or game-mechanics language."
+         if args.style == "fantasy" else
+         "Science fiction. Technical and engineering language is fine where it fits the setting; game-mechanics language still is not."),
+        "",
+    ]
+    if sysname:
+        ver = f", version {sysinfo['version']}" if sysinfo.get("version") else ""
+        style_lines += [
+            f"**Game system: {sysname}** (Foundry system `{sysinfo['id']}`{ver}; {sysinfo['source']}).",
+            "",
+            f"Capture the flavor of {sysname}: call spells, class features, monster abilities and conditions by their "
+            f"{sysname} names, capitalized as proper nouns (\"the beholder cast Implosion\", \"Malar called down an Ice Storm\"), "
+            "never a vague paraphrase (\"a folding spell\", \"a storm of hail\"). A spell named in speech counts too. "
+            "Name the spell and show what it did; leave out its numbers (level, DC, damage, range).",
+            "",
+        ]
+    else:
+        style_lines += ["Game system: unknown (no Foundry chat log). Still call spells and abilities by the names the table uses for them.", ""]
+    if powers:
+        style_lines += ["Spells and abilities Foundry recorded (use these names):", ""]
+        style_lines += [f"- {p['name']} ({p['kind']}; {', '.join(p['users'])})" for p in powers]
+        style_lines.append("")
 
     reasons = Counter(re.sub(r"^\d+ words in [\d.]+s", "many words in a tiny clip", re.sub(r" ?\(.*?\)", "", l.drop)) for l in halluc)
     header = [
@@ -952,7 +1055,7 @@ def main():
         *([f"Real people mentioned who are not at the table: {', '.join(sorted(absent))}. Leave them, and whatever was said about them, out of every section.", ""] if absent else []),
         *([f"Names not yet confirmed (treat as real people): {', '.join(c['name'] for c in cands)}.", ""] if cands else []),
         "Names in the right four columns are real people. Never use them in the story sections. Out-of-character notes "
-        "(\"At the table\", \"Action items\") refer to a player by the \"Player (out of character)\" name. "
+        "(\"At the table\") refer to a player by the \"Player (out of character)\" name. "
         "People not at the table appear nowhere. A line tagged `names X = Y's player` "
         "is aimed at that player: often table talk, but when the GM says \"Becca, it hits you\" it means Y's character.",
         "",
@@ -979,10 +1082,7 @@ def main():
         "",
         "## Style",
         "",
-        ("High fantasy. Tell it as a bard or chronicler would: no engineering, software or game-mechanics language."
-         if args.style == "fantasy" else
-         "Science fiction. Technical and engineering language is fine where it fits the setting; game-mechanics language still is not."),
-        "",
+        *style_lines,
         "## Campaign context",
         "",
         camp["context.md"] or "(none)",
@@ -1007,7 +1107,7 @@ def main():
         "",
         "## How to read the stream",
         "",
-        "`L0123 [HH:MM:SS] Speaker: text  {tags}`. Cite lines by ID. `F` lines come from Foundry and are reliable. Tags are hints from cheap pattern matching, not verdicts:",
+        "`L0123 [HH:MM:SS] Speaker: text  {tags}`. Use the IDs to find and check lines, but never write them in the story. `F` lines come from Foundry and are reliable. Tags are hints from cheap pattern matching, not verdicts:",
         "`ooc?` maybe table talk · `mech` rules/dice talk · `dmg` damage, healing, downs · `item?` maybe an item · `thanks-real?`/`short` a silence phrase kept because context allows it · "
         "`todo?` maybe a follow-up (a fix, homework, scheduling, a promise) · `ruling?` a rules question or ruling · `noise?` a few capitalised words on a tiny clip, often a name Whisper pulled out of noise · `timing?` too many words for the clip, check it fits · `repeated xN?` same short phrase many times · `loop-collapsed` decoder loop shortened · `low-confidence` Whisper was unsure.",
         "",
@@ -1049,17 +1149,27 @@ def main():
         "playerNames": sorted(player_names),
         "offTableNames": sorted(real_names - player_names),
         "style": args.style,
+        "gameSystem": sysinfo and {**sysinfo, "name": sysname},
+        "spellsUsed": [p["name"] for p in powers if p["kind"] == "spell"],
         "characterRows": char_rows,
         "actorDetails": {"source": actors_source, "party": pc_details, "npcs": npc_details},
-        "lines": [{"id": l.id, "t": fmt(l.t), "speaker": l.speaker, "discordId": l.discord_id, "text": l.text, "dropped": l.drop}
+        "lines": [{"id": l.id, "t": fmt(l.t), "speaker": l.speaker, "discordId": l.discord_id, "text": l.text, "dropped": l.drop,
+                   "tags": l.tags}
                   for l in all_lines],
     }, ensure_ascii=False, indent=0), encoding="utf-8")
 
     date = datetime.fromtimestamp(t0 / 1000).astimezone().strftime("%Y-%m-%d")
     nums = " + ".join(str(s["row"].get("number", "?")) for s in sessions)
     byline = f"Session {nums} · {date} · about {int(span // 60)} minutes · " + ", ".join(r["character"] for r in char_rows)
-    tmpl = layout.template("Evocative episode title, 3-8 words", byline, char_rows)
-    (out / "template.md").write_text(tmpl, encoding="utf-8")
+    tmpl = layout.template(byline, char_rows)
+    # The story starts as the filled-in template. Never overwrite a story already being written.
+    story_path = out / "summary.story.md"
+    seeded = not story_path.exists()
+    if seeded:
+        story_path.write_text(tmpl, encoding="utf-8")
+    stale = out / "template.md"   # older runs wrote the skeleton here; the story file replaces it
+    if stale.exists():
+        stale.unlink()
 
     prompt = (SKILL_DIR / "PROMPT.md").read_text(encoding="utf-8")
     (out / "prompt-full.md").write_text(prompt + "\n\n---\n\n" + "\n".join(pack)
@@ -1074,7 +1184,11 @@ def main():
     print(f"foundry    {len(events) - len(markers)} events from chat logs")
     print(f"out        {out}")
     print(f"pack.md    {size // 1024} KB (~{size // 4000}k tokens); {len(chunks)} chunk(s) of ~{args.chunk_minutes} min in chunks/")
-    print(f"template   template.md ({args.style}); start summary.story.md from it")
+    if seeded:
+        print(f"story      summary.story.md started from template.md ({args.style}): fill in every <note>")
+    else:
+        print("story      summary.story.md already exists and was left as it is; rename or delete it "
+              "to start a fresh one from template.md")
     print(f"actors     {len(pc_details)} party, {len(npc_details)} NPC sheet(s) from {actors_source}")
     if no_sheet:
         print(f"WARN       no class/level from Foundry for {', '.join(no_sheet)}: update the ScribBot module in Foundry "
