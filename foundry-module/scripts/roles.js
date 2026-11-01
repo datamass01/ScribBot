@@ -44,3 +44,28 @@ export function journalTarget({ isGM, activeGMId, canCreate }) {
 export function shouldExportMessage(message, exporterIsGM) {
   return exporterIsGM || !message.whisper;
 }
+
+/**
+ * Which "Discord ID" flags to change for a `roster.link` event from the bot (`/scrib map` in
+ * Discord). The bot's mapping wins over a flag that differs; a clear (`discordId: null`) only
+ * removes the flag if it still holds `ifDiscordId`, so an unmap never erases someone else's link.
+ * Unknown users and malformed entries are skipped.
+ *
+ * @param {{ foundryUserId: string, discordId: string|null, ifDiscordId?: string }[]} links
+ * @param {{ id: string, discordId: string|null }[]} users current flags
+ * @returns {{ userId: string, discordId: string|null, previous: string|null }[]}
+ */
+export function planDiscordLinks(links, users) {
+  const current = new Map(users.map((u) => [u.id, u.discordId || null]));
+  const changes = new Map();
+  for (const l of Array.isArray(links) ? links : []) {
+    if (!l || typeof l.foundryUserId !== "string" || !current.has(l.foundryUserId)) continue;
+    const previous = current.get(l.foundryUserId);
+    if (typeof l.discordId === "string" && /^\d{5,25}$/.test(l.discordId)) {
+      if (previous !== l.discordId) changes.set(l.foundryUserId, { userId: l.foundryUserId, discordId: l.discordId, previous });
+    } else if (l.discordId === null && previous && previous === l.ifDiscordId) {
+      changes.set(l.foundryUserId, { userId: l.foundryUserId, discordId: null, previous });
+    }
+  }
+  return [...changes.values()];
+}

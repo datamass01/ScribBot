@@ -86,6 +86,77 @@
               "string",
               "null"
             ]
+          },
+          "classes": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "level": {
+                  "default": null,
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "level": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "race": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gender": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "age": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "height": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "weight": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hpMax": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
         "required": [
@@ -93,6 +164,9 @@
           "name"
         ]
       }
+    },
+    "sessionId": {
+      "type": "string"
     }
   },
   "required": [

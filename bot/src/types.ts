@@ -118,7 +118,26 @@ export const RosterPayloadSchema = z.object({
     }),
   ),
   actors: z
-    .array(z.object({ id: z.string(), name: z.string(), type: z.string().nullable().default(null) }))
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        type: z.string().nullable().default(null),
+        // Player characters and NPCs only, read from the sheet (foundry-module/scripts/actors.js).
+        /** Class(es) and total level. */
+        classes: z.array(z.object({ name: z.string(), level: z.number().nullable().default(null) })).default([]),
+        level: z.number().nullable().default(null),
+        /** Free text as written on the sheet (e.g. "5 ft. 10 in.", "180 lbs."). */
+        race: z.string().nullable().default(null),
+        gender: z.string().nullable().default(null),
+        age: z.string().nullable().default(null),
+        height: z.string().nullable().default(null),
+        weight: z.string().nullable().default(null),
+        hpMax: z.number().nullable().default(null),
+      }),
+    )
     .default([]),
+  /** Also save the actors as this session's copy (sent at session start and stop). */
+  sessionId: z.string().optional(),
 });
 export type RosterPayload = z.infer<typeof RosterPayloadSchema>;

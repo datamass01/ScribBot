@@ -10,9 +10,11 @@
  * GM-only work stays with the active GM's client:
  *  - logs combats as they happen (Foundry deletes a Combat when it ends)
  *  - creates the journal entry, relayed over Foundry's socket when the bridge is a player
+ *  - writes users' "Discord ID" flags from the bot's /scrib map links (roster.link), relayed the same way
  */
+import { actorDetails, changesDetails, hasDetails, isDetailItem } from "./actors.js";
 import { buildJournalPages } from "./journal.js";
-import { bridgeRole, journalTarget, shouldExportMessage } from "./roles.js";
+import { bridgeRole, journalTarget, planDiscordLinks, shouldExportMessage } from "./roles.js";
 
 const MODULE = "scribbot-bridge";
 const SOCKET = `module.${MODULE}`;
@@ -139,8 +141,13 @@ class Bridge {
     switch (msg.type) {
       case "session.started":
         ui.notifications.info(`ScribBot is recording session ${msg.number}.`);
+        // Fresh character and NPC details for this session (derived values such as max HP
+        // don't fire an update hook, so take them now).
+        await this.syncRoster(msg.sessionId);
         break;
       case "session.stopped":
+        // And again at the end, so level-ups and changes during play are in the session's copy.
+        await this.syncRoster(msg.sessionId).catch((e) => console.error("ScribBot |", e));
         await this.exportChatlog(msg.sessionId, msg.startedAt, msg.endedAt);
         break;
       case "summary.ready":
@@ -150,12 +157,32 @@ class Bridge {
       case "session.status":
         if (msg.status === "failed") ui.notifications.warn(`ScribBot: processing failed: ${msg.error}`);
         break;
+      case "roster.link":
+        await this.linkDiscordIds(msg.links);
+        break;
     }
+  }
+
+  /**
+   * Store the Discord IDs the bot knows from /scrib map as each user's "Discord ID" flag, so
+   * nobody has to type them in. Only a GM may edit other users: a player bridge relays this to
+   * the active GM's client. With no GM online it waits; the bot sends it again on the next roster sync.
+   */
+  async linkDiscordIds(links) {
+    let changed;
+    if (game.user.isGM) changed = await applyDiscordLinks(links);
+    else if (game.users.activeGM) changed = await relay.request("linkDiscord", { links });
+    else {
+      log("Discord ID links from /scrib map are waiting for a GM to log in");
+      return;
+    }
+    if (changed) await this.syncRoster();
   }
 
   // ---- roster
 
-  async syncRoster() {
+  /** @param {string} [sessionId] also save the actor details as that session's copy */
+  async syncRoster(sessionId) {
     const users = game.users.contents.map((u) => ({
       id: u.id,
       name: u.name,
@@ -163,8 +190,14 @@ class Bridge {
       discordId: u.getFlag(MODULE, "discordId") || null,
       character: u.character ? { id: u.character.id, name: u.character.name, img: u.character.img ?? null } : null,
     }));
-    const actors = game.actors.contents.map((a) => ({ id: a.id, name: a.name, type: a.type ?? null }));
-    const res = await this.api("/roster", { method: "POST", body: { world: game.world.id, users, actors } });
+    const actors = game.actors.contents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      type: a.type ?? null,
+      ...(hasDetails(a) ? actorDetails(a) : {}),
+    }));
+    const body = { world: game.world.id, users, actors, ...(sessionId ? { sessionId } : {}) };
+    const res = await this.api("/roster", { method: "POST", body });
     log(`roster synced: ${res.users} users, ${res.actors} actors`);
   }
 
@@ -255,6 +288,21 @@ Hooks.on("userConnected", (user, connected) => {
 // ---------------------------------------------------------------- journal creation
 
 /** Creates (or refreshes) the session's journal entry. Runs on a GM's client, or a player's allowed to create journals. */
+/** GM-only: write the "Discord ID" flags a roster.link asked for. Returns how many changed. */
+async function applyDiscordLinks(links) {
+  if (!game.user.isGM) throw new Error("only a GM can set other users' Discord IDs");
+  const users = game.users.contents.map((u) => ({ id: u.id, discordId: u.getFlag(MODULE, "discordId") ?? null }));
+  const changes = planDiscordLinks(links, users);
+  for (const c of changes) {
+    const user = game.users.get(c.userId);
+    if (!user) continue;
+    if (c.discordId) await user.setFlag(MODULE, "discordId", c.discordId);
+    else await user.unsetFlag(MODULE, "discordId");
+    log(`${user.name}: Discord ID ${c.previous ?? "(none)"} → ${c.discordId ?? "(none)"} (from /scrib map)`);
+  }
+  return changes.length;
+}
+
 async function createSessionJournal(file, transcript) {
   const folder = await ensureFolder();
   const pages = buildJournalPages(file, transcript, game.actors.contents);
@@ -331,9 +379,14 @@ const relay = {
     let data = null;
     let error = null;
     try {
-      if (msg.action !== "createJournal") throw new Error(`unknown action "${msg.action}"`);
-      if (!msg.data?.file?.summary || !msg.data.file.sessionId) throw new Error("malformed summary");
-      data = await createSessionJournal(msg.data.file, msg.data.transcript ?? null);
+      if (msg.action === "createJournal") {
+        if (!msg.data?.file?.summary || !msg.data.file.sessionId) throw new Error("malformed summary");
+        data = await createSessionJournal(msg.data.file, msg.data.transcript ?? null);
+      } else if (msg.action === "linkDiscord") {
+        data = await applyDiscordLinks(msg.data?.links);
+      } else {
+        throw new Error(`unknown action "${msg.action}"`);
+      }
     } catch (err) {
       error = err.message;
     }
@@ -393,13 +446,16 @@ Hooks.on("updateCombat", (combat, changes) => {
 Hooks.on("updateCombatant", (combatant) => combatant.parent && combatTracker.save(combatant.parent));
 Hooks.on("deleteCombat", (combat) => combatTracker.save(combat, { endedAt: Date.now() }));
 
-// Keep the roster fresh when characters are assigned or renamed.
+// Keep the roster fresh when characters are assigned, renamed, level up or their details change.
+// While recording, the bot also saves each sync as the session's copy of the actor details.
 const resync = foundry.utils.debounce(() => {
   if (role().act && bridge.socket?.readyState === WebSocket.OPEN) bridge.syncRoster().catch((e) => console.error(e));
 }, 2000);
 Hooks.on("updateUser", resync);
 Hooks.on("createActor", resync);
-Hooks.on("updateActor", (actor, changes) => "name" in changes && resync());
+Hooks.on("deleteActor", resync);
+Hooks.on("updateActor", (actor, changes) => changesDetails(changes) && resync());
+for (const hook of ["createItem", "updateItem", "deleteItem"]) Hooks.on(hook, (item) => isDetailItem(item) && resync());
 
 // ---------------------------------------------------------------- journal sidebar button
 

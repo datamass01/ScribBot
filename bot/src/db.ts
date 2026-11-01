@@ -172,6 +172,11 @@ export class Store {
     return this.db.prepare("SELECT * FROM mappings WHERE guild_id = ?").all(guildId) as MappingRow[];
   }
 
+  /** Every guild's mappings (the Foundry roster is one world shared by all of them). */
+  getAllMappings() {
+    return this.db.prepare("SELECT * FROM mappings ORDER BY guild_id, discord_id").all() as MappingRow[];
+  }
+
   upsertMapping(m: {
     guildId: string;
     discordId: string;

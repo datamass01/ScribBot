@@ -32,12 +32,26 @@ const EnvSchema = z.object({
   OPENAI_BASE_URL: optionalString,
   OPENAI_API_KEY: optionalString,
   SUMMARY_CHUNK_MINUTES: z.coerce.number().positive().default(25),
+  // Off by default: sessions stop at a saved transcript, and nothing is sent to an LLM until
+  // someone runs /scrib summarize.
+  AUTO_SUMMARIZE: z.preprocess(
+    (v) => (typeof v === "string" ? /^(true|1|yes|on)$/i.test(v.trim()) : v),
+    z.boolean().default(false),
+  ),
 
   DELETE_AUDIO_AFTER_TRANSCRIBE: z.preprocess(
     (v) => (typeof v === "string" ? !/^(false|0|no|off)$/i.test(v.trim()) : v),
     z.boolean().default(true),
   ),
   AUDIO_RETENTION_DAYS: z.coerce.number().min(0).default(14),
+
+  // After a crash or restart, rejoin the voice channel of a session that was recording less than
+  // this many minutes ago and keep recording it (0 = never resume).
+  RESUME_WINDOW_MINUTES: z.coerce.number().min(0).default(30),
+  // Warn in the text channel once when the worker is this many minutes behind (0 = never).
+  BACKLOG_WARN_MINUTES: z.coerce.number().min(0).default(10),
+  // Daily bot log files in DATA_DIR/logs, kept this many days (0 = no log files).
+  LOG_RETENTION_DAYS: z.coerce.number().min(0).default(14),
 });
 
 const env = EnvSchema.parse(process.env);
@@ -69,9 +83,15 @@ export const config = {
     openaiApiKey: env.OPENAI_API_KEY,
     chunkMinutes: env.SUMMARY_CHUNK_MINUTES,
   },
+  /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. */
+  autoSummarize: env.AUTO_SUMMARIZE,
   /** Transcribe each clip as it is recorded, then delete the WAV once its text is saved. */
   deleteAudioAfterTranscribe: env.DELETE_AUDIO_AFTER_TRANSCRIBE,
   audioRetentionDays: env.AUDIO_RETENTION_DAYS,
+  resumeWindowMinutes: env.RESUME_WINDOW_MINUTES,
+  backlogWarnMinutes: env.BACKLOG_WARN_MINUTES,
+  logDir: path.join(resolveFromRoot(env.DATA_DIR), "logs"),
+  logRetentionDays: env.LOG_RETENTION_DAYS,
 };
 
 export type Config = typeof config;

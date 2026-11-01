@@ -4,8 +4,10 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import { config } from "../config.js";
+import { writeFileAtomic } from "../fsutil.js";
 import type { RosterRow, SessionRow, Store } from "../db.js";
 import { bus } from "../events.js";
+import { linksToWrite } from "../links.js";
 import { logsSince } from "../monitor.js";
 import { foundryActorsFile, sessionPaths } from "../paths.js";
 import { ChatLogSchema, RosterPayloadSchema } from "../types.js";
@@ -99,10 +101,24 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       discord_id: u.discordId,
     }));
     store.replaceRoster(rows);
-    fs.writeFileSync(foundryActorsFile(), JSON.stringify(parsed.data.actors, null, 2));
+    const actorsJson = JSON.stringify(parsed.data.actors, null, 2);
+    writeFileAtomic(foundryActorsFile(), actorsJson);
+    // The session's own copy: the session named in the sync (start/stop), else the one recording.
+    const session = (parsed.data.sessionId ? findSession(parsed.data.sessionId) : null) ?? getRecording();
+    if (session) {
+      fs.mkdirSync(sessionPaths(session.id).dir, { recursive: true });
+      writeFileAtomic(sessionPaths(session.id).actors, actorsJson);
+    }
     foundry.lastRosterAt = new Date().toISOString();
     foundry.lastRosterWorld = parsed.data.world;
-    return { ok: true, users: rows.length, actors: parsed.data.actors.length };
+    // Fill in Foundry's "Discord ID" flags from /scrib map, including mappings made while Foundry
+    // was offline; this repeats on every sync until the flags match (05 C11).
+    const links = linksToWrite(store.getAllMappings(), rows);
+    if (links.length) {
+      console.log(`[api] asking Foundry to link ${links.length} user(s) to their Discord IDs (from /scrib map)`);
+      bus.emitEvent({ type: "roster.link", links });
+    }
+    return { ok: true, users: rows.length, actors: parsed.data.actors.length, links: links.length };
   });
 
   app.get("/sessions", async () => store.listSessions(50).map(publicSession));
@@ -118,7 +134,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     const parsed = ChatLogSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     fs.mkdirSync(sessionPaths(s.id).dir, { recursive: true });
-    fs.writeFileSync(sessionPaths(s.id).chatlog, JSON.stringify(parsed.data, null, 2));
+    writeFileAtomic(sessionPaths(s.id).chatlog, JSON.stringify(parsed.data, null, 2));
     foundry.lastChatlogAt = new Date().toISOString();
     return { ok: true, messages: parsed.data.messages.length, combats: parsed.data.combats.length };
   });

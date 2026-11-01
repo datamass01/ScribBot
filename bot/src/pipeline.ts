@@ -5,8 +5,9 @@ import { bus } from "./events.js";
 import { sessionPaths } from "./paths.js";
 import { summarizeSession } from "./summarize/summarize.js";
 import type { SummaryFile } from "./summarize/schema.js";
-import { TimelineSchema } from "./types.js";
+import { readTimeline } from "./timeline.js";
 import { config } from "./config.js";
+import { mergedInto } from "./merge.js";
 import { transcribe, transcribeClip } from "./worker-client.js";
 
 export interface PipelineHooks {
@@ -37,6 +38,9 @@ export async function processSession(
   opts: PipelineHooks & { retranscribe?: boolean; skipSummary?: boolean } = {},
 ) {
   if (running.has(sessionId)) throw new Error("This session is already being processed");
+  const merged = store.getSession(sessionId);
+  const into = merged ? mergedInto(merged) : null;
+  if (into != null) throw new Error(`This session was merged into session ${into}; process that one instead`);
   running.add(sessionId);
   const log = opts.log ?? console.log;
   const notify = async (text: string) => {
@@ -59,15 +63,26 @@ export async function processSession(
       throw new Error("This session's audio was already deleted, so it can't be re-transcribed");
     }
     if (opts.retranscribe || !fs.existsSync(paths.transcriptJson)) {
-      const timeline = TimelineSchema.parse(JSON.parse(fs.readFileSync(paths.timeline, "utf8")));
+      const timeline = readTimeline(paths.dir);
       if (!timeline.segments.length) throw new Error("No speech was recorded in this session");
       setStatus("transcribing");
       const names = timeline.participants.flatMap((p) => (p.character ? [p.character] : []));
       const started = Date.now();
       const deleteAudio = config.deleteAudioAfterTranscribe;
       progress.set(sessionId, 0);
+      let toldTable = false;
       await transcribe(paths.dir, sttKeywords(names), {
         deleteAudio,
+        clipCount: timeline.segments.length,
+        onWaiting: (msg) => {
+          log(`[pipeline] session ${session.number}: ${msg}`);
+          if (!toldTable) {
+            toldTable = true;
+            void notify(
+              `⏳ Session ${session.number}: ${msg}. Retrying for a few minutes; nothing is lost if it doesn't come back.`,
+            );
+          }
+        },
         onProgress: (f) => {
           progress.set(sessionId, f);
           log(`[pipeline] session ${session.number}: transcribing ${Math.round(f * 100)}%`);
@@ -86,6 +101,11 @@ export async function processSession(
 
     if (opts.skipSummary) {
       setStatus("complete");
+      await notify(
+        `📄 Session ${session.number}'s transcript is saved on the host at \`${paths.transcriptMd}\` ` +
+          `(Markdown any LLM can read; \`transcript.json\` beside it has the same lines as data). ` +
+          `No summary was written. Run \`/scrib summarize\` if you want one.`,
+      );
       return null;
     }
 
@@ -98,9 +118,16 @@ export async function processSession(
     return file;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`[pipeline] ${sessionId} failed: ${err instanceof Error ? err.stack : err}`);
+    const number = store.getSession(sessionId)?.number ?? "?";
+    log(`[pipeline] session ${number} (${sessionId}) failed: ${err instanceof Error ? err.stack : err}`);
     setStatus("failed", message);
-    await notify(`⚠️ Processing failed: ${message}\nFix the problem, then run \`/scrib process\` to resume.`);
+    const transcribed = fs.existsSync(sessionPaths(sessionId).transcriptJson);
+    const resume = transcribed && !opts.retranscribe ? `/scrib summarize session:${number}` : `/scrib process session:${number}`;
+    await notify(
+      `⚠️ Processing session ${number} failed: ${message}\n` +
+        `${transcribed ? "The transcript is saved." : "Every recorded clip is kept on disk."} ` +
+        `Fix the problem, then run \`${resume}\` to resume.`,
+    );
     throw err;
   } finally {
     running.delete(sessionId);

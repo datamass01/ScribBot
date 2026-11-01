@@ -54,7 +54,8 @@ ScribBot turns a tabletop RPG session played over Discord into a written record 
 | Concern | Technology | Version |
 |---|---|---|
 | Runtime | Python | ≥ 3.10 (tested on 3.13) |
-| Speech-to-text | Cactus Whistle (17 MB, Apache-2.0) through `cactus-needle` | 3.2.8 |
+| Speech-to-text (`STT_ENGINE=whistle`, default) | Cactus Whistle (17 MB, Apache-2.0) through `cactus-needle`, CPU | 3.2.8 |
+| Speech-to-text (`STT_ENGINE=whisper`, optional extra) | OpenAI Whisper (`WHISPER_MODEL`, default large-v3) through `faster-whisper` / CTranslate2, on CUDA (cuBLAS/cuDNN from the `nvidia-*` wheels, DLL folders added at load on Windows) or CPU (`WHISPER_DEVICE`) | 1.2.1 / 4.8.4 |
 | HTTP API | FastAPI on uvicorn | 0.161 / 0.54 |
 | Models and validation | Pydantic | 2.14 |
 | Audio arrays | NumPy | 2.5 |
@@ -95,16 +96,22 @@ ScribBot is three processes plus Foundry:
 
 | Module | Role |
 |---|---|
-| `commands.ts` | `/scrib` slash command handler. Owns the map of active recordings (one per guild) and posts results to Discord. |
-| `recorder.ts` | `SessionRecorder`: joins voice muted, subscribes to each speaker, and writes one WAV per speech burst plus `timeline.json`. |
+| `commands.ts` | `/scrib` slash command handler. Owns the map of active recordings (one per guild) and posts results to Discord. Also resumes interrupted recordings after a restart, stops them cleanly on shutdown, and warns about a worker backlog. |
+| `recorder.ts` | `SessionRecorder`: joins voice muted, subscribes to each speaker, writes one WAV per speech burst, journals each clip to `timeline.segments.jsonl` and snapshots `timeline.json`. Rejoins the channel by itself when the voice connection is lost. Never throws from a clip callback. |
+| `recovery.ts` | Startup plan for sessions the last process left mid-flight (resume, mark failed, or process), and the default session for `/scrib process`. |
+| `timeline.ts` | `readTimeline()`: the snapshot plus journal-only clips. |
+| `merge.ts` | Merges a continuation session into the one it continues (`/scrib merge`, `npm run merge`). |
+| `links.ts` | Which Foundry "Discord ID" flags to write from `/scrib map` (`roster.link`). |
+| `fsutil.ts` | Atomic writes (`.tmp` + rename) with retries on Windows sharing errors. |
+| `logfile.ts` | Daily log files in `DATA_DIR/logs`. |
 | `pipeline.ts` | `processSession()` runs transcription, then summarization, and updates session status. `makeLiveTranscriber()` sends clips during play. `purgeExpiredAudio()` enforces retention. |
-| `worker-client.ts` | HTTP client for the worker: fire-and-forget clip jobs, and session jobs polled every second. |
+| `worker-client.ts` | HTTP client for the worker: fire-and-forget clip jobs, and session jobs polled every second. Polls survive a worker restart: unreachable calls are retried for 5 minutes, and a job the worker no longer knows (404) is resubmitted. |
 | `summarize/` | Prompt building, chunking, provider adapters, quote verification and Markdown rendering. |
 | `participants.ts` | Resolves a Discord user to a Foundry character (see §7). |
 | `db.ts` | `Store`: SQLite access with versioned migrations. |
 | `events.ts` | In-process `EventEmitter` bus. Its events are forwarded to Foundry over the WebSocket. |
-| `api/server.ts`, `api/status.ts` | Fastify routes, token auth, CORS, and `/status` health aggregation with warnings. |
-| `monitor.ts` | Captures console output into a ring buffer for `/logs` and the dashboard. |
+| `api/server.ts`, `api/status.ts`, `api/pipeline.ts` | Fastify routes, token auth, CORS, `/status` health aggregation with warnings, and its `pipeline` block (queue, conversion, quality, alerts, shutdown advice). |
+| `monitor.ts` | Captures console output into a ring buffer for `/logs` and the dashboard, and into the daily log file. |
 | `campaign.ts` | Loads `campaign/glossary.md` and `context.md` and builds STT keyword lists. |
 
 ## 4. Session lifecycle
@@ -112,9 +119,9 @@ ScribBot is three processes plus Foundry:
 ![Recording session sequence](diagrams/session-sequence.svg)
 
 1. **Start.** `/scrib start` creates a session row (`recording`), joins the caller's voice channel muted and undeafened, posts a recording notice with the speaker-to-character map, and emits `session.started`.
-2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. `timeline.json` is rewritten atomically *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
+2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. The segment is appended (and fsynced) to `timeline.segments.jsonl` *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. `timeline.json` itself is a snapshot, written atomically on a new speaker, every 30 s while clips arrive, and at stop; readers (`readTimeline()` in the bot, `load_timeline()` in the worker, the watchdog) union the two by file. This keeps the I/O linear instead of rewriting a growing file per clip, and makes a failed rename (Windows `EPERM`/`EBUSY` while another process holds the file; retried with backoff) harmless. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
 3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The bridge user's Foundry module responds by uploading the chat, roll and combat log for the session's time window.
-4. **Transcribe.** The bot submits a session job. The worker reuses every cached clip result, transcribes any leftovers (for example, clips recorded while it was down), and writes `transcript.json` and `transcript.md`.
+4. **Transcribe.** The bot submits a session job. The worker reuses every cached clip result, transcribes any leftovers (for example, clips recorded while it was down), and writes `transcript.json` and `transcript.md`. The Markdown is self-contained for any LLM or reader: an "About this transcript" section (what it is, when, the speech-to-text model and language, the line format, that names may be misheard), a player-to-character table, then the timed lines. With `AUTO_SUMMARIZE=false` (the default) the session is marked `complete` here, the bot posts where the transcript is saved, and nothing is sent to an LLM; steps 5 and 6 run only on `/scrib summarize`.
 5. **Summarize.** Two LLM passes produce `summary.json`, and quotes are verified (see §8).
 6. **Deliver.** The bot posts an embed with `summary.md` attached, and emits `summary.ready`. If auto-import is enabled, the module fetches the summary and transcript and creates or replaces a `JournalEntry` in the configured folder.
 
@@ -122,7 +129,14 @@ ScribBot is three processes plus Foundry:
 
 ![Session status lifecycle](diagrams/session-states.svg)
 
-The status is stored in `sessions.status` and broadcast as `session.status` events. On startup, any session left in `recording`, `transcribing` or `summarizing` is marked `failed` with a hint to run `/scrib process`. Because each stage checks for its output file before running, resuming never redoes finished work.
+The status is stored in `sessions.status` and broadcast as `session.status` events. Because each stage checks for its output file before running, resuming never redoes finished work.
+
+**After a restart** (`planRestart()` in `recovery.ts`):
+- A session still `recording` whose timeline files changed less than `RESUME_WINDOW_MINUTES` ago is resumed once Discord is ready: the bot rejoins its voice channel and continues the **same session** on the same clock (`startedAt`, participants and segments loaded from disk), and posts the gap in the text channel. If the channel is gone or empty, or the resume fails, it is marked `failed` and the table is told.
+- Older `recording` sessions, and any left `transcribing` or `summarizing`, are marked `failed` with the exact `/scrib process session:N`, and the text channel is told.
+- A clean shutdown (SIGINT/SIGTERM/SIGBREAK) stops every recording first, bounded at 10 s: open clips are closed and `timeline.json` is finalized with `endedAt`. Those sessions are marked `failed` with a shutdown note and processed automatically on the next start.
+
+`unhandledRejection` is logged and ignored; `uncaughtException` triggers the same clean shutdown and exits non-zero, so the supervisor in `start.ps1` restarts the bot. `error` listeners on the Discord client, its shards and every voice connection keep network faults from ending the process.
 
 ## 5. Data pipeline
 
@@ -146,11 +160,14 @@ The status is stored in `sessions.status` and broadcast as `session.status` even
 
 | File | Writer | Contents | Lifetime |
 |---|---|---|---|
-| `timeline.json` | Bot | Participants, segments (`discordId`, `startMs`, `endMs`, `file`) | Kept |
+| `timeline.json` | Bot | Participants, segments (`discordId`, `startMs`, `endMs`, `file`). A snapshot: see the journal | Kept |
+| `timeline.segments.jsonl` | Bot | One segment per line, appended and fsynced as each clip is finished | Kept |
 | `audio/<user>/*.wav` | Bot | One clip per speech burst | Deleted on transcription, or `AUDIO_RETENTION_DAYS` after summary |
 | `transcript.partial.jsonl` | Worker | Per-clip STT cache (append-only) | Removed once `transcript.json` is written |
-| `transcript.json` / `.md` | Worker | Timestamped lines with speaker, character and GM flag | Kept |
+| `transcript.json` / `.md` | Worker (rewritten by a merge) | Timestamped lines with speaker, character and GM flag | Kept |
+| `*.premerge-<n>` | Bot (`/scrib merge`) | A's timeline, transcript and chat log before session `n` was merged in | Kept |
 | `chatlog.json` | Bot (from Foundry) | Chat messages, rolls, combats | Kept |
+| `actors.json` | Bot (from Foundry) | Character and NPC details as they stood this session: name, type, race, sex/gender, age, height, weight, class(es) and levels, max HP. Seeded from `data/foundry-actors.json` at `/scrib start`, then replaced by the roster syncs Foundry sends at session start, during play and at stop | Kept |
 | `notes.json` | Bot | Pass 1 chunk notes | Kept |
 | `summary.json` / `.md` | Bot | Final summary plus `droppedQuotes`, provider and model | Kept |
 
@@ -193,10 +210,11 @@ GMs (by `/scrib gm` or Foundry's `isGM`) are labelled `GM (Name)`. The prompt te
 | Command | Effect |
 |---|---|
 | `/scrib start` / `stop` | Begin or end recording in the caller's voice channel |
-| `/scrib map @user <character>`, `unmap`, `gm @user` | Manage speaker mappings (autocompletes from the Foundry roster) |
+| `/scrib map @user <character>`, `unmap`, `gm @user` | Manage speaker mappings (autocompletes from the Foundry roster). Picking a Foundry user also writes the Discord ID into Foundry (`roster.link`) |
 | `/scrib mappings`, `status`, `sessions` | Information |
-| `/scrib process [session] [retranscribe]` | Resume a failed session or redo it |
-| `/scrib summarize [session]` | Re-run only the summary |
+| `/scrib process [session] [retranscribe]` | Resume a failed session or redo it. Default: the latest failed session, else the latest one not recording; merged-away sessions are refused |
+| `/scrib summarize [session]` | Re-run only the summary. Refuses up front when the LLM setup would fail |
+| `/scrib merge a:<N> b:<M>` | Merge continuation session M into N (Manage Server); see §10 |
 
 ### 9.2 Bot HTTP API (`:7420`)
 
@@ -206,21 +224,48 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 |---|---|
 | `GET /health` | Liveness |
 | `GET /`, `/dashboard` | Monitoring page (the token is entered in the page) |
-| `GET /status`, `GET /logs?after=<seq>` | Component health, warnings, sessions, and log lines |
-| `GET /ws` | WebSocket: `hello`, `session.started`, `session.stopped`, `session.status`, `summary.ready`, `roster.request` |
-| `POST /roster` | Foundry users, assigned characters, Discord ID flags and actor names |
+| `GET /status`, `GET /logs?after=<seq>` | Component health, warnings, sessions, the `pipeline` block, and log lines |
+| `GET /ws` | WebSocket: `hello`, `session.started`, `session.stopped`, `session.status`, `summary.ready`, `roster.request`, `roster.link` |
+| `POST /roster` | Foundry users, assigned characters, Discord ID flags and actor names, plus for each character and NPC actor its race, sex/gender, age, height, weight, classes and levels, and max HP (`foundry-module/scripts/actors.js`), saved to `data/foundry-actors.json`. The actors are also saved as the session's `actors.json`: the session named by an optional `sessionId` (the module sends one on `session.started` and `session.stopped`), else the one recording. Replies with `links`: how many `roster.link` corrections it sent |
+
+**`roster.link`** carries `links: [{ foundryUserId, discordId, ifDiscordId? }]`: Discord IDs to store as Foundry users' "Discord ID" flag. It is sent after a `/scrib map`, `/scrib unmap` or `/scrib gm` that touches a Foundry user, and after every `POST /roster` for each mapped Foundry user whose reported flag is missing or different, so mappings made while Foundry was offline fill in by themselves. `/scrib map` wins over a different flag. A clear (`discordId: null`) only removes the flag if it still holds `ifDiscordId`. The GM mapping is written only when the world has exactly one GM user. Names are never matched. In Foundry only a GM may edit other users, so a player bridge relays the event to the active GM's client (`linkDiscord` over the module socket); `planDiscordLinks()` in `roles.js` decides which flags change, and the bridge re-syncs the roster afterwards.
+
+**`/status` → `pipeline`** (`api/pipeline.ts`, ported from the watchdog):
+- `queue`: the worker's queue depth, clips recorded but not yet converted, the conversion rate (the larger of clips added to session caches and the worker's live done/failed counters) and queue trend (per minute, over the last 5 minutes, after 20 s), the time to catch up, seconds since anything was converted, and `stalled` (work queued, nothing converted for 2 min).
+- `conversions`: for each session that is recording, transcribing, summarizing, processing, or failed with a worker cache changed in the last 12 h, clips converted vs recorded, read from the worker's `transcript.partial.jsonl`. Recorded clips come from the recorder's live count while it records (the pipeline never opens `timeline.json` then) and from `readTimeline()` otherwise. Each carries `quality`: clips whose every line is noise, suspected hallucinations (stock silence phrases, or ≥ 80% of words from the hotword list), and the most repeated texts.
+- `alerts`: worker stalled; no new clip in a live recording for 3 min; queue growing during a recording; live clips failed; a failed session the worker is still converting; ≥ 15% suspected hallucinations.
+- `shutdown`: `no` while a recording is live; `wait` while a session is being transcribed or summarized or the worker queue isn't empty; otherwise `safe`.
+
+`/status` also reports each recording's voice `connection` (`connected`, `reconnecting`, `lost`), and `foundry.speakers`: how many of the latest session's speakers resolve to a character or the GM by any route, next to `foundry.rosterLinked` (users with the Foundry flag set).
 | `GET /sessions`, `GET /sessions/:id` | Session list and detail (`:id` may be `latest`) |
 | `POST /sessions/:id/chatlog` | Upload chat, roll and combat log (body limit 25 MB) |
 | `GET /sessions/:id/summary`, `/transcript` | Serve `summary.json` and `transcript.json` |
+
+### 9.2a Optional watchdog (`monitor/scribmonitor.py`, `:7422`)
+
+A standalone, read-only Python program (standard library only) for the times the bot itself is down. The bot's dashboard on `:7420` is the one page to watch. While the bot answers, `/` and `/dashboard` redirect there. While it doesn't, they serve `monitor/offline.html`, which polls the watchdog's `/status`: the same shape as the bot's, built locally from the worker's `/health`, sessions and roster counts from `data/scribbot.db` (opened `mode=ro`), disk and `.env`, plus `monitor.pipeline` with the crash notice, worker queue and shutdown advice. `GET /monitor/recent-log` returns the last 40 lines of its log copy. The bot's `/status` is fetched with `API_TOKEN` from `.env`, so the token stays server-side. Requests whose `Host` isn't loopback are refused (DNS rebinding). Nothing depends on it.
+
+A background sampler thread polls every 5 s. It remembers what was recording, so a bot that disappears mid-session is called out (with a hint when `timeline.json.tmp` was left behind), and while the bot is online it copies new `/logs` entries to `MONITOR_LOG_DIR` (default `<DATA_DIR>/logs`) as `scribbot-YYYY-MM-DD.log`, keeping 14 days. `monitor-state.json` in that folder records the bot's start time and the last copied sequence number, so lines are copied once across restarts of either side. It counts clips with the segment journal too, and never opens `timeline.json` while the bot is recording.
+
+With the bot's own log files (S9), its crash fixes and the supervisor (S3), the watchdog's crash role mostly goes away; `docs/assessment/05` C3 decides whether to delete it after a few sessions without a crash.
 
 ### 9.3 Worker HTTP API (`:7421`)
 
 | Method and path | Purpose |
 |---|---|
-| `GET /health` | Model, device, language, queue depth, live clip counters |
+| `GET /health` | Model, device, language, queue depth, live clip counters, `paused`/`pausedReason`, `recovered` (clips re-queued at start), `current` (the clip being transcribed and for how long), `consecutiveFailures`, `modelReloads`, `stats` (last 5 min of model calls: clips/min, avg and p95 seconds, real-time factor, skipped by VAD, filler phrases dropped, % with usable text), Whisper `options` |
 | `POST /clips/transcribe` | Queue one clip (returns 202). Idempotent through the cache |
 | `POST /jobs/transcribe` | Build the full transcript for a session folder. Returns a job ID |
 | `GET /jobs/:id` | Job status and progress |
+| `POST /pause`, `POST /resume` | Hold or release the queue; the clip in progress finishes. A JSON body is required (`{}` or `{"reason": "…"}`), so a web page can't trigger them cross-site. Pausing doesn't survive a restart |
+
+**Short clips (Whisper).** Most clips are one to two seconds long, and Whisper always processes a 30-second window. Each clip is therefore screened with Silero VAD on the CPU first, and clips without speech never reach the model. The rest are decoded with `vad_filter`, temperatures `0.0/0.4/0.8` instead of six steps, `max_new_tokens` of 8 per second of audio plus 16 (at most 200), beam size `WHISPER_BEAM_SIZE`, and at most `WHISPER_MAX_HOTWORDS` hotwords. Clips under `WHISPER_HOTWORDS_MIN_SECONDS` get no hotwords at all, because on near-silence Whisper writes the hotword list back out. On session clips this took silent sub-second clips from 19–56 s to about 0.01 s, with identical text on real speech (see `docs/assessment/01`). After decoding, a clip whose whole text is a stock silence phrase ("thank you", "you", "bye"…) is dropped when it is shorter than `WHISPER_FILLER_MAX_SECONDS` **and** its mean word probability is below `WHISPER_FILLER_MAX_PROBABILITY` (01 R9).
+
+**Queue order.** One thread, a priority queue, FIFO within a priority: the startup model load, then live clips, then the end-of-session job of a session that had live clips in the last 30 minutes and clips re-queued after a restart, then everything else (for example `/scrib process` on an old session).
+
+**Model faults.** Errors that aren't about the file (missing, unreadable WAV) count as model failures. After `WORKER_RELOAD_AFTER_FAILURES` in a row the transcription thread drops the model and loads it again; if that fails, the worker exits with code 3 so `start-worker.ps1` restarts it. A watchdog thread logs any clip running longer than `WORKER_SLOW_CLIP_SECONDS`. The worker logs to `DATA_DIR/logs/worker-YYYY-MM-DD.log` (`LOG_RETENTION_DAYS`).
+
+**Recovery after a restart.** The queue is in memory. On start, the worker re-queues every clip under `DATA_DIR/sessions/*/audio/` that has no entry in the session's cache, for sessions without `transcript.json` touched in the last `WORKER_RECOVER_HOURS`. Those clips get glossary hotwords and `DELETE_AUDIO_AFTER_TRANSCRIBE`. It skips WAVs modified in the last 2 minutes, which the bot may still be writing. It never opens `timeline.json`, because the bot may be renaming over it. A session job the bot was polling when the worker restarted is resubmitted by the bot (it gets a 404 for the old job ID) and reuses everything already transcribed.
 
 The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside the supported set (en, de, fr, es, it, nl, pl).
 
@@ -240,11 +285,13 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 | Failure | Handling |
 |---|---|
 | Worker down during play | Live clip calls fail silently (one log line). The session job at stop transcribes the waiting WAVs. |
-| Worker or bot crash mid-transcription | `transcript.partial.jsonl` keeps finished clips, so only the rest are redone. |
-| Bot restart mid-session | Session marked `failed`. `/scrib process` resumes from what is on disk. |
+| Worker or bot crash mid-transcription | `transcript.partial.jsonl` keeps finished clips, so only the rest are redone. A waiting bot retries unreachable polls for 5 minutes and resubmits a job the restarted worker doesn't know; the failure message names the session and the clips are kept. |
+| Process exits | `start.ps1` and `start-worker.ps1` restart a crashed bot or worker after 5 s (at most 5 times in 10 minutes); a clean exit ends the loop. Daily log files in `DATA_DIR/logs` keep what led up to it, and the bot logs its exit code and reason. |
+| Worker falls behind | The bot posts once per session in the text channel when the queue is more than `BACKLOG_WARN_MINUTES` behind. |
+| Bot crash or restart mid-session | Within `RESUME_WINDOW_MINUTES`, the bot rejoins and keeps recording the same session (§4.1). Otherwise the session is marked `failed`, the table is told, and `/scrib process` resumes from what is on disk. If a game still ends up as two sessions, once both are transcribed, `/scrib merge` (or `npm run merge`, `bot/src/merge.ts`) folds it into the first: B's lines and clips shifted by `B.startedAt − A.startedAt`, a `discordId: "scribbot"` marker line at the gap, participants unioned, chat and combats de-duplicated by `id`, A's files backed up as `*.premerge-<B number>`, B marked `complete` with error `Merged into session N` (the pipeline refuses to process it). B's WAVs are copied into A only if all of them still exist, so a retranscribe of A keeps B (but loses the marker line). |
 | LLM error, rate limit or refusal | Session marked `failed` with the error posted to Discord. `/scrib summarize` retries without re-transcribing. The Anthropic adapter retries on the API's fallback model for refusals. |
-| Partial writes | `timeline.json` and `transcript.json` are written to `.tmp` and renamed. |
-| Voice disconnect | The recorder waits up to 5 s to reconnect before giving up. Clips already written are kept. |
+| Partial writes | `timeline.json`, `transcript.json`, `chatlog.json`, `actors.json` and `foundry-actors.json` are written to `.tmp` and renamed; the bot retries the rename on `EPERM`/`EBUSY`/`EACCES` for about 2 s. A clip callback never throws: a failed snapshot is logged and the journal still lists the clip. |
+| Voice disconnect | The recorder waits 5 s for the connection to recover, then closes open clips and rejoins after 2, 5, 10, 20 and 30 s, then every minute, posting in the text channel when it drops, comes back, or isn't back after 5 tries. `/status` shows the connection state and warns while nothing is being recorded. |
 | Several GMs online | With no bridge user set, only the active GM's module handles WebSocket events. With one set, only that user's module connects. |
 | Player bridge, no GM online | Summaries are queued and handed to the first GM who connects, or created by the player if Foundry lets them create journal entries. The chat log excludes whispers and blind rolls. |
 | Player bridge, relay | Module socket messages reach every client, so only the summary and transcript are relayed, never whispers. The GM's client accepts requests only from the configured bridge user and rebuilds pages with `buildJournalPages`, which escapes all text. |
@@ -259,24 +306,31 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Discord | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` |
 | Storage | `DATA_DIR`, `CAMPAIGN_DIR` |
 | API | `API_HOST`, `API_PORT`, `API_TOKEN`, `FOUNDRY_ORIGINS` |
-| Worker | `WORKER_URL`, `STT_LANGUAGE`, `WHISTLE_WEIGHTS` |
-| LLM | `LLM_PROVIDER`, `LLM_MODEL`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `SUMMARY_CHUNK_MINUTES` |
+| Worker | `WORKER_URL`, `STT_LANGUAGE`, `WHISTLE_WEIGHTS`, `STT_ENGINE` (`whistle`/`whisper`), `WHISPER_MODEL`, `WHISPER_DEVICE` (`cuda`/`cpu`), `WHISPER_COMPUTE_TYPE`, `WHISPER_BEAM_SIZE`, `WHISPER_MAX_HOTWORDS`, `WHISPER_HOTWORDS_MIN_SECONDS`, `WHISPER_VAD`, `WHISPER_VAD_THRESHOLD`, `WHISPER_FILLER_MAX_SECONDS`, `WHISPER_FILLER_MAX_PROBABILITY`, `WORKER_RECOVER_HOURS`, `WORKER_RELOAD_AFTER_FAILURES`, `WORKER_SLOW_CLIP_SECONDS` (also reads `DELETE_AUDIO_AFTER_TRANSCRIBE`, `CAMPAIGN_DIR`, `LOG_RETENTION_DAYS`) |
+| Recovery and logs | `RESUME_WINDOW_MINUTES` (30), `BACKLOG_WARN_MINUTES` (10), `LOG_RETENTION_DAYS` (14, shared by bot and worker) |
+| Watchdog (optional) | `MONITOR_PORT`, `MONITOR_LOG_DIR` |
+| LLM | `LLM_PROVIDER`, `LLM_MODEL`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `SUMMARY_CHUNK_MINUTES`, `AUTO_SUMMARIZE` (default `false`) |
 | Retention | `DELETE_AUDIO_AFTER_TRANSCRIBE`, `AUDIO_RETENTION_DAYS` |
 
 ## 13. Testing
 
 | Suite | Command | Covers |
 |---|---|---|
-| Bot | `cd bot && npm test` | API auth, roster, chat log, status and warnings, participant resolution, pipeline with a fake provider, chunking, quote verification, Foundry journal page building (`journal.test.js`) |
+| Bot | `cd bot && npm test` | API auth, roster and `roster.link`, chat log, status and warnings, the pipeline block, participant resolution, pipeline with a fake provider, chunking, quote verification, merge, rename retries, clip finalization when `timeline.json` can't be written, the segment journal, resume and shutdown plans, worker polling across a restart, log files, Foundry journal page building (`journal.test.js`) and Discord-link planning (`roles.test.js`) |
 | Bot types | `cd bot && npm run typecheck` | Strict TypeScript across `src/`, `scripts/` and `test/` |
-| Worker | `cd worker && .venv\Scripts\python -m pytest` | Clip-to-line conversion and labels, noise filtering, pause splitting, cache resume, live clip then delete, 48 to 16 kHz resampling, path confinement in the API |
+| Worker | `cd worker && .venv\Scripts\python -m pytest` | Clip-to-line conversion and labels, noise filtering, pause splitting, cache resume, live clip then delete, 48 to 16 kHz resampling, path confinement in the API, the segment journal, the filler filter, queue priorities, model reload after repeated errors, log files |
+| Monitor | `cd monitor && ..\worker\.venv\Scripts\python -m pytest` | `.env` parsing, relaying with the token, offline fallback shape, read-only database access, pipeline (conversion counts, rate/ETA, shutdown verdict, quality, alerts, no live `timeline.json` reads), log copy across restarts, redirect to the bot's dashboard while it's up and the fallback page while it's down, loopback `Host` check, token never in responses |
+| Merge | `npm run merge -- <A> <B>` | Folds continuation session B into A (`bot/test/merge.test.ts` covers it on fixture copies) |
 | End to end without Discord | `npx tsx scripts/transcribe-dir.ts <dir>`, then `npm run summarize -- <id>` | Real Whistle and a real LLM on a recorded session folder (`data/sessions/fixture-tts` is a TTS fixture) |
 
 ## 14. Known limitations and open questions
 
 - **Chat log upload races transcription.** The pipeline starts as soon as `/scrib stop` emits `session.stopped`, and doesn't wait for the module's `POST /chatlog`. Live transcription makes the transcribe step short, so a slow Foundry upload could arrive after summarization has read the folder. Consider waiting a few seconds for the chat log when a module is connected.
-- **One transcriber thread.** Whistle isn't thread-safe, so the worker processes one clip at a time. That is plenty for a single table, but several simultaneous guilds would queue.
+- **One transcriber thread.** Neither engine is shared across threads (Whistle isn't thread-safe), so the worker loads the model and processes one clip at a time on a single thread. The model is loaded at startup on that thread; a load failure is reported as `loadError` in `GET /health` and as a `/status` warning. That is plenty for a single table, but several simultaneous guilds would queue.
 - **No re-transcription after deletion.** With the default live deletion, adding glossary names later can't improve an old transcript. Only the summary can be redone.
 - **Single machine.** The bot, worker and data directory are assumed to share a filesystem: the worker receives local paths, not audio bytes.
 - **Languages.** Whistle covers seven European languages. Other languages need a different STT backend behind the same worker API.
 - **One recording per guild.** Recordings are keyed by guild ID.
+- **Resumed recordings don't mark the gap in the transcript.** After a restart the same session continues, but nothing in `transcript.md` says speech is missing between two lines; only the Discord message and the timestamps show it. (`/scrib merge` does insert a marker line.)
+- **The supervisor is a console loop.** `start.ps1` restarts a crashed bot or worker, but closing its window or logging off ends everything. Run the same commands under NSSM, WinSW or a Task Scheduler task to survive that.
+- **Worker priorities are coarse.** A long end-of-session job runs to completion once started; live clips that arrive meanwhile wait behind it.

@@ -12,6 +12,7 @@
     "typecheck": "tsc -p . --noEmit",
     "register": "tsx scripts/register-commands.ts",
     "summarize": "tsx scripts/summarize-session.ts",
+    "merge": "tsx scripts/merge-sessions.ts",
     "schemas": "tsx scripts/export-schemas.ts",
     "test": "vitest run"
   },

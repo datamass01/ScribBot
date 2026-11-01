@@ -1,5 +1,6 @@
 import { format } from "node:util";
 import { bus } from "./events.js";
+import type { DailyLog } from "./logfile.js";
 
 /** In-memory activity feed for the monitor dashboard: recent console output plus bus events. */
 export interface LogEntry {
@@ -25,16 +26,28 @@ export function logsSince(after = 0, limit = MAX_ENTRIES) {
 }
 
 let installed = false;
+let logFile: DailyLog | null = null;
 
-/** Mirror console.log/warn/error and bus events into the feed. Output still reaches the terminal. */
-export function installLogCapture() {
+/** Write a line straight to the log file (e.g. from an exit hook, where nothing async can run). */
+export function writeLogFile(level: LogEntry["level"], msg: string) {
+  logFile?.write(`${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${msg}`);
+}
+
+/**
+ * Mirror console.log/warn/error and bus events into the feed, and into `file` when given
+ * (02 S9). Output still reaches the terminal.
+ */
+export function installLogCapture(file?: DailyLog) {
   if (installed) return;
   installed = true;
+  logFile = file ?? null;
   const wrap = (method: "log" | "info" | "warn" | "error", level: LogEntry["level"]) => {
     const original = console[method].bind(console);
     console[method] = (...args: unknown[]) => {
       original(...args);
-      record(level, format(...args));
+      const msg = format(...args);
+      record(level, msg);
+      writeLogFile(level, msg);
     };
   };
   wrap("log", "info");
@@ -44,6 +57,8 @@ export function installLogCapture() {
   bus.onEvent((e) => {
     if (e.type === "roster.request") return;
     const { type, ...rest } = e;
-    record("event", `${type} ${JSON.stringify(rest)}`);
+    const msg = `${type} ${JSON.stringify(rest)}`;
+    record("event", msg);
+    writeLogFile("event", msg);
   });
 }

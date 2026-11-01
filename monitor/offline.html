@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScribBot Watchdog</title>
+<style>
+  :root {
+    --bg: #f6f6f8; --panel: #ffffff; --border: #e3e3e8; --text: #1c1c22; --muted: #6b6b78;
+    --ok: #15803d; --ok-bg: #dcfce7; --warn: #a16207; --warn-bg: #fef3c7; --err: #b91c1c; --err-bg: #fee2e2;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121216; --panel: #1b1b21; --border: #2c2c35; --text: #e8e8ee; --muted: #9090a0;
+      --ok: #4ade80; --ok-bg: #14321f; --warn: #facc15; --warn-bg: #3a2f0b; --err: #f87171; --err-bg: #3b1515;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 40px; display: grid; gap: 14px; }
+  h1 { font-size: 18px; margin: 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+  .box { border-radius: 8px; padding: 10px 12px; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .err, .no { color: var(--err); background: var(--err-bg); }
+  .safe { color: var(--ok); background: var(--ok-bg); }
+  .wait { color: var(--warn); background: var(--warn-bg); }
+  .muted { color: var(--muted); }
+  ul { margin: 6px 0 0; padding-left: 20px; }
+  pre { font: 12px/1.5 var(--mono); max-height: 360px; overflow: auto; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+  #alerts { display: grid; gap: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ScribBot watchdog</h1>
+  <p class="muted" id="intro">The bot isn't answering, so its dashboard is down. This page is served by the watchdog
+    (<code>monitor/scribmonitor.py</code>) and switches to the bot's dashboard as soon as the bot is back.</p>
+  <section id="alerts"></section>
+  <section class="card"><h2>Shutdown</h2><div id="shutdown" class="box">…</div></section>
+  <section class="card"><h2>Transcription worker</h2><div id="worker">…</div></section>
+  <section class="card"><h2>Last lines of the bot's log</h2><pre id="log">…</pre></section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const list = (items) => items.length ? `<ul>${items.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : "";
+
+  async function tick() {
+    try {
+      const s = await (await fetch("/status", { cache: "no-store" })).json();
+      if (s.monitor && s.monitor.bot === "online") {
+        location.href = s.monitor.botUrl.replace(/\/$/, "") + "/";
+        return;
+      }
+      const p = (s.monitor && s.monitor.pipeline) || {};
+      $("alerts").innerHTML = (s.warnings || []).map((w) => `<div class="box warn">⚠ ${esc(w)}</div>`).join("");
+      const sd = p.shutdown;
+      if (sd) {
+        $("shutdown").className = `box ${sd.state}`;
+        $("shutdown").innerHTML = `<b>${esc(sd.title)}</b>${list(sd.reasons)}`;
+      }
+      const w = s.worker || {};
+      const q = p.queue || {};
+      $("worker").innerHTML = w.reachable
+        ? `${esc(w.model)} on ${esc(w.device)} · <b>${q.depth ?? w.queued ?? 0}</b> queued` +
+          (q.paused ? ` · <span class="warn">paused${q.pausedReason ? `: ${esc(q.pausedReason)}` : ""}</span>` : "") +
+          (q.ratePerMin != null ? ` · ${q.ratePerMin} clips/min` : "") +
+          (w.recovered && w.recovered.clips ? ` · re-queued ${w.recovered.clips} clip(s) from disk at start` : "")
+        : `<span class="err">unreachable at ${esc(w.url)}</span> <span class="muted">${esc(w.error)}</span>`;
+      const log = await (await fetch("/monitor/recent-log", { cache: "no-store" })).json();
+      $("log").textContent = !log.enabled ? "The log copy is off (--no-log-file)."
+        : log.lines.length ? log.lines.join("\n") : `Nothing captured yet (${log.folder}).`;
+    } catch {
+      $("intro").textContent = "The watchdog itself isn't answering.";
+    }
+    setTimeout(tick, 3000);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

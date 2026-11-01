@@ -1,7 +1,7 @@
 // Tests the Foundry module's role logic (foundry-module/scripts/roles.js): who connects to
 // the bot, who acts on its events, and where the journal entry gets created.
 import { describe, expect, it } from "vitest";
-import { bridgeRole, journalTarget, shouldExportMessage } from "../../foundry-module/scripts/roles.js";
+import { bridgeRole, journalTarget, planDiscordLinks, shouldExportMessage } from "../../foundry-module/scripts/roles.js";
 
 describe("bridgeRole", () => {
   describe("with no bridge user (default)", () => {
@@ -57,5 +57,46 @@ describe("shouldExportMessage", () => {
   it("drops whispers and blind rolls when a player exports", () => {
     expect(shouldExportMessage({ whisper: true }, false)).toBe(false);
     expect(shouldExportMessage({ whisper: false }, false)).toBe(true);
+  });
+});
+
+// roster.link from the bot (docs/assessment/05 C11): which "Discord ID" flags the GM's client changes.
+describe("planDiscordLinks (module)", () => {
+  const users = [
+    { id: "fu1", discordId: null },
+    { id: "fu2", discordId: "222222" },
+    { id: "fu3", discordId: "999999" },
+  ];
+
+  it("sets missing or different flags and skips ones already right", () => {
+    expect(
+      planDiscordLinks(
+        [
+          { foundryUserId: "fu1", discordId: "111111" },
+          { foundryUserId: "fu2", discordId: "222222" },
+          { foundryUserId: "fu3", discordId: "333333" },
+        ],
+        users,
+      ),
+    ).toEqual([
+      { userId: "fu1", discordId: "111111", previous: null },
+      { userId: "fu3", discordId: "333333", previous: "999999" },
+    ]);
+  });
+
+  it("clears a flag only if it still holds the unmapped Discord ID", () => {
+    expect(planDiscordLinks([{ foundryUserId: "fu2", discordId: null, ifDiscordId: "222222" }], users)).toEqual([{ userId: "fu2", discordId: null, previous: "222222" }]);
+    expect(planDiscordLinks([{ foundryUserId: "fu3", discordId: null, ifDiscordId: "222222" }], users)).toEqual([]);
+    expect(planDiscordLinks([{ foundryUserId: "fu1", discordId: null, ifDiscordId: "222222" }], users)).toEqual([]);
+  });
+
+  it("ignores unknown users and malformed entries", () => {
+    expect(
+      planDiscordLinks(
+        [{ foundryUserId: "nobody", discordId: "111111" }, { foundryUserId: "fu1", discordId: "<script>" }, null, { discordId: "1" }],
+        users,
+      ),
+    ).toEqual([]);
+    expect(planDiscordLinks("nope", users)).toEqual([]);
   });
 });

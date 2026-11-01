@@ -11,6 +11,7 @@ process.env.WORKER_URL = "http://127.0.0.1:9"; // nothing listens here: the work
 // No Anthropic credentials anywhere: empty values stop dotenv filling them from a real .env,
 // and an empty config dir hides any `ant auth login` profile on this machine.
 process.env.LLM_PROVIDER = "anthropic";
+process.env.AUTO_SUMMARIZE = "true"; // the credential warnings only apply to automatic summaries (see status-manual.test.ts)
 process.env.ANTHROPIC_API_KEY = "";
 process.env.ANTHROPIC_AUTH_TOKEN = "";
 delete process.env.ANTHROPIC_PROFILE;
@@ -70,12 +71,35 @@ describe("Foundry API", () => {
           { id: "u1", name: "Alice", isGM: false, discordId: "111", character: { id: "a1", name: "Thorin", img: "t.png" } },
           { id: "u2", name: "GM", isGM: true },
         ],
-        actors: [{ id: "a1", name: "Thorin" }, { id: "a2", name: "Grubnak" }],
+        actors: [
+          { id: "a1", name: "Thorin", type: "character", classes: [{ name: "Fighter", level: 3 }, { name: "Rogue", level: 2 }], level: 5 },
+          { id: "a2", name: "Grubnak" },
+        ],
       }),
     });
-    expect(await res.json()).toEqual({ ok: true, users: 2, actors: 2 });
+    expect(await res.json()).toEqual({ ok: true, users: 2, actors: 2, links: 0 });
     expect(store.getRoster().find((r) => r.foundry_user_id === "u1")).toMatchObject({ actor_name: "Thorin", discord_id: "111" });
-    expect(fs.existsSync(path.join(dataDir, "foundry-actors.json"))).toBe(true);
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "foundry-actors.json"), "utf8"));
+    expect(saved[0]).toMatchObject({ name: "Thorin", classes: [{ name: "Fighter", level: 3 }, { name: "Rogue", level: 2 }], level: 5 });
+    expect(saved[1]).toMatchObject({ name: "Grubnak", classes: [], level: null, race: null, hpMax: null });
+  });
+
+  it("asks Foundry to correct a stale Discord ID flag after a roster sync (05 C11)", async () => {
+    const { bus } = await import("../src/events.js");
+    const roster = store.getRoster();
+    store.upsertMapping({ guildId: "g", discordId: "222222", foundryUserId: "u1", characterName: "Thorin" });
+    const events: unknown[] = [];
+    const off = bus.onEvent((e) => events.push(e));
+    const res = await fetch(`${base}/roster`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ world: "w", users: [{ id: "u1", name: "Alice", isGM: false, discordId: "111" }], actors: [] }),
+    });
+    off();
+    store.deleteMapping("g", "222222");
+    store.replaceRoster(roster);
+    expect(await res.json()).toMatchObject({ links: 1 });
+    expect(events).toContainEqual({ type: "roster.link", links: [{ foundryUserId: "u1", discordId: "222222" }] });
   });
 
   it("accepts a chat log for a session and reports missing summaries", async () => {
@@ -112,9 +136,9 @@ describe("Foundry API", () => {
     expect(JSON.stringify(status)).not.toContain("secret-token");
   });
 
-  it("warns when the Anthropic provider has no credentials", async () => {
+  it("warns when automatic summaries use the Anthropic provider without credentials", async () => {
     const status = await (await fetch(`${base}/status`, { headers: auth })).json();
-    expect(status.llm).toMatchObject({ provider: "anthropic", credentials: null });
+    expect(status.llm).toMatchObject({ provider: "anthropic", credentials: null, autoSummarize: true });
     expect(status.warnings.some((w: string) => w.includes("No credentials configured for LLM provider 'anthropic'"))).toBe(true);
     expect(status.warnings.some((w: string) => w.includes("ant auth login"))).toBe(true);
   });
@@ -129,4 +153,20 @@ describe("Foundry API", () => {
     const after = await (await fetch(`${base}/logs?after=${first.seq}`, { headers: auth })).json();
     expect(after.map((e: { msg: string }) => e.msg)).toEqual(["second"]);
   });
+
+  it("saves the actor details as the session's copy when a sync names the session", async () => {
+    store.createSession({ id: "s-actors", guildId: "g", channelId: "c", textChannelId: null, startedAt: new Date().toISOString() });
+    const roster = store.getRoster();
+    const actor = { id: "n1", name: "Mayor Vell", type: "npc", race: "Human", gender: "Male", age: "58", height: null, weight: null, hpMax: 14 };
+    const res = await fetch(`${base}/roster`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ world: "w", users: [], actors: [actor], sessionId: "s-actors" }),
+    });
+    store.replaceRoster(roster);
+    expect(res.status).toBe(200);
+    const copy = JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", "s-actors", "actors.json"), "utf8"));
+    expect(copy).toEqual([{ ...actor, classes: [], level: null }]);
+  });
+
 });

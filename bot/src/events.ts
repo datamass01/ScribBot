@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { SessionStatus } from "./db.js";
+import type { RosterLink } from "./links.js";
 
 /** In-process bus between the pipeline and the Foundry WebSocket. */
 export type BotEvent =
@@ -7,7 +8,9 @@ export type BotEvent =
   | { type: "session.stopped"; sessionId: string; number: number; startedAt: string; endedAt: string }
   | { type: "session.status"; sessionId: string; status: SessionStatus; error?: string | null }
   | { type: "summary.ready"; sessionId: string; number: number; title: string }
-  | { type: "roster.request" };
+  | { type: "roster.request" }
+  /** Store these Discord IDs as the Foundry users' "Discord ID" flag (05 C11). GM-only in Foundry. */
+  | { type: "roster.link"; links: RosterLink[] };
 
 class Bus extends EventEmitter {
   emitEvent(e: BotEvent) {

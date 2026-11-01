@@ -14,6 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# STT_ENGINE=whisper: pip install -e ".[whisper]" (CPU), or ".[whisper,cuda]" for an NVIDIA GPU
+whisper = ["faster-whisper>=1.1"]
+cuda = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
 
 [project.scripts]
 scribworker = "scribworker.server:main"
