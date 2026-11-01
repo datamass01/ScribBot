@@ -306,9 +306,12 @@ class Bridge {
   }
 
   /**
-   * Copies a story's images from the bot into Foundry's file storage (scribbot/<session>/), so the
-   * journal loads them from Foundry and never needs the bot or its token. Needs permission to
-   * upload files; without it the story is imported without images. Returns { src: path }.
+   * Copies a story's images from the bot into Foundry's file storage, so the journal loads them
+   * from Foundry and never needs the bot or its token. Each session gets its own folder,
+   * scribbot/<session id>/, and the images keep their names. Foundry lets only GMs create
+   * folders, so a player bridge asks the active GM's client to create it; with no GM to ask, the
+   * images go into the world's existing assets folder as "scribbot-<session>-<file>". Needs
+   * permission to upload files; without it the story is imported without images. Returns { src: path }.
    */
   async uploadStoryImages(file) {
     const images = {};
@@ -317,9 +320,18 @@ class Bridge {
       ui.notifications.warn(`ScribBot: ${game.user.name} may not upload files, so "${file.title}" is imported without its images. A GM can allow it in User Management (Upload New Files), or import it themselves.`);
       return images;
     }
-    const FP = foundry.applications?.apps?.FilePicker?.implementation ?? FilePicker;
-    const dir = `scribbot/${file.sessionId}`;
-    for (const d of ["scribbot", dir]) await FP.createDirectory("data", d).catch(() => {}); // exists already
+    const FP = filePicker();
+    let dir = storyImageDir(file.sessionId);
+    let prefix = "";
+    if (!(await ensureStoryImageDir(file.sessionId))) {
+      if (game.users.activeGM && !game.user.isGM) {
+        await relay.request("makeStoryImageDir", { sessionId: file.sessionId }).catch((e) => log(`the GM's client couldn't create ${dir}/: ${e.message}`));
+      }
+      if (!(await dirExists(dir))) {
+        dir = `worlds/${game.world.id}/assets`;
+        prefix = `scribbot-${file.sessionId}-`;
+      }
+    }
     for (const name of file.assets) {
       try {
         const res = await fetch(`${this.baseUrl}/sessions/${file.sessionId}/story/assets/${encodeURIComponent(name)}`, {
@@ -327,8 +339,10 @@ class Bridge {
         });
         if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
         const blob = await res.blob();
-        const up = await FP.upload("data", dir, new File([blob], name, { type: blob.type }), {}, { notify: false });
-        images[name] = up?.path ?? `${dir}/${name}`;
+        const stored = `${prefix}${name}`;
+        const up = await FP.upload("data", dir, new File([blob], stored, { type: blob.type }), {}, { notify: false });
+        if (up === false || up?.status === "error") throw new Error(up?.message ?? "upload refused");
+        images[name] = up?.path ?? `${dir}/${stored}`;
       } catch (err) {
         console.error("ScribBot |", err);
         ui.notifications.warn(`ScribBot: couldn't copy the image ${name} into Foundry (${err.message}); the story is imported without it.`);
@@ -395,6 +409,49 @@ async function createSessionJournal(file, transcript) {
   ui.notifications.info(`ScribBot: imported "${name}".`);
   entry.sheet.render(true);
   return { id: entry.id, name };
+}
+
+// ---------------------------------------------------------------- story images in Foundry's files
+
+const STORY_IMAGE_DIR = "scribbot";
+const filePicker = () => foundry.applications?.apps?.FilePicker?.implementation ?? FilePicker;
+
+async function dirExists(dir) {
+  try {
+    await filePicker().browse("data", dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Session ids as the bot makes them (e.g. 2026-11-01-6ae0bcc6): letters, digits, dashes, underscores. */
+const SESSION_ID = /^[\w-]{1,80}$/;
+
+/** scribbot/<session id>: one folder per session, so it's clear which images belong to which. */
+function storyImageDir(sessionId) {
+  if (!SESSION_ID.test(String(sessionId))) throw new Error(`not a session id: ${sessionId}`);
+  return `${STORY_IMAGE_DIR}/${sessionId}`;
+}
+
+/** True once scribbot/<session id>/ exists. Creating folders works only for a GM (or where Foundry allows it). */
+async function ensureStoryImageDir(sessionId) {
+  const dir = storyImageDir(sessionId);
+  if (await dirExists(dir)) return true;
+  for (const d of [STORY_IMAGE_DIR, dir]) {
+    if (await dirExists(d)) continue;
+    await filePicker().createDirectory("data", d).catch((e) => log(`can't create ${d}/ as ${game.user.name}: ${e.message}`));
+  }
+  return dirExists(dir);
+}
+
+/** Image paths a story journal may use: what uploadStoryImages writes, nothing else. */
+function isStoryImagePath(p) {
+  return (
+    typeof p === "string" &&
+    !p.includes("..") &&
+    (/^scribbot\/[\w-]{1,80}\/[\w. ()%-]+$/.test(p) || new RegExp(`^worlds/${game.world.id}/assets/scribbot-[\\w. ()%-]+$`).test(p))
+  );
 }
 
 /** Creates (or refreshes) the journal entry for a story write-up. Same placement and permissions as summaries. */
@@ -481,11 +538,12 @@ const relay = {
       } else if (msg.action === "createStory") {
         const f = msg.data?.file;
         if (typeof f?.markdown !== "string" || !f.sessionId || !Array.isArray(f.sessionNumbers)) throw new Error("malformed story");
-        // Only paths the bridge uploaded under scribbot/, never an arbitrary URL from the socket.
-        const images = Object.fromEntries(
-          Object.entries(msg.data?.images ?? {}).filter(([, p]) => typeof p === "string" && /^scribbot\/[\w./ ()-]+$/.test(p) && !p.includes("..")),
-        );
+        // Only paths the bridge uploaded for stories, never an arbitrary URL from the socket.
+        const images = Object.fromEntries(Object.entries(msg.data?.images ?? {}).filter(([, p]) => isStoryImagePath(p)));
         data = await createStoryJournal(f, images);
+      } else if (msg.action === "makeStoryImageDir") {
+        // Only ever scribbot/<session id>/: the id must look like one (storyImageDir throws otherwise).
+        data = await ensureStoryImageDir(msg.data?.sessionId);
       } else if (msg.action === "linkDiscord") {
         data = await applyDiscordLinks(msg.data?.links);
       } else {

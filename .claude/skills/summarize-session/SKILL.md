@@ -90,7 +90,7 @@ The command exits 0 with `PASS`. It lists the source line of every verified quot
 
 ## Import into Foundry
 
-Once `verify.py` passes, `/scrib story session:<N>` in Discord (or **Import ScribBot Session** → "story" in Foundry's journal directory) imports `summary.story.md` as a journal entry, one page per section. The bot refuses a story that still has `<template notes>`. A stitched story is found from either session. An image on a line of its own (`![alt](banner.png)`, the file next to the story) becomes a banner (before the first section) or an inline picture; the bridge client copies it into Foundry, which needs the **Upload New Files** permission. Images elsewhere in a line, or pointing at URLs, are dropped. Re-importing replaces the entry's pages.
+Once `verify.py` passes, `/scrib story session:<N>` in Discord (or **Import ScribBot Session** → "story" in Foundry's journal directory) imports `summary.story.md` as a journal entry, one page per section. The bot refuses a story that still has `<template notes>`. A stitched story is found from either session. An image on a line of its own (`![alt](banner.png)`, the file next to the story) becomes a banner (before the first section) or an inline picture; the bridge client copies it into Foundry's User Data as `scribbot/<session id>/<file>`, which needs the **Upload New Files** permission (a GM's client creates the session's folder). Images elsewhere in a line, or pointing at URLs, are dropped. Re-importing replaces the entry's pages.
 
 ## What the hallucination filter does
 

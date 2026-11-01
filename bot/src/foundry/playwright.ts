@@ -308,21 +308,26 @@ async function importStory(page: Page, sessionId: string): Promise<ImportResult>
 /** Marks ScribBot's own chat messages; the summarizer and the story skill skip them in the chat log. */
 export const ANNOUNCE_CLASS = "scribbot-announce";
 
+/** The chat message's HTML, built here: functions defined inside page.evaluate break under tsx (its __name helper doesn't exist in the page). */
+export function announceHtml(text: string) {
+  const esc = text.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+  return `<p class="${ANNOUNCE_CLASS}"><i class="fas fa-feather-pointed"></i> ${esc}</p>`;
+}
+
 async function announce(page: Page, text: string) {
   if (page.isClosed()) return;
   await page.evaluate(
-    async ({ text, cls }) => {
+    async ({ content }) => {
       const g = globalThis as any;
-      const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
       const ooc = g.CONST?.CHAT_MESSAGE_STYLES?.OOC ?? g.CONST?.CHAT_MESSAGE_TYPES?.OOC;
       await g.ChatMessage.create({
-        content: `<p class="${cls}"><i class="fas fa-feather-pointed"></i> ${esc(text)}</p>`,
+        content,
         speaker: { alias: g.game.user.name },
         // v12+ calls it style; v11 and older, type
         ...(g.CONST?.CHAT_MESSAGE_STYLES ? { style: ooc } : { type: ooc }),
       });
     },
-    { text, cls: ANNOUNCE_CLASS },
+    { content: announceHtml(text) },
   );
 }
 

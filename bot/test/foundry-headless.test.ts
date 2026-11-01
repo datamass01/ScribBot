@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type FoundryPage, HeadlessFoundry, type ImportResult, JoinError, joinAnnouncement, leaveAnnouncement } from "../src/foundry/client.js";
-import { classifyLanding, desktopUserAgent, pickUser } from "../src/foundry/playwright.js";
+import { announceHtml, classifyLanding, desktopUserAgent, pickUser } from "../src/foundry/playwright.js";
 
 /** A fake browser session: records calls, and can be "kicked" like Foundry closing the page. */
 function fakeLauncher(opts: { fail?: JoinError[]; importResult?: ImportResult } = {}) {
@@ -243,6 +243,12 @@ describe("HeadlessFoundry lifecycle", () => {
 });
 
 describe("headless join helpers", () => {
+  it("builds the chat announcement outside the page, escaped and marked", () => {
+    expect(announceHtml('ScribBot joined <to> "record"')).toBe(
+      '<p class="scribbot-announce"><i class="fas fa-feather-pointed"></i> ScribBot joined &#60;to&#62; &#34;record&#34;</p>',
+    );
+  });
+
   it("tells the join page from the setup screen", () => {
     expect(classifyLanding("http://localhost:30000/join")).toBe("join");
     expect(classifyLanding("https://x.forge-vtt.com/game")).toBe("game");
