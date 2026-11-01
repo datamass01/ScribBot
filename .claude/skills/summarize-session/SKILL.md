@@ -10,7 +10,8 @@ Two stdlib Python scripts do the parts a model is bad at, and one prompt does th
 1. `prepare.py` reads the session's outputs and writes an **evidence pack**. It drops Whisper hallucinations with a stated reason for each, tags table-talk, damage and item hints, merges Foundry rolls and combats, and numbers every line (`L0123`).
 2. The model follows **`PROMPT.md`** on the pack and fills in `summary.story.md`, which `prepare.py` starts from `template.md`. The sections always come in this order: **High level summary** (≤ 800 characters), **Characters in Session** (Character | Class(es) | Level | Player, pre-filled from Foundry), **NPCs in Session** (NPC | Race | Class(es) | Level | Part in the session, named NPCs only; monsters are Foes in Battles), **Objectives Completed**, The story, Major events, Battles, Iconic items and loot, Memorable quotes, Deeds of the party, Loose threads. Then, kept apart from the story, **At the table** (rulings, table agreements, follow-ups someone promised, tech problems, absences, with no private life) and **Chronicler's notes**. The rules that shape it:
    - **High fantasy voice, in modern English.** Vivid but not archaic, with no engineering, software or game-mechanics wording ("triggered", "deployed", "buffed", "aggro"). `--style sci-fi` allows technical language for a science-fiction campaign.
-   - **The game system's own names.** `prepare.py` puts the Foundry game system (sent with the chat log by module 0.5.0+, else inferred from the chat log's `systems/<id>/` and compendium links) and every spell and ability card Foundry posted into the pack's "Style" section. Spells and abilities are called by those names, as proper nouns (Implosion, Power Word Blind, Ice Storm), never paraphrased ("a folding spell", "a word of blindness"); their numbers stay out.
+   - **The game system's own names.** `prepare.py` puts the Foundry game system (sent with the chat log by module 0.5.0+, else inferred from the chat log's `systems/<id>/` and compendium links) and every spell and ability card Foundry posted into the pack's "Style" section. Magic is told mostly by its effect, for the story's flow. A spell is named, by its system name as a proper noun, only where it is a one-off that turns the scene (Implosion, Power Word Blind). Preparations and utility spells are told by what they did ("her eyes searching for invisible creatures"), spell names are never listed, and archaic stand-ins ("a folding spell") and spell numbers stay out.
+   - **A varied creature name keeps the kind.** Say "the floating aberration" or "the savage animal", not "the floater" or "the walker". The full rule is in `PROMPT.md`.
    - **A short story, not a length limit.** "The story" is one continuous tale with no subheadings, as long as the session needs, from two hours to ten. It is told third-person omniscient, in the past tense, one beat per paragraph, with scene changes carried in the prose (PROMPT.md, "Readable prose").
    - **Dialogue vs. described action.** Words a character speaks aloud are quoted as dialogue (Sparrow said, “Enjoy the view, boys!”). What a player *describes* their character doing or feeling ("I grit as my body…") is retold as narration, never quoted.
    - **No line IDs in the document.** `[L0123]` is for the writer to find lines in the pack. `verify.py` finds each quote's source on its own and prints it.
@@ -78,14 +79,18 @@ python .claude/skills/summarize-session/verify.py data/sessions/2026-11-01-6ae0b
 
 The command exits 0 with `PASS`. It lists the source line of every verified quote, so a reviewer can check them against the pack. Each `FAIL` names what to fix. `WARN` lines (a quote that reads like a described action, a quote from a mechanics line, an overlong paragraph) are worth fixing but don't fail the run.
 
-**Interrupted game recorded as two sessions** (bot crash, then a new `/scrib start`): pass both, e.g. `prepare.py 12 13` once #13 has stopped (tested on #10 and #11). They're stitched in time order into one story. It inserts a `[RECORDING RESUMED …]` marker and de-duplicates the chat logs, which overlap.
+**Interrupted game recorded as two sessions** (bot crash, then a new `/scrib start`): pass both, e.g. `prepare.py 12 13` once #13 has stopped (tested on #10 and #11). They're stitched in time order into one story. It inserts a `[RECORDING RESUMED …]` marker (a session already joined with `/scrib merge` gets a `[RECORDING GAP …]` marker from its merge line) and de-duplicates the chat logs, which overlap. The story bridges the gap from what comes before and after and never mentions it; the gap is noted only in "Chronicler's notes" and "At the table".
 
 ## Other LLMs
 
 - **Big context (≥ 32k tokens):** give the model `prompt-full.md` as the message. Save its reply as `summary.story.md` and run `verify.py`.
 - **Small context (8k):** run `prepare.py … --chunk-minutes 15`, which makes parts of about 3k tokens. Send `PROMPT.md` plus one `chunks/NN.md` at a time and ask for the "Part notes" format at the end of `PROMPT.md`. Then send all the part notes with the filled-in template from the end of `prompt-full.md` and ask for the final story.
 - Pasting into a hosted model sends the transcript to that provider. Get the table's consent, as the README requires for `/scrib summarize`. A local model (Ollama at `OPENAI_BASE_URL`) keeps it on the machine.
-- This doesn't replace the bot's `/scrib summarize` (which writes `summary.json` and imports it into Foundry). The story is a separate file. Paste it into a Foundry journal by hand if wanted.
+- This doesn't replace the bot's `/scrib summarize` (which writes `summary.json` and imports it into Foundry). The story is a separate file.
+
+## Import into Foundry
+
+Once `verify.py` passes, `/scrib story session:<N>` in Discord (or **Import ScribBot Session** → "story" in Foundry's journal directory) imports `summary.story.md` as a journal entry, one page per section. The bot refuses a story that still has `<template notes>`. A stitched story is found from either session. An image on a line of its own (`![alt](banner.png)`, the file next to the story) becomes a banner (before the first section) or an inline picture; the bridge client copies it into Foundry, which needs the **Upload New Files** permission. Images elsewhere in a line, or pointing at URLs, are dropped. Re-importing replaces the entry's pages.
 
 ## What the hallucination filter does
 
@@ -121,7 +126,7 @@ If `prepare.py` warns `no class/level from Foundry for …`, or the details tabl
 ## Gotchas
 
 - **`prepare.py` refuses a session that's recording** (it checks `data/scribbot.db` before touching any file, so it never opens a live `timeline.json`). Summarize after `/scrib stop`.
-- **A crashed session has no end time and no chat log.** The chat log uploads only on `/scrib stop`. The pack says so under "Recording notes", and the story must end where the recording ends. How hard a blow landed then has to be judged from what the GM said aloud.
+- **A crashed session has no end time and no chat log.** The chat log uploads only on `/scrib stop`. The pack says so under "Recording notes". The story closes on the last moment the record supports, as a natural pause, without mentioning the recording. How hard a blow landed then has to be judged from what the GM said aloud.
 - **Sessions not yet finalized** (no `transcript.json`) are read from `transcript.partial.jsonl`. That's better for hallucination detection, because it keeps Whisper's word probability, which `transcript.json` drops.
 - **The speaker isn't always the actor.** On #12, Sparrow's player left and Alessandra's player ran Sparrow ("Robert is gonna step out…", "Robbie is gonna cast…") and her companion Fade. `PROMPT.md` tells the model to attribute actions to the character described.
 - **`campaign/context.md` and `glossary.md` are still the template examples** (Thorin, Elara, Grubnak). They appear in the pack but don't describe this campaign. Fill them in and the story's names get better.
@@ -148,7 +153,9 @@ If `prepare.py` warns `no class/level from Foundry for …`, or the details tabl
 | `WARN NPCs in Session: '…' reads as a kind of creature or a role` | It's a monster or a nameless extra. Delete the row and make sure it's in the Foes of its fight in "Battles" |
 | `FAIL NPCs in Session: … Foundry says …` | Copy Race, Class(es) and Level from the pack's NPC details table |
 | `WARN quote reads like a player describing an action` | Take the quotation marks off and retell it as narration: “I grit as my body…” becomes "Sparrow gritted her teeth…" |
-| `WARN Foundry shows <spell> was cast, but the story never names it` | Name the spell where it happens ("the beholder turned Implosion on her"), instead of a paraphrase. Ignore it if the spell doesn't belong in the tale |
+| `FAIL the story mentions the recording` | Remove it. Carry the scene across the gap from what happened before and after ("The fight ground on…"), and note the gap in "Chronicler's notes" |
+| `WARN '<the floater>' names a creature by how it moves` | Use its kind or name, or a variant that keeps the kind ("the beholder", "the floating aberration"). Reported once per stand-in word |
+| `WARN a sentence lists spells` | Tell what the spells did ("floating under the effects of her spells, her eyes searching for invisible creatures") and name at most one, the one that matters |
 | `WARN The story: a N-word paragraph` | It holds more than one beat. Split it where the action turns |
 | `FAIL real name in the story sections` for a player | That line is out of character: move it to "At the table", or write it as the character |
 | A real name is in the story but `verify.py` passes | `prepare.py` didn't spot the nickname. Re-run it with `--nickname "<Nick>=<character or absent>"`, then run `verify.py` again. A one-off check also works: `verify.py … --real-name <Nick>` |

@@ -178,6 +178,7 @@ async function joinWorld(browser: Browser, opts: LaunchOptions, log: (msg: strin
   return {
     status: () => readStatus(page),
     importSummary: (sessionId) => importSummary(page, sessionId),
+    importStory: (sessionId) => importStory(page, sessionId),
     exportChatlog: async (sessionId) => {
       await page.evaluate(({ module, sessionId }) => (globalThis as any).game.modules.get(module).api.exportChatlog(sessionId), { module: MODULE, sessionId });
     },
@@ -285,6 +286,18 @@ async function importSummary(page: Page, sessionId: string): Promise<ImportResul
       const g = (globalThis as any).game;
       if (!g.settings.get(module, "autoImport")) return { imported: false, reason: "auto-import-off" } as const;
       const result = await g.modules.get(module).api.importSummary(sessionId);
+      return result ? ({ imported: true, name: String(result.name) } as const) : ({ imported: false, reason: "no-gm" } as const);
+    },
+    { module: MODULE, sessionId },
+  );
+}
+
+async function importStory(page: Page, sessionId: string): Promise<ImportResult> {
+  return page.evaluate(
+    async ({ module, sessionId }) => {
+      const api = (globalThis as any).game.modules.get(module).api;
+      if (typeof api.importStory !== "function") throw new Error("ScribBot Bridge in Foundry is too old to import stories; update it to 0.6.0 or later");
+      const result = await api.importStory(sessionId);
       return result ? ({ imported: true, name: String(result.name) } as const) : ({ imported: false, reason: "no-gm" } as const);
     },
     { module: MODULE, sessionId },

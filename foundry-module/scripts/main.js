@@ -6,6 +6,7 @@
  *  - pushes the user → character roster (so Discord voices map to actors)
  *  - when recording stops, uploads that window's chat messages and combats
  *  - when the summary is ready, fetches it and gets a JournalEntry created
+ *  - when asked (/scrib story, or the Journal sidebar), imports a story write-up the same way
  *
  * GM-only work stays with the active GM's client:
  *  - logs combats as they happen (Foundry deletes a Combat when it ends)
@@ -13,7 +14,7 @@
  *  - writes users' "Discord ID" flags from the bot's /scrib map links (roster.link), relayed the same way
  */
 import { actorDetails, changesDetails, hasDetails, isDetailItem } from "./actors.js";
-import { buildJournalPages } from "./journal.js";
+import { buildJournalPages, buildStoryPages } from "./journal.js";
 import { bridgeRole, journalTarget, planDiscordLinks, shouldExportMessage } from "./roles.js";
 
 const MODULE = "scribbot-bridge";
@@ -57,6 +58,7 @@ Hooks.once("ready", () => {
     syncRoster: () => bridge.syncRoster(),
     exportChatlog: (sessionId = "latest") => bridge.exportChatlog(sessionId),
     importSummary: (sessionId = "latest") => bridge.importSummary(sessionId),
+    importStory: (sessionId = "latest") => bridge.importStory(sessionId),
     /** Read by ScribBot's headless client to check this client is the bridge and connected. */
     status: () => ({ ...role(), botSocket: bridge.socket?.readyState === WebSocket.OPEN }),
   };
@@ -156,6 +158,10 @@ class Bridge {
         if (setting("autoImport")) await this.importSummary(msg.sessionId);
         else ui.notifications.info(`ScribBot summary for session ${msg.number} is ready. Import it from the Journal sidebar.`);
         break;
+      case "story.ready":
+        // Always imported: a story is only announced when someone asks for it.
+        await this.importStory(msg.sessionId);
+        break;
       case "session.status":
         if (msg.status === "failed") ui.notifications.warn(`ScribBot: processing failed: ${msg.error}`);
         break;
@@ -254,33 +260,88 @@ class Bridge {
 
   // ---- journal import
 
-  /** Summaries waiting for a GM to come online (bridge is a player who can't create journals). */
+  /** Imports waiting for a GM to come online (bridge is a player who can't create journals): "summary:<id>" or "story:<id>". */
   pendingImports = new Set();
+
+  /** Where a journal can be created from this client: "self", "gm" (relay) or "none". */
+  journalTarget() {
+    return journalTarget({
+      isGM: game.user.isGM,
+      activeGMId: game.users.activeGM?.id ?? null,
+      canCreate: JournalEntry.canUserCreate(game.user),
+    });
+  }
 
   async importSummary(sessionId = "latest") {
     const file = await this.api(`/sessions/${sessionId}/summary`);
     let transcript = null;
     if (setting("includeTranscript")) transcript = await this.api(`/sessions/${file.sessionId}/transcript`).catch(() => null);
 
-    const target = journalTarget({
-      isGM: game.user.isGM,
-      activeGMId: game.users.activeGM?.id ?? null,
-      canCreate: JournalEntry.canUserCreate(game.user),
-    });
+    const target = this.journalTarget();
     if (target === "none") {
-      this.pendingImports.add(file.sessionId);
+      this.pendingImports.add(`summary:${file.sessionId}`);
       ui.notifications.warn(`ScribBot: session ${file.sessionNumber}'s summary is ready, but no GM is online to create the journal entry. It will be imported when a GM connects.`);
       return null;
     }
     const result = target === "self" ? await createSessionJournal(file, transcript) : await relay.request("createJournal", { file, transcript });
-    this.pendingImports.delete(file.sessionId);
+    this.pendingImports.delete(`summary:${file.sessionId}`);
     if (target === "gm") ui.notifications.info(`ScribBot: the GM's client imported "${result.name}".`);
     return result;
   }
 
+  /** Imports a story write-up (summarize-session skill) as its own journal entry, one page per section. */
+  async importStory(sessionId = "latest") {
+    const file = await this.api(`/sessions/${sessionId}/story`);
+    const target = this.journalTarget();
+    if (target === "none") {
+      this.pendingImports.add(`story:${file.sessionId}`);
+      ui.notifications.warn(`ScribBot: the story "${file.title}" is ready, but no GM is online to create the journal entry. It will be imported when a GM connects.`);
+      return null;
+    }
+    const images = await this.uploadStoryImages(file);
+    const result = target === "self" ? await createStoryJournal(file, images) : await relay.request("createStory", { file, images });
+    this.pendingImports.delete(`story:${file.sessionId}`);
+    if (target === "gm") ui.notifications.info(`ScribBot: the GM's client imported "${result.name}".`);
+    return result;
+  }
+
+  /**
+   * Copies a story's images from the bot into Foundry's file storage (scribbot/<session>/), so the
+   * journal loads them from Foundry and never needs the bot or its token. Needs permission to
+   * upload files; without it the story is imported without images. Returns { src: path }.
+   */
+  async uploadStoryImages(file) {
+    const images = {};
+    if (!file.assets?.length) return images;
+    if (!game.user.can("FILES_UPLOAD")) {
+      ui.notifications.warn(`ScribBot: ${game.user.name} may not upload files, so "${file.title}" is imported without its images. A GM can allow it in User Management (Upload New Files), or import it themselves.`);
+      return images;
+    }
+    const FP = foundry.applications?.apps?.FilePicker?.implementation ?? FilePicker;
+    const dir = `scribbot/${file.sessionId}`;
+    for (const d of ["scribbot", dir]) await FP.createDirectory("data", d).catch(() => {}); // exists already
+    for (const name of file.assets) {
+      try {
+        const res = await fetch(`${this.baseUrl}/sessions/${file.sessionId}/story/assets/${encodeURIComponent(name)}`, {
+          headers: { Authorization: `Bearer ${setting("apiToken")}` },
+        });
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        const blob = await res.blob();
+        const up = await FP.upload("data", dir, new File([blob], name, { type: blob.type }), {}, { notify: false });
+        images[name] = up?.path ?? `${dir}/${name}`;
+      } catch (err) {
+        console.error("ScribBot |", err);
+        ui.notifications.warn(`ScribBot: couldn't copy the image ${name} into Foundry (${err.message}); the story is imported without it.`);
+      }
+    }
+    return images;
+  }
+
   async retryPendingImports() {
-    for (const sessionId of [...this.pendingImports]) {
-      await this.importSummary(sessionId).catch((err) => ui.notifications.error(`ScribBot: ${err.message}`));
+    for (const key of [...this.pendingImports]) {
+      const [kind, sessionId] = key.split(/:(.*)/s);
+      const run = kind === "story" ? this.importStory(sessionId) : this.importSummary(sessionId);
+      await run.catch((err) => ui.notifications.error(`ScribBot: ${err.message}`));
     }
   }
 }
@@ -336,6 +397,33 @@ async function createSessionJournal(file, transcript) {
   return { id: entry.id, name };
 }
 
+/** Creates (or refreshes) the journal entry for a story write-up. Same placement and permissions as summaries. */
+async function createStoryJournal(file, images = {}) {
+  const folder = await ensureFolder();
+  const pages = buildStoryPages(file, game.actors.contents, images);
+  if (!pages.length) throw new Error(`the story "${file.title}" has no sections to import`);
+  const name = `Session ${file.sessionNumbers.join(" + ")}: ${file.title}`;
+  const ownership = { default: setting("playersCanView") ? CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER : CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE };
+
+  let entry = game.journal.find((j) => j.getFlag(MODULE, "storyId") === file.sessionId);
+  if (entry) {
+    await entry.deleteEmbeddedDocuments("JournalEntryPage", entry.pages.map((p) => p.id));
+    await entry.update({ name, folder: folder?.id ?? null });
+    await entry.createEmbeddedDocuments("JournalEntryPage", pages);
+  } else {
+    entry = await JournalEntry.create({
+      name,
+      folder: folder?.id ?? null,
+      ownership,
+      pages,
+      flags: { [MODULE]: { storyId: file.sessionId, sessionNumbers: file.sessionNumbers } },
+    });
+  }
+  ui.notifications.info(`ScribBot: imported "${name}".`);
+  entry.sheet.render(true);
+  return { id: entry.id, name };
+}
+
 async function ensureFolder() {
   const name = setting("journalFolder");
   if (!name) return null;
@@ -348,8 +436,8 @@ async function ensureFolder() {
 // ---------------------------------------------------------------- relay to the GM's client
 //
 // Module socket messages reach every connected client, so payloads must be fine for any
-// player to see: only the summary and transcript travel this way, never whispers. The GM's
-// client rebuilds the pages itself with buildJournalPages, which escapes all text.
+// player to see: only the summary, transcript and story travel this way, never whispers. The GM's
+// client rebuilds the pages itself with buildJournalPages / buildStoryPages, which escape all text.
 
 const relay = {
   pending: new Map(),
@@ -390,6 +478,14 @@ const relay = {
       if (msg.action === "createJournal") {
         if (!msg.data?.file?.summary || !msg.data.file.sessionId) throw new Error("malformed summary");
         data = await createSessionJournal(msg.data.file, msg.data.transcript ?? null);
+      } else if (msg.action === "createStory") {
+        const f = msg.data?.file;
+        if (typeof f?.markdown !== "string" || !f.sessionId || !Array.isArray(f.sessionNumbers)) throw new Error("malformed story");
+        // Only paths the bridge uploaded under scribbot/, never an arbitrary URL from the socket.
+        const images = Object.fromEntries(
+          Object.entries(msg.data?.images ?? {}).filter(([, p]) => typeof p === "string" && /^scribbot\/[\w./ ()-]+$/.test(p) && !p.includes("..")),
+        );
+        data = await createStoryJournal(f, images);
       } else if (msg.action === "linkDiscord") {
         data = await applyDiscordLinks(msg.data?.links);
       } else {
@@ -485,24 +581,34 @@ Hooks.on("renderJournalDirectory", (app, html) => {
 async function promptImport() {
   let sessions;
   try {
-    sessions = (await bridge.api("/sessions")).filter((s) => s.hasSummary);
+    sessions = (await bridge.api("/sessions")).filter((s) => s.hasSummary || s.hasStory);
   } catch (err) {
     ui.notifications.error(`ScribBot: ${err.message}`);
     return;
   }
   if (!sessions.length) {
-    ui.notifications.warn("ScribBot has no summarized sessions yet.");
+    ui.notifications.warn("ScribBot has no summaries or stories yet.");
     return;
   }
+  // One option per thing to import: "summary:<id>" (the bot's AI summary) or "story:<id>" (a story write-up).
   const options = sessions
-    .map((s) => `<option value="${s.id}">Session ${s.number} (${new Date(s.startedAt).toLocaleDateString()})</option>`)
+    .flatMap((s) => {
+      const when = `Session ${s.number} (${new Date(s.startedAt).toLocaleDateString()})`;
+      return [
+        ...(s.hasStory ? [`<option value="story:${s.id}">${when}: story</option>`] : []),
+        ...(s.hasSummary ? [`<option value="summary:${s.id}">${when}: summary</option>`] : []),
+      ];
+    })
     .join("");
-  const sessionId = await foundry.applications.api.DialogV2.prompt({
+  const choice = await foundry.applications.api.DialogV2.prompt({
     window: { title: game.i18n.localize("SCRIBBOT.Import") },
-    content: `<div class="form-group"><label>Session</label><select name="session">${options}</select></div>`,
-    ok: { label: "Import", callback: (_ev, button) => button.form.elements.session.value },
+    content: `<div class="form-group"><label>Import</label><select name="choice">${options}</select></div>`,
+    ok: { label: "Import", callback: (_ev, button) => button.form.elements.choice.value },
   });
-  if (sessionId) await bridge.importSummary(sessionId).catch((err) => ui.notifications.error(`ScribBot: ${err.message}`));
+  if (!choice) return;
+  const [kind, sessionId] = choice.split(/:(.*)/s);
+  const run = kind === "story" ? bridge.importStory(sessionId) : bridge.importSummary(sessionId);
+  await run.catch((err) => ui.notifications.error(`ScribBot: ${err.message}`));
 }
 
 // ---------------------------------------------------------------- Discord ID editor

@@ -25,6 +25,10 @@ function fakeLauncher(opts: { fail?: JoinError[]; importResult?: ImportResult } 
         page.imports.push(id);
         return opts.importResult ?? ({ imported: true, name: `Session ${id}` } as const);
       },
+      importStory: async (id: string) => {
+        page.imports.push(`story:${id}`);
+        return opts.importResult ?? ({ imported: true, name: `Story ${id}` } as const);
+      },
       onClosed: (fn: (r: string) => void) => (closedFn = fn),
       close: async () => {
         page.closed = true;
@@ -155,6 +159,15 @@ describe("HeadlessFoundry lifecycle", () => {
     c.onEvent({ type: "summary.ready", sessionId: "s1", number: 1, title: "t" });
     await vi.waitFor(() => expect(pages[0]?.closed).toBe(true));
     expect(pages[0]!.imports).toEqual(["s1"]);
+    expect(c.status().pendingImports).toEqual([]);
+  });
+
+  it("joins to import a story, even with auto-import off for summaries", async () => {
+    const { launch, pages } = fakeLauncher();
+    const c = make(launch);
+    c.onEvent({ type: "story.ready", sessionId: "s1", number: 1, title: "t" });
+    await vi.waitFor(() => expect(pages[0]?.closed).toBe(true));
+    expect(pages[0]!.imports).toEqual(["story:s1"]);
     expect(c.status().pendingImports).toEqual([]);
   });
 

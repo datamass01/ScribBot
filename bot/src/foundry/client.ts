@@ -30,6 +30,8 @@ export type ImportResult = { imported: true; name: string } | { imported: false;
 export interface FoundryPage {
   status(): Promise<PageStatus | null>;
   importSummary(sessionId: string): Promise<ImportResult>;
+  /** Imports a story write-up (module 0.6.0+). Never skipped by the auto-import setting: it was asked for. */
+  importStory(sessionId: string): Promise<ImportResult>;
   /** Has the module upload a session's chat and combat log (it normally does so on session.stopped). */
   exportChatlog(sessionId: string): Promise<void>;
   /** Called once if the browser or page goes away on its own. */
@@ -85,13 +87,16 @@ export interface ClientOptions {
   launch: FoundryLauncher;
   /** How long to keep the client after `/scrib stop` while the chat log hasn't arrived. */
   chatlogWaitMs: number;
-  /** Summaries still to import, kept across restarts. Omit to keep them in memory only. */
+  /** Imports still to do, kept across restarts: summary session ids, and "story:<id>" for stories. Omit to keep them in memory only. */
   stateFile?: string;
   log?: (msg: string) => void;
   /** Overridable for tests. */
   healthCheckMs?: number;
   retryMs?: (attempt: number, kind: JoinErrorKind | null) => number;
 }
+
+/** Pending-import keys for stories; summaries are keyed by the bare session id (older state files too). */
+const STORY_PREFIX = "story:";
 
 const defaultRetry = (attempt: number, kind: JoinErrorKind | null) =>
   kind && SLOW_RETRY.includes(kind) ? 5 * 60_000 : Math.min(15_000 * 2 ** attempt, 5 * 60_000);
@@ -161,9 +166,10 @@ export class HeadlessFoundry {
         this.awaiting.get(e.sessionId)?.done();
         break;
       case "summary.ready":
-        // While joined, the module hears summary.ready itself and imports it.
+      case "story.ready":
+        // While joined, the module hears the event itself and imports it.
         if (this.state === "connected") break;
-        this.pending.add(e.sessionId);
+        this.pending.add(e.type === "story.ready" ? `${STORY_PREFIX}${e.sessionId}` : e.sessionId);
         this.savePending();
         this.reasons.add("import");
         this.reconcile();
@@ -281,15 +287,18 @@ export class HeadlessFoundry {
       this.reconcile();
       return;
     }
-    for (const sessionId of [...this.pending]) {
+    for (const key of [...this.pending]) {
+      const isStory = key.startsWith(STORY_PREFIX);
+      const sessionId = isStory ? key.slice(STORY_PREFIX.length) : key;
+      const what = isStory ? "story" : "summary";
       try {
-        const r = await page.importSummary(sessionId);
-        if (r.imported) this.log(`imported the summary of ${sessionId} as "${r.name}"`);
+        const r = isStory ? await page.importStory(sessionId) : await page.importSummary(sessionId);
+        if (r.imported) this.log(`imported the ${what} of ${sessionId} as "${r.name}"`);
         else if (r.reason === "auto-import-off") this.log(`summary ${sessionId} is ready; auto-import is off in Foundry, so import it from the Journal sidebar`);
-        if (r.imported || r.reason === "auto-import-off") this.pending.delete(sessionId);
-        else this.log(`summary ${sessionId} is waiting for a GM to be online; it will be imported next time ScribBot joins`);
+        if (r.imported || r.reason === "auto-import-off") this.pending.delete(key);
+        else this.log(`${what} ${sessionId} is waiting for a GM to be online; it will be imported next time ScribBot joins`);
       } catch (err) {
-        this.log(`importing summary ${sessionId} failed: ${err instanceof Error ? err.message : err}`);
+        this.log(`importing ${what} ${sessionId} failed: ${err instanceof Error ? err.message : err}`);
       }
     }
     this.savePending();

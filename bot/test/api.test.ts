@@ -190,3 +190,78 @@ describe("Foundry API", () => {
   });
 
 });
+
+describe("story API", () => {
+  let app: Awaited<ReturnType<typeof import("../src/api/server.js").startApi>>;
+  let store: import("../src/db.js").Store;
+  let base: string;
+  const auth = { authorization: "Bearer secret-token", "content-type": "application/json" };
+  const story = "# The Eye and the Diamond\n\n![Banner](banner.png)\n\n*Session 12 + 13*\n\n## High level summary\n\nIt went well.\n\n![Missing](gone.png)\n";
+
+  beforeAll(async () => {
+    const { Store } = await import("../src/db.js");
+    const { startApi } = await import("../src/api/server.js");
+    store = new Store(":memory:");
+    app = await startApi(store, () => null);
+    const addr = app.server.address();
+    base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+    store.createSession({ id: "st-a", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-10-31T20:00:00.000Z" });
+    store.createSession({ id: "st-b", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-10-31T21:00:00.000Z" });
+    store.createSession({ id: "st-c", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-11-02T20:00:00.000Z" });
+    // A story stitched from st-a and st-b, written into st-b's folder (prepare.py --out).
+    const dir = path.join(dataDir, "sessions", "st-b", "story");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "summary.story.md"), story);
+    fs.writeFileSync(path.join(dir, "lines.json"), JSON.stringify({ sessions: [{ id: "st-a", number: 1 }, { id: "st-b", number: 2 }] }));
+    fs.writeFileSync(path.join(dir, "banner.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    fs.writeFileSync(path.join(dir, "secret.png"), Buffer.from([1, 2, 3])); // next to the story, but not in it
+    // st-c's story is still the unfilled template.
+    fs.mkdirSync(path.join(dataDir, "sessions", "st-c", "story"), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "sessions", "st-c", "story", "summary.story.md"), "# T\n\n## High level summary\n\n<One paragraph>\n");
+  });
+  afterAll(() => app?.close());
+
+  it("serves a stitched story from any session it covers", async () => {
+    for (const id of ["st-a", "st-b"]) {
+      const res = await fetch(`${base}/sessions/${id}/story`, { headers: auth });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        sessionId: "st-b",
+        sessionNumbers: [1, 2],
+        startedAt: "2026-10-31T20:00:00.000Z",
+        title: "The Eye and the Diamond",
+        markdown: story,
+        assets: ["banner.png"], // gone.png doesn't exist
+      });
+    }
+    const list = (await (await fetch(`${base}/sessions`, { headers: auth })).json()) as { id: string; hasStory: boolean }[];
+    expect(Object.fromEntries(list.map((s) => [s.id, s.hasStory]))).toMatchObject({ "st-a": true, "st-b": true, "st-c": true });
+  });
+
+  it("serves only the images the story shows, with the token", async () => {
+    const ok = await fetch(`${base}/sessions/st-a/story/assets/banner.png`, { headers: auth });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await ok.arrayBuffer())).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    expect((await fetch(`${base}/sessions/st-a/story/assets/banner.png`)).status).toBe(401);
+    for (const name of ["secret.png", "lines.json", "..%2F..%2Fscribbot.db", "gone.png"]) {
+      expect((await fetch(`${base}/sessions/st-a/story/assets/${name}`, { headers: auth })).status).toBe(404);
+    }
+  });
+
+  it("refuses a story that still has template notes", async () => {
+    const res = await fetch(`${base}/sessions/st-c/story`, { headers: auth });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toMatch(/template notes/);
+  });
+
+  it("announces a story to Foundry on request", async () => {
+    const { bus } = await import("../src/events.js");
+    const events: unknown[] = [];
+    const off = bus.onEvent((e) => events.push(e));
+    const res = await fetch(`${base}/sessions/st-a/story/import`, { method: "POST", headers: auth, body: "{}" });
+    off();
+    expect(await res.json()).toMatchObject({ ok: true, sessionId: "st-b", title: "The Eye and the Diamond", foundryConnected: false });
+    expect(events).toContainEqual({ type: "story.ready", sessionId: "st-b", number: 1, title: "The Eye and the Diamond" });
+  });
+});

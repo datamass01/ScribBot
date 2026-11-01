@@ -30,6 +30,7 @@ import { SHUTDOWN_NOTE, defaultSessionToProcess, lastActivityMs } from "./recove
 import { readTimeline } from "./timeline.js";
 import type { SummaryFile } from "./summarize/schema.js";
 import { backlogMinutes, workerHealth } from "./worker-client.js";
+import { announceStory, findStoryFile } from "./story.js";
 
 export const scribCommand = new SlashCommandBuilder()
   .setName("scrib")
@@ -78,6 +79,12 @@ export const scribCommand = new SlashCommandBuilder()
       .setName("summarize")
       .setDescription("Re-run only the AI summary (e.g. after editing campaign context)")
       .addStringOption((o) => o.setName("session").setDescription("Session number (default: latest)")),
+  )
+  .addSubcommand((s) =>
+    s
+      .setName("story")
+      .setDescription("Import a session's story write-up into Foundry as a journal entry")
+      .addStringOption((o) => o.setName("session").setDescription("Session number (default: latest with a story)")),
   )
   .addSubcommand((s) =>
     s
@@ -155,6 +162,8 @@ export class CommandHandler {
           return await this.process(i, false);
         case "summarize":
           return await this.process(i, true);
+        case "story":
+          return await this.story(i);
         case "merge":
           return await this.merge(i);
       }
@@ -633,6 +642,19 @@ export class CommandHandler {
     await i.reply(`🔄 ${summaryOnly ? "Summarizing" : "Processing"} session ${session.number}${retranscribe ? " (re-transcribing)" : ""}…`);
     // /scrib summarize is the explicit request to send the transcript to the LLM.
     this.runPipeline(session.id, i.channelId, { retranscribe, ...(summaryOnly ? { summarize: true } : {}) });
+  }
+
+  private async story(i: ChatInputCommandInteraction<"cached">) {
+    const ref = i.options.getString("session");
+    const session = ref
+      ? this.store.findSession(i.guildId, ref)
+      : this.store.listSessions(1000).find((s) => s.guild_id === i.guildId && findStoryFile(s.id) !== null);
+    if (!session) throw new Error(ref ? "No such session." : "No session has a story yet. Write one with the summarize-session skill.");
+    const story = announceStory(this.store, session);
+    await i.reply(
+      `📜 Sent **${story.title}** (session ${story.sessionNumbers.join(" + ")}) to Foundry. ` +
+        "The bridge client creates the journal entry, or updates it if it's already there.",
+    );
   }
 
   private async merge(i: ChatInputCommandInteraction<"cached">) {

@@ -10,6 +10,7 @@ import { bus } from "../events.js";
 import { linksToWrite } from "../links.js";
 import { logsSince } from "../monitor.js";
 import { foundryActorsFile, sessionPaths } from "../paths.js";
+import { announceStory, findStoryFile, loadStory, storyAsset } from "../story.js";
 import { ChatLogSchema, RosterPayloadSchema } from "../types.js";
 import { buildStatus, type FoundryActivity, type MonitorSources } from "./status.js";
 
@@ -34,6 +35,7 @@ const publicSession = (s: SessionRow) => ({
   summarizedAt: s.summarized_at,
   hasSummary: fs.existsSync(sessionPaths(s.id).summary),
   hasChatlog: fs.existsSync(sessionPaths(s.id).chatlog),
+  hasStory: findStoryFile(s.id) !== null,
 });
 
 export async function startApi(store: Store, getRecording: () => SessionRow | null, monitor: MonitorSources = {}) {
@@ -150,6 +152,33 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     };
   app.get("/sessions/:id/summary", serveJson("summary"));
   app.get("/sessions/:id/transcript", serveJson("transcriptJson"));
+
+  // Story write-ups from the summarize-session skill (bot/src/story.ts).
+  app.get<{ Params: { id: string } }>("/sessions/:id/story", async (req, reply) => {
+    const s = findSession(req.params.id);
+    if (!s) return reply.code(404).send({ error: "no such session" });
+    try {
+      return loadStory(store, s);
+    } catch (err) {
+      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+  app.get<{ Params: { id: string; name: string } }>("/sessions/:id/story/assets/:name", async (req, reply) => {
+    const s = findSession(req.params.id);
+    const asset = s ? storyAsset(s.id, req.params.name) : null;
+    if (!asset) return reply.code(404).send({ error: "no such image" });
+    return reply.type(asset.type).header("cache-control", "no-store").send(fs.readFileSync(asset.file));
+  });
+  app.post<{ Params: { id: string } }>("/sessions/:id/story/import", async (req, reply) => {
+    const s = findSession(req.params.id);
+    if (!s) return reply.code(404).send({ error: "no such session" });
+    try {
+      const story = announceStory(store, s);
+      return { ok: true, sessionId: story.sessionId, title: story.title, foundryConnected: foundry.sockets > 0 };
+    } catch (err) {
+      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   await app.listen({ host: config.api.host, port: config.api.port });
   console.log(`[api] listening on http://${config.api.host}:${config.api.port}`);

@@ -8,6 +8,8 @@ export type BotEvent =
   | { type: "session.stopped"; sessionId: string; number: number; startedAt: string; endedAt: string }
   | { type: "session.status"; sessionId: string; status: SessionStatus; error?: string | null }
   | { type: "summary.ready"; sessionId: string; number: number; title: string }
+  /** A story write-up (summarize-session skill) to import as a journal entry: /scrib story or POST …/story/import. */
+  | { type: "story.ready"; sessionId: string; number: number; title: string }
   /** The module uploaded a session's chat and combat log (the headless client waits for it). */
   | { type: "chatlog.received"; sessionId: string }
   | { type: "roster.request" }
