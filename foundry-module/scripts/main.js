@@ -205,7 +205,8 @@ class Bridge {
       type: a.type ?? null,
       ...(hasDetails(a) ? actorDetails(a) : {}),
     }));
-    const body = { world: game.world.id, users, actors, ...(sessionId ? { sessionId } : {}) };
+    // worldTitle names the campaign in the ScribBot Console (the bot files it under the world id).
+    const body = { world: game.world.id, worldTitle: game.world.title ?? null, users, actors, ...(sessionId ? { sessionId } : {}) };
     const res = await this.api("/roster", { method: "POST", body });
     log(`roster synced: ${res.users} users, ${res.actors} actors`);
   }
