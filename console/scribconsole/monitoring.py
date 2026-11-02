@@ -1,56 +1,38 @@
-"""ScribBot watchdog: an optional, read-only helper for when the bot itself is down.
+"""Monitoring: what the old watchdog (monitor/scribmonitor.py) did, now the Console's Monitoring tab.
 
-Run it with any Python 3.10+ (standard library only, nothing to install):
-
-    python monitor/scribmonitor.py            # serves http://127.0.0.1:7422/ and opens your browser
-    python monitor/scribmonitor.py --no-browser --port 7500 --no-log-file
-
-The bot's dashboard (http://127.0.0.1:7420) is the one page to watch; it has the transcription
-pipeline panel too (docs/assessment/05 C1). This watchdog only covers what needs a separate process:
-  - While the bot is running, http://127.0.0.1:7422/ redirects to the bot's dashboard.
-  - While the bot is down, it serves a small fallback page: a crash notice if it went down
-    mid-recording, the worker's queue, whether it's safe to shut down, and the bot's last log lines.
-    It reads the worker's health, sessions from the database (read-only) and disk space by itself.
+  - status(): the bot's /status when it answers (fetched with API_TOKEN, which never reaches the
+    browser), or a stand-in with the same shape built from the worker's /health, the database
+    (opened read-only), disk and .env while it's down. Either way plus `monitor.pipeline`: worker
+    queue, conversion progress and quality, alerts, crash notice and shutdown advice.
   - A background sampler (every 5 s, page open or not) notices the bot disappearing mid-recording
-    and copies the bot's log to data/logs/scribbot-*.log. The API_TOKEN from .env stays inside this
-    process; the browser never sees it.
+    and copies the bot's log to data/logs/scribbot-*.log.
 
-Neither the bot nor the worker knows about this program. Starting or stopping it has no
-effect on recording, transcription or summaries. It never writes outside its own log folder,
-and it never opens timeline.json while the bot is recording into it (the bot replaces that
-file by renaming over it, which fails on Windows while another process holds it open).
+It only reads. It never opens timeline.json while the bot is recording into it (the bot replaces
+that file by renaming over it, which fails on Windows while another process holds it open).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
 import shutil
 import sqlite3
-import sys
 import threading
 import time
-import webbrowser
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-MONITOR_DIR = Path(__file__).resolve().parent
-REPO_ROOT = MONITOR_DIR.parent
-OFFLINE_PAGE = MONITOR_DIR / "offline.html"  # shown while the bot is down
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "xai": "grok-4"}
 REQUEST_TIMEOUT_S = 3
 SESSION_LIMIT = 20  # same as the bot's /status
 LOW_DISK_BYTES = 1024**3
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 ACTIVE_STATUSES = {"recording", "transcribing", "summarizing"}
 CACHE_NAME = "transcript.partial.jsonl"  # the worker's per-clip results (worker/scribworker/transcribe.py)
 
@@ -78,7 +60,7 @@ STOCK_HALLUCINATIONS = {
 
 
 def log(msg: str) -> None:
-    print(f"[monitor] {msg}", flush=True)
+    print(f"[console] {msg}", flush=True)
 
 
 # ---------------------------------------------------------------- configuration
@@ -170,7 +152,7 @@ class Config:
             auto_summarize=_bool(env.get("AUTO_SUMMARIZE"), False),
             delete_audio=_bool(env.get("DELETE_AUDIO_AFTER_TRANSCRIBE"), True),
             retention_days=_number(get("AUDIO_RETENTION_DAYS"), 14),
-            port=int(_number(get("MONITOR_PORT"), 7422)),
+            port=int(_number(get("CONSOLE_PORT") or get("MONITOR_PORT"), 7422)),
             campaign_dir=_resolve(get("CAMPAIGN_DIR", "./campaign")),
             log_dir=_resolve(get("MONITOR_LOG_DIR")) if get("MONITOR_LOG_DIR") else data_dir / "logs",
         )
@@ -379,6 +361,11 @@ class Monitor:
         self._crash: dict[str, Any] | None = None  # the bot went away mid-recording
         self._raised: set[str] = set()  # alert keys already written to the log file
         self._log_state = self.logfile.load_state()
+
+    @property
+    def bot_online(self) -> bool | None:
+        """What the last status call found (None before the first one)."""
+        return self._bot_online
 
     # ---- what the page polls
 
@@ -907,106 +894,3 @@ class Monitor:
             return memo[1] if memo else None  # e.g. caught mid-write
         self._file_memo[path] = (key, value)
         return value
-
-
-# ---------------------------------------------------------------- web server
-
-
-def is_local_host_header(host: str | None) -> bool:
-    """Rejects requests addressed to other host names (DNS rebinding)."""
-    if not host:
-        return False
-    name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
-    return name.lower() in LOCAL_HOSTS
-
-
-def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "ScribMonitor"
-
-        def do_GET(self) -> None:  # noqa: N802 - http.server API
-            if not is_local_host_header(self.headers.get("Host")):
-                return self._send(403, b"forbidden", "text/plain")
-            url = urlsplit(self.path)
-            if url.path in ("/", "/dashboard"):
-                status = monitor.status()
-                if status["monitor"]["bot"] == "online":
-                    # One page to watch: the bot's own dashboard (it asks for the API token itself).
-                    self.send_response(302)
-                    self.send_header("Location", f"{monitor.cfg.bot_url}/")
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                    return
-                try:
-                    self._send(200, OFFLINE_PAGE.read_bytes(), "text/html; charset=utf-8")
-                except OSError:
-                    self._send(500, f"Page not found at {OFFLINE_PAGE}".encode(), "text/plain")
-            elif url.path == "/status":
-                self._json(monitor.status())
-            elif url.path == "/monitor/recent-log":
-                self._json({"enabled": monitor.logfile.folder is not None,
-                            "folder": str(monitor.logfile.folder or ""), "lines": monitor.logfile.tail(40)})
-            elif url.path == "/health":
-                self._json({"ok": True, "name": "scribmonitor"})
-            else:
-                self._send(404, b"not found", "text/plain")
-
-        def _json(self, data: Any) -> None:
-            self._send(200, json.dumps(data).encode("utf-8"), "application/json")
-
-        def _send(self, code: int, body: bytes, content_type: str) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - keep the console quiet
-            pass
-
-    return Handler
-
-
-class MonitorServer(ThreadingHTTPServer):
-    # On Windows SO_REUSEADDR lets a second process bind a port that's already in use, so two monitors
-    # would silently share 7422 and answer requests at random. Elsewhere it only skips TIME_WAIT.
-    allow_reuse_address = sys.platform != "win32"
-
-
-def main(argv: list[str] | None = None) -> int:
-    cfg = Config.load()
-    parser = argparse.ArgumentParser(description="Optional local web monitor for ScribBot.")
-    parser.add_argument("--port", type=int, default=cfg.port, help=f"port to serve on (default {cfg.port}, MONITOR_PORT in .env)")
-    parser.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
-    parser.add_argument("--no-log-file", action="store_true", help=f"don't copy the bot's log to {cfg.log_dir}")
-    args = parser.parse_args(argv)
-
-    monitor = Monitor(cfg, logfile=LogFile(None if args.no_log_file else cfg.log_dir))
-    try:
-        server = MonitorServer(("127.0.0.1", args.port), make_handler(monitor))
-    except OSError as err:
-        log(f"can't listen on 127.0.0.1:{args.port}: {err}. Is the monitor already running? Use --port to pick another.")
-        return 1
-    server.daemon_threads = True
-    stop = threading.Event()
-    threading.Thread(target=monitor.run_sampler, args=(stop,), daemon=True, name="sampler").start()
-
-    url = f"http://127.0.0.1:{args.port}/"
-    where = "off" if args.no_log_file else str(cfg.log_dir)
-    log(f"serving {url} (bot {cfg.bot_url}, worker {cfg.worker_url}, log copy {where}). Ctrl+C to stop.")
-    if not args.no_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    try:
-        server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop.set()
-        server.server_close()
-        log("stopped")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

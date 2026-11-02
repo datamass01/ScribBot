@@ -1,19 +1,16 @@
-"""Tests for the optional web monitor. Hermetic: fake fetchers, temp folders, port 0."""
+"""Tests for the Console's monitoring (the old watchdog). Hermetic: fake fetchers, temp folders."""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-import threading
-from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
 
-import scribmonitor as sm
+from scribconsole import monitoring as sm
 
 
 def make_config(tmp_path: Path, **overrides) -> sm.Config:
@@ -338,15 +335,6 @@ def test_pipeline_shows_a_failed_session_the_worker_is_recovering(tmp_path):
     assert p["shutdown"]["state"] == "safe"
 
 
-def test_a_second_monitor_cannot_share_the_port(tmp_path):
-    first = sm.MonitorServer(("127.0.0.1", 0), sm.make_handler(sm.Monitor(make_config(tmp_path), fake_fetch({}))))
-    try:
-        with pytest.raises(OSError):
-            sm.MonitorServer(("127.0.0.1", first.server_address[1]), sm.make_handler(sm.Monitor(make_config(tmp_path), fake_fetch({}))))
-    finally:
-        first.server_close()
-
-
 def test_live_recording_never_opens_timeline_json(tmp_path, monkeypatch):
     write_session(tmp_path, "live", clips=5, converted=2)
     opened = []
@@ -543,77 +531,3 @@ def test_no_log_folder_means_no_files(tmp_path):
     f.write(["x"])
     f.event("y")
     assert f.tail() == [] and list(tmp_path.iterdir()) == []
-
-
-# ---------------------------------------------------------------- web server
-
-
-@pytest.mark.parametrize(
-    ("host", "ok"),
-    [("127.0.0.1:7422", True), ("localhost:7422", True), ("[::1]:7422", True), ("localhost", True), ("evil.example:7422", False), (None, False)],
-)
-def test_host_header_check(host, ok):
-    assert sm.is_local_host_header(host) is ok
-
-
-def serve(monitor):
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), sm.make_handler(monitor))
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
-
-
-@pytest.fixture()
-def server(tmp_path):
-    srv = serve(sm.Monitor(make_config(tmp_path), fake_fetch({"http://127.0.0.1:7420/status": {"warnings": ["hi"], "sessions": []}})))
-    yield srv.server_address[1]
-    srv.shutdown()
-    srv.server_close()
-
-
-@pytest.fixture()
-def offline_server(tmp_path):
-    srv = serve(sm.Monitor(make_config(tmp_path), fake_fetch({})))  # nothing answers: the bot is down
-    yield srv.server_address[1]
-    srv.shutdown()
-    srv.server_close()
-
-
-def get(port: int, path: str, host: str | None = None):
-    conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request("GET", path, headers={"Host": host or f"127.0.0.1:{port}"})
-    res = conn.getresponse()
-    body = res.read()
-    conn.close()
-    return res, body
-
-
-def test_server_redirects_to_the_bots_dashboard_while_the_bot_is_up(server):
-    res, body = get(server, "/status")
-    assert res.status == 200 and json.loads(body)["warnings"] == ["hi"]
-    for path in ("/", "/dashboard"):
-        res, _ = get(server, path)
-        assert res.status == 302 and res.getheader("Location") == "http://127.0.0.1:7420/"
-    res, _ = get(server, "/monitor/panel.js")  # the old injected panel is gone (05 C2)
-    assert res.status == 404
-
-
-def test_server_shows_the_fallback_page_while_the_bot_is_down(offline_server):
-    res, body = get(offline_server, "/")
-    assert res.status == 200 and b"ScribBot watchdog" in body and b"/monitor/recent-log" in body
-    status = json.loads(get(offline_server, "/status")[1])
-    assert status["monitor"]["bot"] == "offline" and status["monitor"]["pipeline"]["shutdown"]["state"] in ("safe", "wait")
-
-
-def test_recent_log_endpoint_reports_when_disabled(server):
-    _, body = get(server, "/monitor/recent-log")
-    assert json.loads(body) == {"enabled": False, "folder": "", "lines": []}
-
-
-def test_server_rejects_foreign_host_names(server):
-    res, _ = get(server, "/status", host="attacker.example")
-    assert res.status == 403
-
-
-def test_server_never_returns_the_api_token(server):
-    _, body = get(server, "/status")
-    assert b"secret-token" not in body

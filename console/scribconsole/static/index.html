@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScribBot Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%237c3aed'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>ScribBot Console</h1>
+  <nav class="tabs" role="tablist">
+    <a href="#sessions" role="tab" data-tab="sessions">Sessions</a>
+    <a href="#monitoring" role="tab" data-tab="monitoring">Monitoring <span class="badge" id="alert-count" hidden></span></a>
+    <a href="#configuration" role="tab" data-tab="configuration">Configuration <span class="badge" id="config-badge" hidden></span></a>
+  </nav>
+  <span class="spacer"></span>
+  <div class="health" id="health" aria-live="polite"></div>
+</header>
+
+<main>
+  <section id="tab-sessions" role="tabpanel" hidden></section>
+  <section id="tab-monitoring" role="tabpanel" hidden></section>
+  <section id="tab-configuration" role="tabpanel" hidden></section>
+</main>
+
+<dialog id="dialog"></dialog>
+<div id="toasts" aria-live="polite"></div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

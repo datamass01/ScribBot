@@ -1,0 +1,317 @@
+// Configuration: the setup checklist and a form for .env, built from shared/schemas/settings.json.
+// Secrets never come to the page: it only knows whether one is set, and can replace or clear it.
+import { $, api, attempt, confirmDialog, esc, openDialog, pill, toast } from "./util.js";
+import { restartWorker } from "./monitoring.js";
+
+let root = null;
+let view = null; // GET /api/config
+let edits = {}; // key -> new value ("" = default)
+let group = null;
+let status = null;
+
+const PROC_LABEL = { bot: "bot", worker: "worker", console: "console" };
+
+export function show(el, s) {
+  root = el;
+  status = s;
+  if (!root.dataset.ready) {
+    root.innerHTML = `
+      <section class="card" id="c-setup"><div class="card-head"><h2>Setup checklist</h2></div><p class="muted">Checking…</p></section>
+      <div id="c-restart"></div>
+      <section class="card" id="c-form"><p class="muted">Loading settings…</p></section>
+      <section class="card" id="c-campaign"></section>
+      <div class="savebar" id="c-savebar" hidden>
+        <span class="count" id="c-count"></span>
+        <button data-act="discard">Discard</button>
+        <button class="primary" data-act="save">Save to .env</button>
+      </div>`;
+    root.dataset.ready = "1";
+    root.addEventListener("click", onClick);
+    root.addEventListener("input", onInput);
+    root.addEventListener("change", onInput);
+    window.addEventListener("beforeunload", (e) => {
+      if (Object.keys(edits).length) e.preventDefault();
+    });
+  }
+  load();
+  loadSetup();
+  renderCampaign();
+}
+
+export function hide() {
+  if ($("c-savebar")) $("c-savebar").hidden = true;
+}
+
+export function update(s) {
+  status = s;
+  if (!root || root.hidden) return;
+  renderRestart(s.console?.pendingRestart || {});
+}
+
+async function load() {
+  try {
+    view = await api("GET", "/api/config");
+  } catch (err) {
+    $("c-form").innerHTML = `<p class="error-text">${esc(err.message)}</p>`;
+    return;
+  }
+  group = group || view.groups[0];
+  renderForm();
+  renderRestart(view.pendingRestart || {});
+}
+
+async function loadSetup() {
+  try {
+    const r = await api("GET", "/api/setup");
+    const icon = { ok: "✓", warn: "!", err: "✕", skip: "–" };
+    const bad = r.checks.filter((c) => c.state === "err").length;
+    $("c-setup").innerHTML = `<div class="card-head"><h2>Setup checklist</h2>
+        ${bad ? pill("err", `${bad} to fix`) : pill("ok", "ready")}<span class="spacer"></span>
+        ${view && !view.envExists ? `<button class="primary" data-act="create-env">Create .env from the template</button>` : ""}
+        <button data-act="recheck">Check again</button></div>
+      <div class="checks">${r.checks.map((c) => `<div class="check-row">
+        <span class="icon ${c.state}">${icon[c.state] ?? "?"}</span>
+        <div><b>${esc(c.label)}</b>${c.detail ? ` <span class="muted small">${esc(c.detail)}</span>` : ""}
+          ${c.fix && c.state !== "ok" ? `<div class="fix">${esc(c.fix)}</div>` : ""}</div></div>`).join("")}</div>`;
+  } catch (err) {
+    $("c-setup").innerHTML = `<div class="card-head"><h2>Setup checklist</h2></div><p class="error-text">${esc(err.message)}</p>`;
+  }
+}
+
+// ---------- the form
+const current = (s) => {
+  if (s.key in edits) return edits[s.key];
+  const v = view.values[s.key] || {};
+  return s.type === "secret" ? null : (v.value ?? "");
+};
+
+/** Same rules as the Console's warnings_for(): known costs to speed, accuracy or safety. */
+function warningsFor(s, value) {
+  if (s.type === "secret") return [];
+  const v = value === "" ? s.default : value;
+  return (s.warnings || []).filter(({ when }) => {
+    if (when.eq !== undefined) return String(v).trim().toLowerCase() === String(when.eq).toLowerCase();
+    const n = Number(v);
+    if (Number.isNaN(n) || v === "") return false;
+    return (when.gt !== undefined && n > when.gt) || (when.lt !== undefined && n < when.lt);
+  }).map((w) => w.text);
+}
+
+function visibleSetting(s) {
+  if (!s.showIf) return true;
+  const other = view.settings.find((o) => o.key === s.showIf.key);
+  const v = current(other);
+  return s.showIf.values.includes(v === "" ? other.default : v);
+}
+
+function control(s) {
+  const v = view.values[s.key] || {};
+  const locked = v.overridden ? "disabled" : "";
+  const id = `f-${s.key}`;
+  if (s.type === "secret") {
+    const replacing = s.key in edits;
+    const stateText = v.overridden ? "set in the environment" : v.set ? (v.isDefault ? "still the example value" : "set") : "not set";
+    const gen = s.key === "API_TOKEN" ? `<button data-act="generate" data-key="${s.key}" ${locked}>Generate</button>` : "";
+    return `<div class="row">
+        ${pill(v.set && !v.isDefault ? "ok" : v.isDefault && v.set ? "warn" : "skip", stateText)}
+        ${replacing ? "" : `<button data-act="replace" data-key="${s.key}" ${locked}>${v.set ? "Replace" : "Set"}</button>`}
+        ${v.set && !replacing ? `<button class="danger" data-act="clear" data-key="${s.key}" ${locked}>Clear</button>` : ""} ${gen}
+      </div>
+      ${replacing ? `<div class="row"><input id="${id}" data-key="${s.key}" type="${s.key === "API_TOKEN" ? "text" : "password"}" autocomplete="off"
+          spellcheck="false" value="${esc(edits[s.key])}" placeholder="${edits[s.key] === "" && v.set ? "(will be cleared)" : "new value"}">
+          <button data-act="undo" data-key="${s.key}">Cancel</button></div>` : ""}`;
+  }
+  const value = current(s);
+  const ph = s.blankMeans ? `blank = ${s.blankMeans}` : s.default ? `blank = ${s.default}` : "";
+  let input;
+  if (s.type === "enum" || s.type === "bool") {
+    const opts = s.options.map((o) => `<option value="${esc(o.value)}" ${(value === "" ? s.default : value) === o.value ? "selected" : ""}>${esc(o.label)}${o.value === s.default ? " (default)" : ""}</option>`).join("");
+    input = `<select id="${id}" data-key="${s.key}" ${locked}>${opts}</select>`;
+  } else {
+    const type = s.type === "int" || s.type === "number" ? "number" : "text";
+    const step = s.type === "int" ? "1" : "any";
+    input = `<input id="${id}" data-key="${s.key}" type="${type}" ${type === "number" ? `step="${step}"` : ""}
+      ${s.min !== undefined ? `min="${s.min}"` : ""} ${s.max !== undefined ? `max="${s.max}"` : ""}
+      value="${esc(value)}" placeholder="${esc(ph)}" spellcheck="false" ${locked}>`;
+  }
+  const reset = s.tuned && value !== "" && value !== s.default
+    ? `<button data-act="reset" data-key="${s.key}" title="The tuned default is ${esc(s.default)}">Reset to default (${esc(s.default)})</button>` : "";
+  const test = s.key === "LLM_PROVIDER" ? `<button data-act="test-llm" title="Asks the running bot for one tiny structured answer">Test summaries</button>` : "";
+  return `<div class="row">${input}${reset}${test}</div>`;
+}
+
+function settingRow(s) {
+  const v = view.values[s.key] || {};
+  const warn = warningsFor(s, s.type === "secret" ? "" : current(s));
+  const procs = s.readBy.map((p) => `<span title="Read by the ${p} at startup">${PROC_LABEL[p]}</span>`).join("");
+  return `<div class="setting ${s.key in edits ? "changed" : ""}" data-row="${s.key}">
+    <div class="name"><label for="f-${s.key}"><b>${esc(s.label)}</b></label><code>${esc(s.key)}</code>
+      <div class="procs">${procs}</div>${s.tuned ? `<div class="small muted">tuned default: ${esc(s.default)}</div>` : ""}</div>
+    <div class="control">${control(s)}
+      ${s.help ? `<div class="help">${esc(s.help)}</div>` : ""}
+      ${v.overridden ? `<div class="notice warn small">Set in the environment, which wins over .env; change it there.</div>` : ""}
+      ${warn.length ? `<div class="warnings">${warn.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+    </div></div>`;
+}
+
+function renderForm() {
+  const settings = view.settings.filter((s) => s.group === group && visibleSetting(s));
+  const basic = settings.filter((s) => !s.advanced).map(settingRow).join("");
+  const advanced = settings.filter((s) => s.advanced);
+  const changedIn = (g) => view.settings.some((s) => s.group === g && s.key in edits);
+  const openAdvanced = advanced.some((s) => s.key in edits || (s.tuned && current(s) !== "" && current(s) !== s.default));
+  $("c-form").innerHTML = `
+    <div class="card-head"><h2>Settings</h2><span class="muted small"><code>${esc(view.envPath)}</code></span></div>
+    ${view.envExists ? "" : `<div class="notice warn">There's no .env yet. Create it from the template (above) before saving settings.</div>`}
+    <div class="groups" role="tablist">${view.groups.map((g) =>
+      `<button data-group="${esc(g)}" aria-pressed="${g === group}">${esc(g)}${changedIn(g) ? " •" : ""}</button>`).join("")}</div>
+    <div>${basic || (advanced.length ? "" : `<p class="muted">Nothing to set here with the current choices.</p>`)}</div>
+    ${advanced.length ? `<details class="advanced" ${openAdvanced ? "open" : ""}><summary>Advanced (${advanced.length})</summary>${advanced.map(settingRow).join("")}</details>` : ""}
+    ${view.unknownKeys.length ? `<p class="muted small">Also in .env, not managed here: ${view.unknownKeys.map((k) => `<code>${esc(k)}</code>`).join(", ")}</p>` : ""}`;
+  renderSavebar();
+}
+
+function renderSavebar() {
+  const n = Object.keys(edits).length;
+  $("c-savebar").hidden = !n;
+  $("c-count").textContent = `${n} unsaved change${n === 1 ? "" : "s"}`;
+}
+
+function renderRestart(pending) {
+  const procs = Object.keys(pending);
+  const el = $("c-restart");
+  if (!el) return;
+  if (!procs.length) { el.innerHTML = ""; return; }
+  const recording = (status?.recordings || []).length > 0;
+  const line = (p) => `<li><b>${PROC_LABEL[p]}</b>: ${pending[p].keys.map((k) => `<code>${esc(k)}</code>`).join(", ")}</li>`;
+  el.innerHTML = `<div class="notice warn"><b>Saved. These settings apply after a restart:</b><ul>${procs.map(line).join("")}</ul>
+    <div class="row" style="margin-top:8px">
+      ${pending.bot ? `<button data-act="restart-bot" ${recording ? "disabled title=\"A session is recording. Stop it first.\"" : ""}>Restart bot</button>` : ""}
+      ${pending.worker ? `<button data-act="restart-worker" ${recording ? "disabled title=\"A session is recording. Stop it first.\"" : ""}>Restart worker</button>` : ""}
+      ${pending.console ? `<span class="small">Restart the Console: Ctrl+C in its window, then <code>.\\start-console.ps1</code>.</span>` : ""}
+    </div>
+    <p class="small" style="margin:6px 0 0">The restart buttons work when the bot and worker were started with <code>start.ps1</code> / <code>start-worker.ps1</code>, which start them again.</p></div>`;
+}
+
+// ---------- events
+function onInput(e) {
+  const key = e.target.dataset?.key;
+  if (!key || !view) return;
+  const s = view.settings.find((x) => x.key === key);
+  const original = s.type === "secret" ? null : (view.values[key]?.value ?? "");
+  let value = e.target.value;
+  if (s.type !== "secret" && (s.type === "enum" || s.type === "bool") && value === s.default && original === "") value = "";
+  if (s.type !== "secret" && value === original) delete edits[key];
+  else edits[key] = value;
+  // Re-render only when it changes what's shown (showIf, warnings), and never under the cursor while typing text.
+  if (e.type === "change" || s.type === "enum" || s.type === "bool") {
+    renderForm();
+    document.getElementById(`f-${key}`)?.focus();
+  } else {
+    const row = root.querySelector(`[data-row="${key}"]`);
+    row?.classList.toggle("changed", key in edits);
+    const warn = warningsFor(s, value);
+    const box = row?.querySelector(".warnings");
+    if (box) box.innerHTML = warn.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
+    else if (warn.length && row) row.querySelector(".control").insertAdjacentHTML("beforeend", `<div class="warnings">${warn.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}</div>`);
+    renderSavebar();
+  }
+}
+
+async function onClick(e) {
+  const g = e.target.closest("[data-group]");
+  if (g) { group = g.dataset.group; return renderForm(); }
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const key = btn.dataset.key;
+  switch (btn.dataset.act) {
+    case "replace": edits[key] = ""; renderForm(); return document.getElementById(`f-${key}`)?.focus();
+    case "clear": {
+      const ok = await confirmDialog(`Clear ${key}?`, "<p>It will be blank in .env after you save.</p>", { ok: "Clear", danger: true });
+      if (ok) { edits[key] = ""; renderForm(); }
+      return;
+    }
+    case "undo": delete edits[key]; return renderForm();
+    case "generate": {
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      edits[key] = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      renderForm();
+      toast("New token generated. Save, restart the bot, and paste the same token into the Foundry module's settings (the headless client sets it itself).");
+      return;
+    }
+    case "reset": {
+      edits[key] = "";
+      renderForm();
+      return;
+    }
+    case "discard": edits = {}; return renderForm();
+    case "save": return save();
+    case "recheck": return loadSetup();
+    case "create-env": {
+      const ok = await attempt(() => api("POST", "/api/config/create-env", {}), ".env created from the template.");
+      if (ok) { await load(); loadSetup(); }
+      return;
+    }
+    case "test-llm": {
+      btn.disabled = true;
+      toast("Asking the LLM… (uses the settings the bot is running with)");
+      await attempt(() => api("POST", "/api/admin/llm/test", {}), (r) => r.ok ? `${r.provider} / ${r.model} answered in ${(r.ms / 1000).toFixed(1)} s.` : "The LLM answered, but not as expected.");
+      btn.disabled = false;
+      return;
+    }
+    case "restart-bot": {
+      const ok = await confirmDialog("Restart the bot?",
+        "<p>The bot shuts down cleanly and <code>start.ps1</code> starts it again with the new settings. It's back in Discord within a few seconds.</p>", { ok: "Restart bot" });
+      if (ok) await attempt(() => api("POST", "/api/admin/restart", {}), "Bot restarting…");
+      return;
+    }
+    case "restart-worker": return restartWorker(false);
+    case "save-campaign": return saveCampaign(btn.dataset.name);
+  }
+}
+
+async function save() {
+  const changed = view.settings.filter((s) => s.key in edits);
+  const problems = changed.flatMap((s) => warningsFor(s, edits[s.key]).map((w) => `<li><b>${esc(s.label)}</b>: ${esc(w)}</li>`));
+  if (problems.length) {
+    const ok = await confirmDialog("Save these settings?", `<p>Some of the new values are known to cost speed, accuracy or safety:</p><ul>${problems.join("")}</ul>`, { ok: "Save anyway" });
+    if (!ok) return;
+  }
+  try {
+    const r = await api("POST", "/api/config", { version: view.version, changes: edits });
+    edits = {};
+    toast(r.changed.length ? `Saved ${r.changed.length} setting(s) to .env.` : "Nothing changed.", "ok");
+    await load();
+    loadSetup();
+  } catch (err) {
+    if (err.body?.problems) {
+      const list = Object.entries(err.body.problems).map(([k, v]) => `<li><code>${esc(k)}</code>: ${esc(v)}</li>`).join("");
+      openDialog(`<form><h3>Not saved</h3><ul>${list}</ul><div class="actions"><button class="primary" value="cancel">OK</button></div></form>`);
+    } else {
+      toast(err.message, "err");
+    }
+  }
+}
+
+// ---------- campaign notes
+async function renderCampaign() {
+  const el = $("c-campaign");
+  const files = { glossary: "Names for speech-to-text and the summarizer: one per line, with an optional “: note”.",
+    context: "Setting, party and the story so far, for the summarizer." };
+  const parts = await Promise.all(Object.keys(files).map(async (name) => {
+    try {
+      return [name, await api("GET", `/api/campaign/${name}`)];
+    } catch {
+      return [name, null];
+    }
+  }));
+  el.innerHTML = `<details><summary><b>Campaign notes</b> <span class="muted small">glossary.md and context.md</span></summary>
+    ${parts.map(([name, f]) => `<div class="field" style="margin-top:12px"><span>${name}.md</span><small>${esc(files[name])} ${f ? `<code>${esc(f.path)}</code>` : ""}</small>
+      <textarea id="camp-${name}" spellcheck="false">${esc(f?.text ?? "")}</textarea>
+      <div class="row"><button data-act="save-campaign" data-name="${name}">Save ${name}.md</button>
+        <span class="muted small">Used from the next recording or summary on.</span></div></div>`).join("")}</details>`;
+}
+
+async function saveCampaign(name) {
+  await attempt(() => api("PUT", `/api/campaign/${name}`, { text: $(`camp-${name}`).value }), `${name}.md saved.`);
+}
