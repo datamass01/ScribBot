@@ -67,12 +67,18 @@ try {
 
 # --- Supervisor (docs/assessment/02 S3) -----------------------------------
 # Restart on a non-zero exit (a crash). A clean exit (Ctrl+C, code 0) ends the loop.
+# Exit code 75 is a requested restart (the Console's Restart button): immediate, never counted.
 # Gives up after 5 restarts within 10 minutes, so a broken setup doesn't spin forever.
 function Invoke-Supervised([string]$Name, [scriptblock]$Run) {
     $restarts = New-Object System.Collections.Generic.List[datetime]
     while ($true) {
         & $Run
         $code = $LASTEXITCODE
+        # 75: a restart was asked for (the Console, after a settings change). Not a crash: start again at once.
+        if ($code -eq 75) {
+            Write-Host "[$Name] restarting as requested..." -ForegroundColor Cyan
+            continue
+        }
         if ($code -eq 0 -or $NoRestart) { return $code }
         $now = Get-Date
         $restarts.Add($now)

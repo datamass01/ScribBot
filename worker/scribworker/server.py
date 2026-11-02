@@ -5,7 +5,9 @@
 - POST /jobs/transcribe: at the end. Builds transcript.json from the cache plus any clips not
   done live, and reports progress via GET /jobs/{id}.
 - POST /pause, POST /resume: hold the queue (the clip in progress finishes) and release it.
-  Both need a JSON body (e.g. {}), so a web page can't trigger them cross-site.
+- POST /restart: exit with code 75 so start-worker.ps1 starts it again at once, e.g. after the
+  Console changed a worker setting. The queue is rebuilt from disk on start (WORKER_RECOVER_HOURS).
+  All three need a JSON body (e.g. {}), so a web page can't trigger them cross-site.
 
 All work runs on one background thread: Whistle is one model per process and not thread-safe.
 The queue is ordered by priority (docs/assessment/02 S5): live clips first, then the end-of-session
@@ -62,6 +64,11 @@ RECENTLY_LIVE_S = 30 * 60
 
 # Errors that mean "this clip's file is bad", not "the model is broken".
 FILE_ERRORS = (OSError, EOFError, wave.Error)
+
+
+# start.ps1 / start-worker.ps1 restart a process that exits with this code at once, without
+# counting it as a crash (the bot's index.ts uses the same code).
+RESTART_EXIT_CODE = 75
 
 
 class PauseRequest(BaseModel):
@@ -175,6 +182,7 @@ def create_app(
     default_language: str | None = None,
     preload: bool = False,
     recover: bool | None = None,
+    exit_process: Callable[[int], None] = os._exit,
 ) -> FastAPI:
     settings = load_settings()
     data_root = (data_dir or settings.data_dir).resolve()
@@ -383,6 +391,14 @@ def create_app(
         state["paused_reason"] = None
         log.info("resumed; %d queued", pending.qsize())
         return {"paused": False, "queued": pending.qsize()}
+
+    @app.post("/restart")
+    def restart(req: PauseRequest) -> dict:
+        queued = pending.qsize() + state["held"]
+        log.info("restart requested (%s); %d queued, re-queued from disk on start", req.reason or "no reason given", queued)
+        # Answer first, then leave; the supervisor sees RESTART_EXIT_CODE and starts the worker again.
+        threading.Timer(0.5, exit_process, (RESTART_EXIT_CODE,)).start()
+        return {"restarting": True, "queued": queued}
 
     @app.post("/jobs/transcribe")
     def submit(req: TranscribeRequest) -> dict:
