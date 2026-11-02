@@ -21,8 +21,8 @@ ScribBot records tabletop RPG sessions on Discord, transcribes them locally with
 | `shared/schemas/` | JSON Schemas **generated** from the Zod types, and `settings.json` from `bot/src/settings-catalog.ts`; don't hand-edit |
 | `campaign/` | `glossary.md` (names fed to STT and the LLM) and `context.md` (story so far). Both are git-ignored and local only; change the committed `*.example.md` templates instead |
 | `docs/design.md` | Design document; diagrams are standalone SVGs in `docs/diagrams/` |
-| `.claude/skills/summarize-session/` | Story write-up skill (stdlib Python + prompt, any LLM); `template.md` fixes the sections, `verify.py` checks the result. Writes to `data/sessions/<id>/story/` |
-| `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/` |
+| `.claude/skills/summarize-session/` | Story write-up skill (stdlib Python + prompt, any LLM); `template.md` fixes the sections, `verify.py` checks the result. Writes to the session's `story/` folder |
+| `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/`. Sessions live in `data/campaigns/<world>/sessions/<NNN>/` with each Discord recording in `recordings/<id>/` (`docs/design.md` §6.1); `data/sessions/<id>/` is the old flat layout |
 
 Configuration is a single `.env` at the repo root (template: `.env.example`), validated by Zod in `bot/src/config.ts` and read by `worker/scribworker/config.py`.
 
@@ -63,6 +63,7 @@ LLM credentials: `LLM_PROVIDER=anthropic` needs `ANTHROPIC_API_KEY` (or an `ant 
 
 - **Zod is the source of truth** for every JSON contract (`bot/src/types.ts`, `bot/src/summarize/schema.ts`). The worker mirrors them in Pydantic (`worker/scribworker/models.py`). Change both, then run `npm run schemas`.
 - **Every pipeline stage writes its output to disk** and checks for it before running, so `/scrib process` can resume. Keep new stages resumable.
+- **Find session files with `sessionPaths(id)`** (`bot/src/paths.ts`), never by building `data/sessions/<id>` paths: it resolves through `sessions.dir`. `.recording` is what the recorder and worker write (timeline, audio, the worker's cache, uploads); `.dir` is the game's folder (transcript, chat log, summary, story), built from all its recordings by `composeSession()` (`bot/src/layout.ts`). Python code resolves the same way from the database (`monitoring.py`, `prepare.py`), and the worker only ever receives a recording folder.
 - **Atomic writes** for files other processes read: use `writeFileAtomic()` (`bot/src/fsutil.ts`), which writes `<file>.tmp` and renames with retries on Windows `EPERM`/`EBUSY`.
 - **`timeline.json` is a snapshot.** The recorder appends each clip to `timeline.segments.jsonl` and snapshots `timeline.json` every ~30 s. Read timelines with `readTimeline()` (bot) or `load_timeline()` (worker), never by parsing `timeline.json` alone, and never open it while the bot is recording that session.
 - **Nothing on the recording path may throw into the void.** Clip callbacks catch and log (`[recorder]`); new EventEmitters (connections, clients) get an `error` listener. An unhandled exception ends the recording.

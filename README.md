@@ -12,14 +12,19 @@ Discord voice ──► bot/ (Node)  ── one WAV per speech burst per speaker
 
 Discord sends each person's audio as a separate stream, so ScribBot always knows exactly who is speaking. No speaker diarization is needed.
 
-## What you get per session (`data/sessions/<id>/`)
+## What you get per session (`data/campaigns/<world>/sessions/012/`)
+
+Sessions are filed by Foundry world (the campaign; rename it in the Console without touching the folder) and by session number, with no date, since a game can run over several evenings.
 
 | File | Contents |
 |---|---|
-| `timeline.json` | Who spoke when, plus the clip files (deleted once transcribed, by default) |
 | `transcript.md` / `.json` | `[00:12:31] Thorin (Alice): Stand aside or taste my axe!` The Markdown is self-contained (what it is, how it was transcribed, who plays whom), so you can hand it to any LLM yourself |
 | `chatlog.json` | Foundry chat, dice rolls and combats during the session |
 | `summary.md` / `.json` | Title, recap, scenes, combats, verified quotes, character highlights, NPCs, loot, open threads |
+| `story/` | The story write-up, if you made one (below) |
+| `recordings/<id>/` | Each Discord recording's raw material: who spoke when, the clips (deleted once transcribed, by default) and its own transcript. A game split by a restart and merged has two |
+
+Sessions recorded before this layout are in `data/sessions/<id>/`. Move them with the Console (**Sessions → Update folder layout**) or `cd bot && npm run migrate-layout` (a dry run; add `-- --apply` with the bot stopped). Everything is backed up to `data/backups/` first.
 
 Quotes are checked against the transcript. Any quote the model cannot match to words someone actually said is dropped (and listed in `droppedQuotes`).
 
@@ -106,7 +111,7 @@ The bot sets the module's URL and token in its own browser, waits for the chat l
 - The chat log only includes messages everyone could see. Whispers and blind rolls are left out.
 - The combat log is still recorded by the GM's client, so a GM should be online during play.
 
-**Character and NPC details.** With each roster sync the module sends every character and NPC actor's race, sex/gender, age, height, weight, class(es) and levels, and max HP, read from PF1, dnd5e or pf2e sheets. The bot keeps the latest in `data/foundry-actors.json`, and a copy for each session in `data/sessions/<id>/actors.json`: it seeds the copy at `/scrib start`, and Foundry re-syncs on session start, on sheet changes during play and at `/scrib stop`. The story skill uses that copy for the character table, descriptions and pronouns.
+**Character and NPC details.** With each roster sync the module sends every character and NPC actor's race, sex/gender, age, height, weight, class(es) and levels, and max HP, read from PF1, dnd5e or pf2e sheets. The bot keeps the latest in `data/foundry-actors.json`, and a copy with each recording (`recordings/<id>/actors.json`, and the session's `actors.json`): it seeds the copy at `/scrib start`, and Foundry re-syncs on session start, on sheet changes during play and at `/scrib stop`. The story skill uses that copy for the character table, descriptions and pronouns.
 
 ## The Console
 
@@ -153,7 +158,7 @@ The bot writes `data/logs/bot-YYYY-MM-DD.log` and the worker `data/logs/worker-Y
 | Command | What it does |
 |---|---|
 | `/scrib start` | Joins your voice channel, posts a recording notice, and lists who is mapped to which character |
-| `/scrib stop` | Stops recording. The Foundry module uploads the chat/combat log and the transcript is finished and saved as `data/sessions/<id>/transcript.md`. By default that's where it stops: nothing is sent to an LLM. With `AUTO_SUMMARIZE=true`, a summary is also written, posted in Discord and imported into Foundry |
+| `/scrib stop` | Stops recording. The Foundry module uploads the chat/combat log and the transcript is finished and saved as `transcript.md` in the session's folder. By default that's where it stops: nothing is sent to an LLM. With `AUTO_SUMMARIZE=true`, a summary is also written, posted in Discord and imported into Foundry |
 | `/scrib map @user <character>` | Autocompletes from Foundry users/characters, or type any name. Picking a Foundry user also writes the Discord ID into Foundry |
 | `/scrib gm @user` | Marks the GM: their speech is treated as narration and NPC voices |
 | `/scrib mappings`, `/scrib status`, `/scrib sessions` | Info |
@@ -196,7 +201,7 @@ In Foundry, journal directory → **Import ScribBot Session**, or from a macro:
 Each clip is appended to `timeline.segments.jsonl` as soon as it's recorded; `timeline.json` is a snapshot written every 30 s, on a new speaker and at stop. Readers combine the two, so a crash loses at most the clip being spoken.
 
 ### Merging an interrupted game
-If a game still ends up as two sessions (a restart after the resume window, or a game deliberately recorded in two parts), merge them. Transcribe both (`/scrib process session:N`), then merge the second into the first with `/scrib merge a:N b:M` or, without restarting the bot, `npm run merge -- N M`. Session M's lines are shifted onto session N's clock, a `ScribBot` line marks the gap ("recording resumed after 12 min gap"), participants are combined, and Foundry chat and combats are de-duplicated. Session N's original `timeline.json`, `transcript.json`, `transcript.md` and `chatlog.json` are kept as `*.premerge-<M>`; session M's folder is left as it was and M is marked "Merged into session N", so it's no longer processed. While M's audio still exists its clips are copied into N's `audio/` (as `m<M>-*.wav`), so `/scrib process session:N retranscribe:true` keeps the merge; otherwise the transcripts are merged alone and re-transcribing N would drop M's lines. Speech while the bot was down was never recorded. Summarize the result with `/scrib summarize session:N`.
+If a game still ends up as two sessions (a restart after the resume window, or a game deliberately recorded in two parts), merge them. Transcribe both (`/scrib process session:N`), then merge the second into the first with `/scrib merge a:N b:M`, the Console's **Merge into an earlier session…**, or `npm run merge -- N M`. Session M's recording folder moves into session N's `recordings/`, and N's transcript, chat log and actors are rebuilt from both: M's lines on N's clock, a `ScribBot` line at the gap ("recording resumed after 12 min gap"), participants combined, Foundry chat and combats once each. Nothing is copied or deleted: M keeps its own audio (so re-transcribing N redoes both) and its own summary and story are kept beside its recording in `from-session-<M>/`. M is marked "Merged into session N" and no longer listed or processed on its own. Speech while the bot was down was never recorded. Summarize the result with `/scrib summarize session:N`. Both sessions must use the campaign folder layout.
 
 ## LLM providers
 | `LLM_PROVIDER` | Default model | Key |
@@ -208,10 +213,10 @@ If a game still ends up as two sessions (a restart after the resume window, or a
 Long sessions are summarized in two passes. Each ~25-minute chunk (`SUMMARY_CHUNK_MINUTES`) is turned into structured notes, separating in-character from out-of-character speech. The notes are then merged into the final summary. Output is schema-constrained JSON (see `shared/schemas/`).
 
 ### Story summaries with any LLM (agent skill)
-`.claude/skills/summarize-session/` writes a high-fantasy, story-style write-up in a fixed section order (high level summary, characters with class, level and player from Foundry, named NPCs, objectives completed, then the full story), plus a brief table-talk summary, of a session (`data/sessions/<id>/story/summary.story.md`) with any model, separate from `/scrib summarize`:
+`.claude/skills/summarize-session/` writes a high-fantasy, story-style write-up in a fixed section order (high level summary, characters with class, level and player from Foundry, named NPCs, objectives completed, then the full story), plus a brief table-talk summary, of a session (`story/summary.story.md` in the session's folder; all its recordings are stitched) with any model, separate from `/scrib summarize`:
 ```sh
 python .claude/skills/summarize-session/prepare.py <number|id|latest> [more sessions to stitch]   # drop Whisper hallucinations, build the evidence pack
-python .claude/skills/summarize-session/verify.py data/sessions/<id>/story/summary.story.md       # check quotes, layout, real names and damage numbers
+python .claude/skills/summarize-session/verify.py data/campaigns/<world>/sessions/<NNN>/story/summary.story.md       # check quotes, layout, real names and damage numbers
 ```
 If the transcript uses nicknames or names of people who aren't in Discord or Foundry ("Becca", "Robbie"), `prepare.py` stops with exit code 2 and suggests who each one is. Confirm with `--nickname "Becca=Alessandra Deiana"` (or `absent` / `not-a-person`), or answer the prompts when run in a terminal. Answers are kept in `data/nicknames.json`. `prepare.py` starts `summary.story.md` from the skill's `template.md` (whose headings fix the sections) and never overwrites one that exists; delete it to start over. The pack names the Foundry game system and the spells and abilities cast, so the story can name the spells that turn a scene (Implosion, Power Word Blind) while telling the rest by their effect. `PROMPT.md` holds the instructions for the writing model. See the skill's `SKILL.md` for small-context models and the hallucination rules.
 

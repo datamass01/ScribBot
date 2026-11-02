@@ -187,7 +187,22 @@ The status is stored in `sessions.status` and broadcast as `session.status` even
 
 ## 6. Data model
 
-### 6.1 Session folder (`data/sessions/<id>/`)
+### 6.1 Folders (`data/campaigns/<world>/sessions/<NNN>/`)
+
+A **campaign** is one Foundry world; its folder is the world's id (`game.world.id`), never renamed (the Console shows the world's title, or an alias set there). A **session** is one game, numbered within its campaign and filed by zero-padded number with no date, since a game can span several evenings. A database row is one **recording**: one Discord capture from `/scrib start` to `/scrib stop`. A game has one recording, or several when a continuation was merged in.
+
+```
+data/campaigns/<world>/sessions/012/              the game: what people open
+  transcript.md/.json  chatlog.json  actors.json  notes.json  summary.md/.json  story/
+  recordings/<recording id>/                       what the recorder and worker write
+    timeline.json  timeline.segments.jsonl  audio/  transcript.partial.jsonl
+    transcript.json/.md  chatlog.json  actors.json    (this recording alone)
+    from-session-013/                              a merged recording's own summary/story, kept
+```
+
+The database records each recording's folder (`sessions.dir`), and `sessionPaths(id)` (`bot/src/paths.ts`) resolves through it: `recording` for inputs, `dir` for the game. Rows from before the layout migration have no `dir` and resolve to the old flat `data/sessions/<id>/`, which is both. The game's files are **built from its recordings** by `composeSession()` (`bot/src/layout.ts`) after transcription, after a chat log upload and after a merge: each recording's lines shifted onto the game's clock with a `discordId: "scribbot"` marker line at each gap, chat logs combined (messages and combats once by `id`, the later combat copy wins), and the latest recording's actors. Composing never changes a recording, so it is safe to repeat.
+
+**Recording folder**
 
 | File | Writer | Contents | Lifetime |
 |---|---|---|---|
@@ -195,15 +210,24 @@ The status is stored in `sessions.status` and broadcast as `session.status` even
 | `timeline.segments.jsonl` | Bot | One segment per line, appended and fsynced as each clip is finished | Kept |
 | `audio/<user>/*.wav` | Bot | One clip per speech burst | Deleted on transcription, or `AUDIO_RETENTION_DAYS` after summary |
 | `transcript.partial.jsonl` | Worker | Per-clip STT cache (append-only) | Removed once `transcript.json` is written |
-| `transcript.json` / `.md` | Worker (rewritten by a merge) | Timestamped lines with speaker, character and GM flag | Kept |
-| `*.premerge-<n>` | Bot (`/scrib merge`) | A's timeline, transcript and chat log before session `n` was merged in | Kept |
-| `chatlog.json` | Bot (from Foundry) | Chat messages, rolls, combats, and the world's game system (`system`: Foundry's `game.system` id, title and version; module 0.5.0+, else `null`) | Kept |
-| `actors.json` | Bot (from Foundry) | Character and NPC details as they stood this session: name, type, race, sex/gender, age, height, weight, class(es) and levels, max HP. Seeded from `data/foundry-actors.json` at `/scrib start`, then replaced by the roster syncs Foundry sends at session start, during play and at stop | Kept |
-| `notes.json` | Bot | Pass 1 chunk notes | Kept |
-| `summary.json` / `.md` | Bot | Final summary plus `droppedQuotes`, provider and model | Kept |
-| `story/` | `summarize-session` skill (§8.1) | Evidence pack (`pack.md`, `chunks/`, `noise.md`, `lines.json`, `prompt-full.md`), the story `summary.story.md`, and any images it shows (`![alt](banner.png)`) | Kept; `prepare.py` never overwrites an existing `summary.story.md` |
+| `transcript.json` / `.md` | Worker | This recording's lines, timed from its own start | Kept |
+| `chatlog.json` | Bot (from Foundry) | Chat messages, rolls, combats for this recording's time window, and the world's game system (`system`; module 0.5.0+, else `null`) | Kept |
+| `actors.json` | Bot (from Foundry) | Character and NPC details: name, type, race, sex/gender, age, height, weight, class(es) and levels, max HP. Seeded from `data/foundry-actors.json` at `/scrib start`, replaced by the roster syncs at start, during play and at stop | Kept |
 
-A session deleted from the Console moves, folder and all, to `DATA_DIR/trash/<id>/` until it is restored or the trash is emptied.
+**Game folder**
+
+| File | Writer | Contents |
+|---|---|---|
+| `transcript.json` / `.md`, `chatlog.json`, `actors.json` | Bot (`composeSession`) | Built from the recordings, as above. Rebuilt any time |
+| `notes.json` | Bot | Pass 1 chunk notes |
+| `summary.json` / `.md` | Bot | Final summary plus `droppedQuotes`, provider and model |
+| `story/` | `summarize-session` skill (§8.1) | Evidence pack (`pack.md`, `chunks/`, `noise.md`, `lines.json`, `prompt-full.md`), the story `summary.story.md`, and any images it shows. `prepare.py` never overwrites an existing `summary.story.md` |
+
+**New recordings** go to the campaign of the Foundry world that synced most recently (`campaigns.last_seen_at`), else the campaign of the newest session, else `_unassigned` (no world seen yet); the Console's New recording dialog can pick another. Each roster sync creates or updates its world's campaign (`world`, and `worldTitle` from module 0.7.1). The Console's **Move to another campaign** moves a game's folder and renumbers it there.
+
+**Layout migration** (`bot/src/migrate-layout.ts`; `npm run migrate-layout [-- --apply]` with the bot stopped, or the Console's **Update folder layout** while nothing is recording, processing or queued in the worker). It plans first and changes nothing until applied. Then it copies `data/sessions`, `data/trash` and the database (`VACUUM INTO`) to `data/backups/layout-<time>/`, and moves one game at a time, recording each move in the database as it lands. Each session goes to the campaign of the world its chat log names (else the most named, else the newest seen), keeping its number unless that number is taken. A game that had a session merged into it by the old merge gets its own pre-merge files back from `*.premerge-<n>` (the earliest) as its recording, the clip copies an old merge made (`audio/<user>/m<n>-*.wav`) are removed, and the merged session's folder moves into its `recordings/`. Sessions in the trash are restructured in place, so restoring them lands in the campaign folder. Folders not in the database (`fixture-tts`) are left alone.
+
+A game deleted from the Console moves, folder and all recordings, to `DATA_DIR/trash/<id>/` until it is restored or the trash is emptied. A recording merged into a game can't be deleted on its own.
 
 All JSON contracts are defined in Zod (`bot/src/types.ts`, `bot/src/summarize/schema.ts`) and exported to `shared/schemas/*.schema.json`. The worker mirrors them in Pydantic (`worker/scribworker/models.py`).
 
@@ -211,7 +235,8 @@ All JSON contracts are defined in Zod (`bot/src/types.ts`, `bot/src/summarize/sc
 
 | Table | Key | Purpose |
 |---|---|---|
-| `sessions` | `id` | Guild, channels, per-guild `number`, `status`, `error`, timestamps, `audio_purged`; from migration 2: `title`, `notes`, `deleted_at` / `purged_at` (soft delete; the row stays so numbers are never reused, and `listSessions`/`latestSession` leave deleted ones out), `summary_sent_at` / `story_sent_at` (last `summary.ready` / `story.ready`); from migration 3: `summary_journal_at` / `summary_journal_name`, `story_journal_at` / `story_journal_name` (Foundry's confirmation, `POST /sessions/:id/journal`). The Console shows "in Foundry ✓" when the confirmation is at least as new as the last send, else "sent, not confirmed yet" |
+| `sessions` | `id` | One recording: guild, channels, `number` (per campaign; per guild before migration 4), `status`, `error`, timestamps, `audio_purged`; from migration 4: `campaign_id`, `dir` (its recording folder, §6.1), `merged_into_id` (the game it belongs to); from migration 2: `title`, `notes`, `deleted_at` / `purged_at` (soft delete; the row stays so numbers are never reused, and `listSessions`/`latestSession` leave deleted ones out), `summary_sent_at` / `story_sent_at` (last `summary.ready` / `story.ready`); from migration 3: `summary_journal_at` / `summary_journal_name`, `story_journal_at` / `story_journal_name` (Foundry's confirmation, `POST /sessions/:id/journal`). The Console shows "in Foundry ✓" when the confirmation is at least as new as the last send, else "sent, not confirmed yet" |
+| `campaigns` | `id` | One per Foundry world (migration 4): `world_id`, `folder` (fixed), `title` (from Foundry), `alias` (set in the Console), `last_seen_at` (last roster sync: where new recordings go). `_unassigned` has no world |
 | `mappings` | `(guild_id, discord_id)` | Manual `/scrib map` and `/scrib gm` assignments |
 | `roster` | `foundry_user_id` | Latest Foundry users with their assigned actor and Discord ID flag |
 
@@ -239,7 +264,7 @@ GMs (by `/scrib gm` or Foundry's `isGM`) are labelled `GM (Name)`. The prompt te
 
 ### 8.1 Story write-ups (`summarize-session` skill)
 
-Separate from `/scrib summarize` and from the bot process, `.claude/skills/summarize-session/` turns a finished session into a high-fantasy, story-style write-up with any LLM: an agent, a chat model the user pastes into, or a local model. It reads the session's files and `data/scribbot.db` but writes only to `data/sessions/<id>/story/` and `data/nicknames.json`; nothing is imported into Foundry.
+Separate from `/scrib summarize` and from the bot process, `.claude/skills/summarize-session/` turns a finished session into a high-fantasy, story-style write-up with any LLM: an agent, a chat model the user pastes into, or a local model. It reads the session's files and `data/scribbot.db` (finding each recording through `sessions.dir`; `DATA_DIR` is honoured) but writes only to the game's `story/` folder and `data/nicknames.json`; nothing is imported into Foundry. Given a session, it stitches all the game's recordings.
 
 | Piece | Role |
 |---|---|
@@ -303,13 +328,16 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 | `GET /admin/discord` | Guilds, voice channels (members, whether the bot may join), text channels it can post in, the last text channel used |
 | `GET /admin/sessions?deleted=exclude\|only\|include`, `GET /admin/sessions/:id` | Sessions with labels, files, Foundry send times, recording/processing state; the detail adds the folder, its files, speakers and clip count (never from `timeline.json` while recording) |
 | `GET /admin/sessions/:id/preview/:name` | `transcript.md`, `summary.md` or `story.md` as text (first 512 KB); no other file |
-| `POST /admin/sessions` `{guildId, voiceChannelId, textChannelId}` | Start recording; the recording notice goes to the text channel |
+| `POST /admin/sessions` `{guildId, voiceChannelId, textChannelId, campaignId?}` | Start recording; the recording notice goes to the text channel. Default campaign as in §6.1 |
 | `POST /admin/sessions/:id/stop`, `/process` `{retranscribe?}`, `/summarize` | As `/scrib stop`, `process`, `summarize`; results are posted in the session's text channel |
 | `POST /admin/sessions/:id/summary/import`, `/story/import` | Send to the Foundry journal (`summary.ready` with `manual`, `story.ready`) |
 | `POST /admin/sessions/:id/merge` `{into}` | `/scrib merge` |
 | `PATCH /admin/sessions/:id` `{title?, notes?}` | Labels |
 | `DELETE /admin/sessions/:id`, `POST …/restore`, `DELETE /admin/trash/:id` | Soft delete (refused while recording or processing), restore, delete permanently |
 | `GET /admin/mappings`, `PUT`/`DELETE /admin/mappings/:guild/:discordId`, `POST …/gm` | `/scrib mappings`, `map`, `unmap`, `gm` |
+| `GET /admin/campaigns`, `PATCH /admin/campaigns/:id` `{alias}` | Campaigns (one per Foundry world) with their session counts; set the name shown in the Console (the folder never changes) |
+| `POST /admin/sessions/:id/campaign` `{campaignId}` | Move a game, with its recordings, to another campaign; renumbered there |
+| `GET /admin/layout`, `POST /admin/layout/migrate` | Plan and run the move from `data/sessions/<id>` to campaign folders (§6.1). Refused while anything is recording or being processed, or while the worker has a queue |
 | `POST /admin/maintenance/purge-audio` | Audio retention now |
 | `POST /admin/llm/test` | One tiny structured call to the configured provider |
 | `POST /admin/restart` | Clean shutdown, exit code 75 (`start.ps1` starts the bot again at once); refused while recording or processing |
@@ -347,7 +375,7 @@ A local web app for setting up and running ScribBot from the desktop (`.\start-c
 
 **Model faults.** Errors that aren't about the file (missing, unreadable WAV) count as model failures. After `WORKER_RELOAD_AFTER_FAILURES` in a row the transcription thread drops the model and loads it again; if that fails, the worker exits with code 3 so `start-worker.ps1` restarts it. A watchdog thread logs any clip running longer than `WORKER_SLOW_CLIP_SECONDS`. The worker logs to `DATA_DIR/logs/worker-YYYY-MM-DD.log` (`LOG_RETENTION_DAYS`).
 
-**Recovery after a restart.** The queue is in memory. On start, the worker re-queues every clip under `DATA_DIR/sessions/*/audio/` that has no entry in the session's cache, for sessions without `transcript.json` touched in the last `WORKER_RECOVER_HOURS`. Those clips get glossary hotwords and `DELETE_AUDIO_AFTER_TRANSCRIBE`. It skips WAVs modified in the last 2 minutes, which the bot may still be writing. It never opens `timeline.json`, because the bot may be renaming over it. A session job the bot was polling when the worker restarted is resubmitted by the bot (it gets a 404 for the old job ID) and reuses everything already transcribed.
+**Recovery after a restart.** The queue is in memory. On start, the worker re-queues every clip in a recording folder's `audio/` (`DATA_DIR/campaigns/*/sessions/*/recordings/*/`, and old flat `DATA_DIR/sessions/*/`) that has no entry in the recording's cache, for recordings without `transcript.json` touched in the last `WORKER_RECOVER_HOURS`. Those clips get glossary hotwords and `DELETE_AUDIO_AFTER_TRANSCRIBE`. It skips WAVs modified in the last 2 minutes, which the bot may still be writing. It never opens `timeline.json`, because the bot may be renaming over it. A session job the bot was polling when the worker restarted is resubmitted by the bot (it gets a 404 for the old job ID) and reuses everything already transcribed.
 
 The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside the supported set (en, de, fr, es, it, nl, pl).
 
@@ -370,7 +398,7 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 | Worker or bot crash mid-transcription | `transcript.partial.jsonl` keeps finished clips, so only the rest are redone. A waiting bot retries unreachable polls for 5 minutes and resubmits a job the restarted worker doesn't know; the failure message names the session and the clips are kept. |
 | Process exits | `start.ps1` and `start-worker.ps1` restart a crashed bot or worker after 5 s (at most 5 times in 10 minutes); a clean exit ends the loop. Exit code 75 (a restart asked for from the Console) starts it again at once and isn't counted. Daily log files in `DATA_DIR/logs` keep what led up to it, and the bot logs its exit code and reason. |
 | Worker falls behind | The bot posts once per session in the text channel when the queue is more than `BACKLOG_WARN_MINUTES` behind. |
-| Bot crash or restart mid-session | Within `RESUME_WINDOW_MINUTES`, the bot rejoins and keeps recording the same session (§4.1). Otherwise the session is marked `failed`, the table is told, and `/scrib process` resumes from what is on disk. If a game still ends up as two sessions, once both are transcribed, `/scrib merge` (or `npm run merge`, `bot/src/merge.ts`) folds it into the first: B's lines and clips shifted by `B.startedAt − A.startedAt`, a `discordId: "scribbot"` marker line at the gap, participants unioned, chat and combats de-duplicated by `id`, A's files backed up as `*.premerge-<B number>`, B marked `complete` with error `Merged into session N` (the pipeline refuses to process it). B's WAVs are copied into A only if all of them still exist, so a retranscribe of A keeps B (but loses the marker line). |
+| Bot crash or restart mid-session | Within `RESUME_WINDOW_MINUTES`, the bot rejoins and keeps recording the same session (§4.1). Otherwise the session is marked `failed`, the table is told, and `/scrib process` resumes from what is on disk. If a game still ends up as two sessions, once both are transcribed, `/scrib merge` (or `npm run merge`, or the Console; `bot/src/merge.ts`) moves B's recording folder into A's `recordings/` and rebuilds A's files from both (§6.1): B's lines shifted by `B.startedAt − A.startedAt`, a marker line at the gap, participants unioned, chat and combats once each. Nothing is copied or deleted: B's audio stays with its recording, so re-transcribing A redoes both, and B's own summary and story are kept in `recordings/<B>/from-session-<NNN>/`. B is marked `complete` with error `Merged into session N` and `merged_into_id`; the pipeline refuses to process it on its own. Both must be in the campaign layout and the same campaign. |
 | LLM error, rate limit or refusal | Session marked `failed` with the error posted to Discord. `/scrib summarize` retries without re-transcribing. The Anthropic adapter retries on the API's fallback model for refusals. |
 | Partial writes | `timeline.json`, `transcript.json`, `chatlog.json`, `actors.json` and `foundry-actors.json` are written to `.tmp` and renamed; the bot retries the rename on `EPERM`/`EBUSY`/`EACCES` for about 2 s. A clip callback never throws: a failed snapshot is logged and the journal still lists the clip. |
 | Voice disconnect | The recorder waits 5 s for the connection to recover, then closes open clips and rejoins after 2, 5, 10, 20 and 30 s, then every minute, posting in the text channel when it drops, comes back, or isn't back after 5 tries. `/status` shows the connection state and warns while nothing is being recorded. |
@@ -408,10 +436,14 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Worker | `cd worker && .venv\Scripts\python -m pytest` | Clip-to-line conversion and labels, noise filtering, pause splitting, cache resume, live clip then delete, 48 to 16 kHz resampling, path confinement in the API, the segment journal, the filler filter, queue priorities, model reload after repeated errors, log files |
 | Console | `cd console && ..\worker\.venv\Scripts\python -m pytest` | Monitoring (the old watchdog's tests: `.env` parsing, relaying with the token, offline fallback, read-only database, pipeline, alerts, log copy, no live `timeline.json` reads), `.env` round trips (comments, CRLF, quoting both dotenv readers agree on, stale-version refusal), settings validation and secret masking against the real catalog, and the server end to end against a fake bot: CSRF checks, token never in a response, offline read-only sessions, restart tracking, token fallback, worker restart refusals |
 | Admin API | `cd bot && npm test` (`admin.test.ts`, `settings-catalog.test.ts`) | Lock-down (token, no Origin), soft delete and restore, refusals as messages, manual summary posting, previews, mappings, restart refusal; the catalog against `EnvSchema`, `.env.example` and the generated JSON |
-| Merge | `npm run merge -- <A> <B>` | Folds continuation session B into A (`bot/test/merge.test.ts` covers it on fixture copies) |
+| Merge | `npm run merge -- <A> <B>` | Moves continuation session B's recording into game A (`bot/test/merge.test.ts` covers it on fixture copies) |
+| Layout migration | `npm run migrate-layout` (`-- --apply` to do it) | Moves old flat session folders into campaign folders after a backup (`bot/test/migrate-layout.test.ts` covers an old merge with `*.premerge` files, the trash and rows with no folder) |
 | End to end without Discord | `npx tsx scripts/transcribe-dir.ts <dir>`, then `npm run summarize -- <id>` | Real Whistle and a real LLM on a recorded session folder (`data/sessions/fixture-tts` is a TTS fixture) |
 
 ## 14. Known limitations and open questions
+
+- **One Foundry world per bot at a time.** Sessions are filed per world (campaign), but the bot still broadcasts every event (`session.started`, `summary.ready`, `story.ready`, `roster.link`) to every connected module, and keeps one roster and one `foundry-actors.json`. A second world connected at the same time would export its chat log for the other table's sessions, import their journals and write Discord IDs from their mappings. Per-campaign routing, rosters and headless clients are the next step; until then connect one world.
+- **Campaign notes are global.** `campaign/glossary.md` and `context.md` are shared by every campaign; moving them into each campaign's folder comes with per-campaign routing.
 
 - **Chat log upload races transcription (without the headless client).** With a person's browser as the bridge, the pipeline doesn't wait for the module's `POST /chatlog`, so a slow upload could arrive after summarization has read the folder. The headless client (§3.2) closes this: the summary waits for the upload, up to `FOUNDRY_CHATLOG_WAIT_SECONDS`.
 - **Headless client limits.** It joins as a player, so the combat log still needs a GM online during play, and journals are created only while a GM is online. Login pages other than Foundry's own (e.g. The Forge's account login) aren't supported. Foundry allows one login per user, so nobody else may use the `ScribBot` user while the bot needs it.
