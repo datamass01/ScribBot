@@ -536,3 +536,25 @@ def test_preload_loads_the_model_on_the_transcription_thread(tmp_path):
     health = client.get("/health").json()
     assert (health["model"], health["loadError"]) == ("fake", None)
     assert seen == ["transcriber"]
+
+
+def test_unfinished_clips_in_campaign_recording_folders(session: Path, tmp_path: Path):
+    """Recordings live in campaigns/<world>/sessions/<NNN>/recordings/<id>/ (docs/design.md 6.1);
+    the game's own folder above them is never treated as a recording."""
+    import os
+    import shutil
+
+    from scribworker.transcribe import unfinished_clips
+
+    rec = tmp_path / "campaigns" / "erat" / "sessions" / "012" / "recordings" / "s1"
+    rec.parent.mkdir(parents=True)
+    shutil.move(str(session), str(rec))
+    (rec.parent.parent / "transcript.json").write_text("{}")  # the game's rebuilt transcript
+    old = time.time() - 600
+    for wav in rec.rglob("*.wav"):
+        os.utime(wav, (old, old))
+    found = unfinished_clips(tmp_path, 12)
+    assert {d for d, _ in found} == {rec}
+    assert len(found) == 3
+    (rec / "transcript.json").write_text("{}")  # this recording is done
+    assert unfinished_clips(tmp_path, 12) == []

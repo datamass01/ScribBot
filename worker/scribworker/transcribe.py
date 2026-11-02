@@ -599,6 +599,17 @@ def glossary_names(text: str) -> list[str]:
     return names
 
 
+def recording_dirs(data_root: Path) -> list[Path]:
+    """Every recording folder: campaigns/<world>/sessions/<NNN>/recordings/<id>/ (docs/design.md 6.1),
+    and old flat sessions/<id>/ folders not moved to the campaign layout yet."""
+    out: list[Path] = []
+    flat = data_root / "sessions"
+    if flat.is_dir():
+        out += [p for p in flat.iterdir() if p.is_dir()]
+    out += [p for p in data_root.glob("campaigns/*/sessions/*/recordings/*") if p.is_dir()]
+    return sorted(out)
+
+
 def unfinished_clips(data_root: Path, max_age_hours: float, now: float | None = None) -> list[tuple[Path, str]]:
     """(session dir, clip file) for audio that was recorded but never transcribed, oldest first.
 
@@ -612,10 +623,7 @@ def unfinished_clips(data_root: Path, max_age_hours: float, now: float | None = 
         return []
     now = time.time() if now is None else now
     found: list[tuple[Path, str]] = []
-    sessions = data_root / "sessions"
-    if not sessions.is_dir():
-        return []
-    for d in sorted(p for p in sessions.iterdir() if p.is_dir()):
+    for d in recording_dirs(data_root):
         audio = d / "audio"
         if (d / "transcript.json").exists() or not audio.is_dir():
             continue
