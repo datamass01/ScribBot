@@ -113,6 +113,10 @@ class Console:
         try:
             conn.row_factory = sqlite3.Row
             rows = [dict(r) for r in conn.execute("SELECT * FROM sessions ORDER BY started_at DESC LIMIT 200").fetchall()]
+            try:
+                campaigns = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM campaigns").fetchall()}
+            except sqlite3.Error:
+                campaigns = {}  # a database from before the campaign layout
         except sqlite3.Error as err:
             log(f"couldn't read {db}: {err}")
             return []
@@ -121,13 +125,17 @@ class Console:
         want = {"only": lambda r: bool(r.get("deleted_at")), "include": lambda r: True}.get(deleted, lambda r: not r.get("deleted_at"))
         out = []
         for r in rows:
-            if not want(r):
+            if not want(r) or r.get("merged_into_id"):
                 continue
-            folder = self.cfg.data_dir / "sessions" / r["id"]
+            folder = self.monitor.game_folder(r["id"])
             error = r.get("error") or ""
             merged = error.startswith("Merged into session ")
+            camp = campaigns.get(r.get("campaign_id"))
             out.append({
                 "id": r["id"], "guildId": r["guild_id"], "number": r["number"], "title": r.get("title"), "notes": r.get("notes"),
+                "campaignId": r.get("campaign_id"), "campaignFolder": camp["folder"] if camp else None,
+                "campaign": (camp.get("alias") or camp.get("title") or camp["folder"]) if camp else None,
+                "legacyLayout": not r.get("dir"), "recordings": 1,
                 "status": r["status"], "error": r.get("error"), "startedAt": r["started_at"], "endedAt": r.get("ended_at"),
                 "summarizedAt": r.get("summarized_at"), "audioPurged": bool(r.get("audio_purged")),
                 "deletedAt": r.get("deleted_at"), "purgedAt": r.get("purged_at"),

@@ -17,6 +17,8 @@ let detail = null;
 let fetchedAt = 0;
 let loading = false;
 let mappings = null;
+let campaigns = [];
+let campaignFilter = "all";
 
 export function show(el, s) {
   root = el;
@@ -25,7 +27,7 @@ export function show(el, s) {
     root.innerHTML = `
       <section class="card">
         <div class="card-head">
-          <h2>Sessions</h2><span class="spacer"></span>
+          <h2>Sessions</h2><span id="s-campaign"></span><span class="spacer"></span>
           <div class="toolbar">
             <button class="primary" data-act="new">● New recording</button>
             <div class="seg" role="group" aria-label="Show">
@@ -49,6 +51,9 @@ export function show(el, s) {
     root.dataset.ready = "1";
     root.addEventListener("click", onClick);
     $("s-search").addEventListener("input", (e) => { search = e.target.value.trim().toLowerCase(); render(); });
+    root.addEventListener("change", (e) => {
+      if (e.target.id === "s-campaign-filter") { campaignFilter = e.target.value; render(); }
+    });
     document.addEventListener("click", (e) => {
       if (!e.target.closest("#s-menu") && !e.target.closest("[data-act=menu]")) $("s-menu").hidden = true;
     });
@@ -75,6 +80,7 @@ async function refresh() {
     const r = await api("GET", `/api/admin/sessions?deleted=${filter === "trash" ? "only" : "exclude"}`);
     list = r.sessions || [];
     readOnly = Boolean(r.readOnly);
+    if (!readOnly) campaigns = (await api("GET", "/api/admin/campaigns").catch(() => ({ campaigns: [] }))).campaigns || [];
     fetchedAt = Date.now();
     render();
     if (selected) loadDetail(selected, false);
@@ -117,6 +123,8 @@ function actionsFor(s) {
     { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
       why: off || merged || (!s.hasStory ? "No story write-up yet." : null) },
     { act: "merge", label: "Merge into an earlier session…", hint: "For a game split in two by a restart.", why: off || busy || merged },
+    ...(campaigns.length > 1 ? [{ act: "move-campaign", label: "Move to another campaign…", hint: "Renumbers it there; its folder moves with it.",
+      why: off || busy || merged || (s.legacyLayout ? "Update the folder layout first." : null) }] : []),
     { act: "open", label: "Details, title and notes" },
     { act: "delete", label: "Delete…", danger: true, why: off || busy },
   ];
@@ -147,6 +155,7 @@ function primaryFor(s) {
 // ---------- the table
 function visible() {
   return list.filter((s) => {
+    if (campaignFilter !== "all" && String(s.campaignId) !== campaignFilter) return false;
     if (filter === "attention" && !(s.status === "failed" && s.mergedInto == null)) return false;
     if (!search) return true;
     return String(s.number) === search.replace(/^#/, "") || (s.title || "").toLowerCase().includes(search) || s.id.includes(search);
@@ -157,7 +166,14 @@ function render() {
   const banner = readOnly
     ? `<div class="notice readonly-banner" style="margin-bottom:10px">The bot isn't running, so sessions are read-only. Start it with <code>.\\start.ps1</code>.</div>`
     : "";
-  $("s-banner").innerHTML = banner;
+  // A merged recording moves with its game, so it isn't counted on its own.
+  const legacy = list.filter((s) => s.legacyLayout && s.mergedInto == null).length;
+  const layout = legacy && !readOnly
+    ? `<div class="notice warn" style="margin-bottom:10px">${legacy} session${legacy === 1 ? " uses" : "s use"} the old folder layout (<code>data\\sessions\\&lt;id&gt;</code>).
+        Moving them into campaign folders (<code>data\\campaigns\\&lt;world&gt;\\sessions\\012</code>) is needed to merge them; everything is backed up first.
+        <button data-act="migrate" style="margin-left:6px">Update folder layout…</button></div>` : "";
+  $("s-banner").innerHTML = banner + layout;
+  renderCampaignHeader();
   const rowsHtml = visible().map((s) => {
     const end = s.endedAt ? Date.parse(s.endedAt) : s.recording ? Date.now() : null;
     const length = end ? dur((end - Date.parse(s.startedAt)) / 1000) : "–";
@@ -172,7 +188,8 @@ function render() {
     const err = s.status === "failed" && s.error && s.mergedInto == null ? `<div class="error-text">${esc(s.error)}</div>` : "";
     return `<tr class="clickable ${selected === s.id ? "selected" : ""}" data-row="${esc(s.id)}">
       <td>${s.number}</td><td>${esc(when(s.startedAt))}</td>
-      <td>${s.title ? esc(s.title) : `<span class="muted">–</span>`}${err}</td>
+      <td>${s.title ? esc(s.title) : `<span class="muted">–</span>`}${s.recordings > 1 ? ` <span class="pill info" title="A game recorded in parts, merged into one">${s.recordings} recordings</span>` : ""}
+        ${campaigns.length > 1 && campaignFilter === "all" && s.campaign ? `<div class="muted small">${esc(s.campaign)}</div>` : ""}${err}</td>
       <td class="hide-narrow">${length}</td><td>${stat}${bar}</td>
       <td class="files hide-narrow">${f(s.hasTranscript, "T", "Transcript")}${f(s.hasChatlog, "C", "Chat log")}${f(s.hasSummary, "S", "Summary")}${f(s.hasStory, "St", "Story")}</td>
       <td class="hide-narrow small muted">${sent || "–"}</td>
@@ -233,6 +250,9 @@ async function onClick(e) {
     case "purge": return s && purge(s);
     case "save-labels": return s && saveLabels(s);
     case "preview": return s && preview(s, btn.dataset.name);
+    case "migrate": return migrateLayout();
+    case "move-campaign": return s && moveCampaign(s);
+    case "rename-campaign": return renameCampaign();
     case "close-detail": selected = null; detail = null; $("s-detail").hidden = true; return render();
     case "map-add": return mapDialog(null);
     case "map-edit": return mapDialog(mappings?.mappings.find((m) => m.discordId === btn.dataset.discord && m.guildId === btn.dataset.guild));
@@ -334,6 +354,9 @@ async function newRecording() {
   const r = await openDialog(`<form><h3>New recording</h3>
     <label class="field" ${guilds.length > 1 ? "" : "hidden"}><span>Server</span><select name="guildId" id="nr-guild">
       ${guilds.map((g) => `<option value="${esc(g.id)}">${esc(g.name)}${g.recording ? ` (recording #${g.recording.number})` : ""}</option>`).join("")}</select></label>
+    ${campaigns.length ? `<label class="field"><span>Campaign</span><select name="campaignId">
+      ${campaigns.map((c) => `<option value="${c.id}" ${c.isDefault ? "selected" : ""}>${esc(c.name)}${c.worldId ? "" : " (no Foundry world yet)"}</option>`).join("")}
+      </select><small>Numbered and filed under this campaign. The default is the Foundry world that synced most recently.</small></label>` : ""}
     <label class="field"><span>Voice channel</span><select name="voiceChannelId" id="nr-voice" required></select></label>
     <label class="field"><span>Text channel for notices</span><select name="textChannelId" id="nr-text" required></select>
       <small>The recording notice is posted here, as <code>/scrib start</code> would, so everyone knows they're being recorded.</small></label>
@@ -356,7 +379,9 @@ async function newRecording() {
   });
   if (!r) return;
   toast("Joining the voice channel…");
-  const res = await attempt(() => api("POST", "/api/admin/sessions", r.data), (x) => `Recording session ${x.session.number}.`);
+  const body = { ...r.data, ...(r.data.campaignId ? { campaignId: Number(r.data.campaignId) } : {}) };
+  if (!r.data.campaignId) delete body.campaignId;
+  const res = await attempt(() => api("POST", "/api/admin/sessions", body), (x) => `Recording session ${x.session.number}.`);
   fetchedAt = 0;
   refresh();
   return res;
@@ -407,6 +432,8 @@ function renderDetail() {
           <div class="row"><button data-act="save-labels" data-id="${esc(s.id)}" ${readOnly ? "disabled" : ""}>Save title and notes</button></div>
         </div>
         <div>${[
+          ["Campaign", s.campaign ? esc(s.campaign) : "–"],
+          ["Recordings", s.recordings ?? 1],
           ["Started", esc(when(s.startedAt))],
           ["Length", end ? dur((end - Date.parse(s.startedAt)) / 1000) : s.recording ? "recording" : "–"],
           ["Status", esc(s.status)],
@@ -522,4 +549,79 @@ async function setGm(guildId, discordId, isGm) {
 
 async function purgeAudio() {
   await attempt(() => api("POST", "/api/admin/maintenance/purge-audio", {}), (r) => `Audio purged for ${r.purged} session(s).`);
+}
+
+// ---------- campaigns (one per Foundry world) and the folder layout
+function renderCampaignHeader() {
+  const el = $("s-campaign");
+  if (!el) return;
+  if (!campaigns.length) { el.innerHTML = ""; return; }
+  if (campaigns.length === 1) {
+    const c = campaigns[0];
+    el.innerHTML = `<span class="muted small" title="Folder data\\campaigns\\${esc(c.folder)}">· ${esc(c.name)}</span>
+      <button class="link small" data-act="rename-campaign" data-campaign="${c.id}">Rename…</button>`;
+    return;
+  }
+  el.innerHTML = `<select id="s-campaign-filter" aria-label="Campaign">
+      <option value="all">All campaigns</option>
+      ${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === campaignFilter ? "selected" : ""}>${esc(c.name)} (${c.sessions})</option>`).join("")}
+    </select> <button class="link small" data-act="rename-campaign">Rename…</button>`;
+}
+
+async function renameCampaign() {
+  const current = campaigns.find((c) => String(c.id) === campaignFilter) ?? campaigns.find((c) => c.isDefault) ?? campaigns[0];
+  if (!current) return;
+  const r = await openDialog(`<form><h3>Rename a campaign</h3>
+    <label class="field" ${campaigns.length > 1 ? "" : "hidden"}><span>Campaign</span><select name="id">
+      ${campaigns.map((c) => `<option value="${c.id}" ${c.id === current.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
+    <label class="field"><span>Name shown here</span><input name="alias" maxlength="100" value="${esc(current.alias || "")}" placeholder="${esc(current.title || current.folder)}">
+      <small>Only the name shown in the Console changes. The folder stays <code>data\\campaigns\\${esc(current.folder)}</code>, named after the Foundry world
+        ${current.worldId ? `<code>${esc(current.worldId)}</code>` : ""}. Leave blank to use the world's title.</small></label>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div></form>`);
+  if (!r) return;
+  await attempt(() => api("PATCH", `/api/admin/campaigns/${encodeURIComponent(r.data.id || current.id)}`, { alias: r.data.alias.trim() || null }), "Saved.");
+  fetchedAt = 0;
+  refresh();
+}
+
+async function moveCampaign(s) {
+  const others = campaigns.filter((c) => c.id !== s.campaignId);
+  const r = await openDialog(`<form><h3>Move session ${s.number} to another campaign</h3>
+    <p class="muted small">Its folder, with all its recordings, moves to the other campaign, where it gets the next free number.
+      Use this for a recording filed under the wrong world, or one made before Foundry was connected.</p>
+    <label class="field"><span>Campaign</span><select name="campaignId" required>
+      ${others.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></label>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Move</button></div></form>`);
+  if (!r) return;
+  await run(s, "campaign", { campaignId: Number(r.data.campaignId) }, (x) => `Moved; it is now session ${x.session.number} of ${x.session.campaign}.`);
+}
+
+async function migrateLayout() {
+  let plan;
+  try {
+    plan = await api("GET", "/api/admin/layout");
+  } catch (err) {
+    return toast(err.message, "err");
+  }
+  if (!plan.pending) { toast("Every session already uses the campaign folders.", "ok"); fetchedAt = 0; return refresh(); }
+  const mb = Math.max(1, Math.round(plan.backupBytes / 1024 / 1024));
+  const rowsHtml = plan.plan.map((g) => `<tr><td>${g.number}${g.newNumber !== g.number ? ` → ${g.newNumber}` : ""}</td>
+      <td><code>${esc(g.campaign)}\\sessions\\${String(g.newNumber).padStart(3, "0")}</code>${g.inTrash ? " <span class=\"muted\">(in the trash)</span>" : ""}</td>
+      <td>${g.merged.length ? `+ session ${g.merged.join(", ")}` : ""}${g.notes.map((n) => `<div class="muted small">${esc(n)}</div>`).join("")}</td></tr>`).join("");
+  const r = await openDialog(`<form><h3>Update folder layout</h3>
+    <p>Each session moves from <code>data\\sessions\\&lt;id&gt;</code> into its campaign, named after the Foundry world:
+      <code>data\\campaigns\\&lt;world&gt;\\sessions\\012\\</code>. Summaries, transcripts and stories sit in that folder;
+      each Discord recording goes in its <code>recordings\\</code> sub-folder, and merged recordings move in with the game they continue.
+      Ids, Foundry journals and Discord stay as they are.</p>
+    <p class="notice ok small" style="margin:0">Everything is copied to <code>${esc(plan.backupDir)}</code> first (about ${mb} MB).</p>
+    ${plan.warnings.map((w) => `<p class="notice warn small" style="margin:0">${esc(w)}</p>`).join("")}
+    ${plan.busy ? `<p class="notice err small" style="margin:0">Not now: ${esc(plan.busy)}</p>` : ""}
+    <div class="table-wrap" style="max-height:40vh;overflow:auto"><table><thead><tr><th>#</th><th>New folder</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button>
+      <button class="primary" value="ok" ${plan.busy ? "disabled" : ""}>Back up and move ${plan.pending} session${plan.pending === 1 ? "" : "s"}</button></div></form>`, { wide: true });
+  if (!r) return;
+  toast("Backing up and moving…");
+  await attempt(() => api("POST", "/api/admin/layout/migrate", {}), (x) => `Moved ${x.moved} session(s). Backup: ${x.backupDir}`);
+  fetchedAt = 0;
+  refresh();
 }

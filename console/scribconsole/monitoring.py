@@ -361,6 +361,39 @@ class Monitor:
         self._crash: dict[str, Any] | None = None  # the bot went away mid-recording
         self._raised: set[str] = set()  # alert keys already written to the log file
         self._log_state = self.logfile.load_state()
+        self._dirs: dict[str, str | None] = {}
+        self._dirs_at = float("-inf")
+
+    # ---- where a session's recording is (the campaign layout, docs/design.md 6.1)
+
+    def recording_folder(self, session_id: str) -> Path:
+        """sessions.dir from the database (read-only, refreshed at most every 30 s), else the old
+        flat data/sessions/<id>/."""
+        now = self.clock()
+        if session_id not in self._dirs or now - self._dirs_at > 30:
+            self._dirs = self._read_dirs()
+            self._dirs_at = now
+        rel = self._dirs.get(session_id)
+        return self.cfg.data_dir.joinpath(*rel.split("/")) if rel else self.cfg.data_dir / "sessions" / session_id
+
+    def game_folder(self, session_id: str) -> Path:
+        folder = self.recording_folder(session_id)
+        return folder.parent.parent if folder.parent.name == "recordings" else folder
+
+    def _read_dirs(self) -> dict[str, str | None]:
+        db = self.cfg.data_dir / "scribbot.db"
+        if not db.exists():
+            return {}
+        try:
+            conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=1)
+        except sqlite3.Error:
+            return {}
+        try:
+            return {r[0]: r[1] for r in conn.execute("SELECT id, dir FROM sessions")}
+        except sqlite3.Error:
+            return {}  # a database from before the campaign layout: no dir column
+        finally:
+            conn.close()
 
     @property
     def bot_online(self) -> bool | None:
@@ -551,7 +584,7 @@ class Monitor:
 
     def _session(self, row: dict[str, Any]) -> dict[str, Any]:
         # Only called while the bot is down, so reading timeline.json can't get in its way.
-        folder = self.cfg.data_dir / "sessions" / row["id"]
+        folder = self.recording_folder(row["id"])
         clips = speakers = None
         try:
             timeline = json.loads((folder / "timeline.json").read_text(encoding="utf-8"))
@@ -572,9 +605,10 @@ class Monitor:
             "progress": None,
             "clips": clips,
             "speakers": speakers,
-            "hasTranscript": (folder / "transcript.json").exists(),
-            "hasChatlog": (folder / "chatlog.json").exists(),
-            "hasSummary": (folder / "summary.json").exists(),
+            # The game's files sit above its recordings in the campaign layout.
+            "hasTranscript": (self.game_folder(row["id"]) / "transcript.json").exists(),
+            "hasChatlog": (self.game_folder(row["id"]) / "chatlog.json").exists(),
+            "hasSummary": (self.game_folder(row["id"]) / "summary.json").exists(),
         }
 
     # ---- queue depth, conversion progress, quality, alerts, and whether it's safe to shut down
@@ -606,7 +640,7 @@ class Monitor:
         """A failed session with no transcript.json yet whose worker cache changed recently (stat only, no open)."""
         if session.get("status") != "failed":
             return False
-        folder = self.cfg.data_dir / "sessions" / session["id"]
+        folder = self.recording_folder(session["id"])
         try:
             if (folder / "transcript.json").exists():
                 return False
@@ -628,7 +662,7 @@ class Monitor:
         self, session: dict[str, Any], recording: dict[str, Any] | None, bot_online: bool, hotwords: dict[str, Any]
     ) -> dict[str, Any]:
         """How many of a session's clips have been turned into text so far, and how much of it is junk."""
-        folder = self.cfg.data_dir / "sessions" / session["id"]
+        folder = self.recording_folder(session["id"])
         live = bot_online and recording is not None
         # While the bot is recording it replaces timeline.json every couple of seconds by renaming over it;
         # on Windows that rename fails if we hold the file open. Use the bot's own clip count instead.
@@ -732,13 +766,12 @@ class Monitor:
             self._last_online_at = now_iso
             return
         if self._last_recordings and not self._crash:
-            folder = self.cfg.data_dir / "sessions"
             self._crash = {
                 "sessions": self._last_recordings,
                 "lastSeenAt": self._last_online_at,
                 # A .tmp left next to timeline.json means a timeline write never completed.
                 "timelineTmp": [r["number"] for r in self._last_recordings
-                                if (folder / r["sessionId"] / "timeline.json.tmp").exists()],
+                                if (self.recording_folder(r["sessionId"]) / "timeline.json.tmp").exists()],
             }
             self.logfile.event(f"bot went offline while recording session(s) {[r['number'] for r in self._last_recordings]}")
             self._last_recordings = []

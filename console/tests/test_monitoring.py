@@ -531,3 +531,17 @@ def test_no_log_folder_means_no_files(tmp_path):
     f.write(["x"])
     f.event("y")
     assert f.tail() == [] and list(tmp_path.iterdir()) == []
+
+
+def test_recording_folders_come_from_the_database(tmp_path):
+    """Campaign layout (docs/design.md 6.1): sessions.dir names the recording folder; old rows have none."""
+    db = sqlite3.connect(tmp_path / "scribbot.db")
+    db.execute("CREATE TABLE sessions (id TEXT, dir TEXT)")
+    db.execute("INSERT INTO sessions VALUES ('new', 'campaigns/erat/sessions/012/recordings/new'), ('old', NULL)")
+    db.commit()
+    db.close()
+    m = sm.Monitor(make_config(tmp_path), fake_fetch({}))
+    assert m.recording_folder("new") == tmp_path / "campaigns" / "erat" / "sessions" / "012" / "recordings" / "new"
+    assert m.game_folder("new") == tmp_path / "campaigns" / "erat" / "sessions" / "012"
+    assert m.recording_folder("old") == m.game_folder("old") == tmp_path / "sessions" / "old"
+    assert m.recording_folder("unknown") == tmp_path / "sessions" / "unknown"
