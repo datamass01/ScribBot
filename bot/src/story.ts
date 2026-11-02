@@ -117,10 +117,18 @@ export function storyAsset(sessionId: string, name: string): { file: string; typ
   return { file, type: ASSET_TYPES[name.split(".").pop()!.toLowerCase()]! };
 }
 
+/** Every session a session's story covers (a stitched story covers several), itself included. */
+export function storySessionIds(store: Store, session: SessionRow): string[] {
+  const found = findStoryFile(session.id);
+  const ids = new Set([session.id, ...(found ? [found.folderId, ...found.covers] : [])]);
+  return [...ids].filter((id) => store.getSession(id));
+}
+
 /** Asks the Foundry bridge to import a session's story as a journal entry. Throws if it isn't ready. */
 export function announceStory(store: Store, session: SessionRow): StoryFile {
   const story = loadStory(store, session);
   console.log(`[story] asking Foundry to import "${story.title}" (session ${story.sessionNumbers.join(" + ")})`);
   bus.emitEvent({ type: "story.ready", sessionId: story.sessionId, number: story.sessionNumber, title: story.title });
+  for (const id of storySessionIds(store, session)) store.markSent(id, "story");
   return story;
 }

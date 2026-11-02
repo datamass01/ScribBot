@@ -22,6 +22,21 @@ export interface SessionRow {
   ended_at: string | null;
   summarized_at: string | null;
   audio_purged: number;
+  /** GM-editable label and notes (the Console's Sessions tab). */
+  title: string | null;
+  notes: string | null;
+  /** Moved to DATA_DIR/trash (soft delete); null while the session is live. */
+  deleted_at: string | null;
+  /** Its trash folder was removed for good. The row stays so session numbers are never reused. */
+  purged_at: string | null;
+  /** When the summary or story was last sent to Foundry (summary.ready / story.ready). */
+  summary_sent_at: string | null;
+  story_sent_at: string | null;
+  /** When Foundry confirmed the journal entry exists (module 0.7.0+), and the entry's name. */
+  summary_journal_at: string | null;
+  summary_journal_name: string | null;
+  story_journal_at: string | null;
+  story_journal_name: string | null;
 }
 
 export interface MappingRow {
@@ -75,6 +90,18 @@ const MIGRATIONS: string[] = [
      actor_img TEXT,
      discord_id TEXT
    );`,
+  // 2: labels, soft delete and journal posting times for the Console (docs/console-design.md).
+  `ALTER TABLE sessions ADD COLUMN title TEXT;
+   ALTER TABLE sessions ADD COLUMN notes TEXT;
+   ALTER TABLE sessions ADD COLUMN deleted_at TEXT;
+   ALTER TABLE sessions ADD COLUMN purged_at TEXT;
+   ALTER TABLE sessions ADD COLUMN summary_sent_at TEXT;
+   ALTER TABLE sessions ADD COLUMN story_sent_at TEXT;`,
+  // 3: Foundry's confirmation that the journal entry exists (POST /sessions/:id/journal).
+  `ALTER TABLE sessions ADD COLUMN summary_journal_at TEXT;
+   ALTER TABLE sessions ADD COLUMN summary_journal_name TEXT;
+   ALTER TABLE sessions ADD COLUMN story_journal_at TEXT;
+   ALTER TABLE sessions ADD COLUMN story_journal_name TEXT;`,
 ];
 
 export class Store {
@@ -126,18 +153,53 @@ export class Store {
     return this.getSession(ref);
   }
 
+  /** The newest session that isn't in the trash. */
   latestSession(guildId?: string) {
     const sql = guildId
-      ? "SELECT * FROM sessions WHERE guild_id = ? ORDER BY started_at DESC LIMIT 1"
-      : "SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1";
+      ? "SELECT * FROM sessions WHERE guild_id = ? AND deleted_at IS NULL ORDER BY started_at DESC LIMIT 1"
+      : "SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY started_at DESC LIMIT 1";
     const stmt = this.db.prepare(sql);
     return (guildId ? stmt.get(guildId) : stmt.get()) as SessionRow | undefined;
   }
 
-  listSessions(limit = 20) {
+  /** Newest first. Deleted sessions are left out unless asked for. */
+  listSessions(limit = 20, opts: { deleted?: "exclude" | "include" | "only" } = {}) {
+    const where = { exclude: "WHERE deleted_at IS NULL", include: "", only: "WHERE deleted_at IS NOT NULL" }[opts.deleted ?? "exclude"];
     return this.db
-      .prepare("SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?")
+      .prepare(`SELECT * FROM sessions ${where} ORDER BY started_at DESC LIMIT ?`)
       .all(limit) as SessionRow[];
+  }
+
+  setSessionLabels(id: string, labels: { title?: string | null; notes?: string | null }) {
+    if (labels.title !== undefined) this.db.prepare("UPDATE sessions SET title = ? WHERE id = ?").run(labels.title, id);
+    if (labels.notes !== undefined) this.db.prepare("UPDATE sessions SET notes = ? WHERE id = ?").run(labels.notes, id);
+  }
+
+  markDeleted(id: string, deleted: boolean) {
+    this.db.prepare("UPDATE sessions SET deleted_at = ? WHERE id = ?").run(deleted ? new Date().toISOString() : null, id);
+  }
+
+  markPurged(id: string) {
+    this.db.prepare("UPDATE sessions SET purged_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+
+  /** Deleted sessions whose trash folder is still there, deleted before `olderThan`. */
+  trashOlderThan(olderThan: Date) {
+    return this.db
+      .prepare("SELECT * FROM sessions WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND deleted_at < ?")
+      .all(olderThan.toISOString()) as SessionRow[];
+  }
+
+  /** Foundry has the journal entry (the bridge client's confirmation). */
+  markJournal(id: string, what: "summary" | "story", name: string) {
+    this.db
+      .prepare(`UPDATE sessions SET ${what}_journal_at = ?, ${what}_journal_name = ? WHERE id = ?`)
+      .run(new Date().toISOString(), name, id);
+  }
+
+  markSent(id: string, what: "summary" | "story") {
+    const column = what === "summary" ? "summary_sent_at" : "story_sent_at";
+    this.db.prepare(`UPDATE sessions SET ${column} = ? WHERE id = ?`).run(new Date().toISOString(), id);
   }
 
   setSessionStatus(id: string, status: SessionStatus, error: string | null = null) {

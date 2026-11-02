@@ -208,7 +208,15 @@ export class CommandHandler {
       return;
     }
     await i.deferReply();
+    const { text } = await this.beginRecording(i.guildId, voice, i.channelId);
+    await i.editReply(text);
+  }
 
+  /**
+   * Creates the session, joins the voice channel and returns the recording notice to post.
+   * Shared by `/scrib start` and the Console; the callers check permissions first.
+   */
+  private async beginRecording(guildId: string, voice: VoiceBasedChannel, textChannelId: string | null) {
     // Warn early (but still record) if the worker is down: transcription can run later.
     let workerNote = "";
     try {
@@ -221,9 +229,9 @@ export class CommandHandler {
     const startedAt = new Date().toISOString();
     const session = this.store.createSession({
       id,
-      guildId: i.guildId,
+      guildId,
       channelId: voice.id,
-      textChannelId: i.channelId,
+      textChannelId,
       startedAt,
     });
 
@@ -238,20 +246,21 @@ export class CommandHandler {
       console.warn(`[commands] could not copy Foundry actor details into session ${id}: ${err}`);
     }
 
-    const recorder = this.makeRecorder(id, voice, i.channelId);
+    const recorder = this.makeRecorder(id, voice, textChannelId);
     try {
       await recorder.start();
     } catch (err) {
       this.store.setSessionStatus(id, "failed", `Could not join voice: ${err}`);
       throw new Error(`Could not connect to ${voice.name}: ${err instanceof Error ? err.message : err}`);
     }
-    this.recordings.set(i.guildId, { recorder, session, textChannelId: i.channelId });
+    this.recordings.set(guildId, { recorder, session, textChannelId });
     bus.emitEvent({ type: "session.started", sessionId: id, number: session.number, startedAt });
 
-    const mapped = this.describeVoiceMembers(i.guildId, voice.members.filter((m) => !m.user.bot).values());
-    await i.editReply(
-      `${recordingNotice({ sessionNumber: session.number, channel: String(voice), llm: config.llm, autoSummarize: config.autoSummarize })}\n\n${mapped}${workerNote}`,
-    );
+    const mapped = this.describeVoiceMembers(guildId, voice.members.filter((m) => !m.user.bot).values());
+    return {
+      session,
+      text: `${recordingNotice({ sessionNumber: session.number, channel: String(voice), llm: config.llm, autoSummarize: config.autoSummarize })}\n\n${mapped}${workerNote}`,
+    };
   }
 
   private makeRecorder(sessionId: string, voice: VoiceBasedChannel, textChannelId: string | null, resume?: RecorderOptions["resume"]) {
@@ -441,7 +450,14 @@ export class CommandHandler {
       return;
     }
     await i.deferReply();
-    this.recordings.delete(i.guildId);
+    const text = await this.endRecording(i.guildId, active);
+    await i.editReply(text);
+    this.runPipeline(active.session.id, i.channelId);
+  }
+
+  /** Stops a recording and returns the message for the table. Shared by `/scrib stop` and the Console. */
+  private async endRecording(guildId: string, active: ActiveRecording) {
+    this.recordings.delete(guildId);
     const timeline = await active.recorder.stop();
     const endedAt = timeline.endedAt!;
     this.store.endSession(active.session.id, endedAt);
@@ -454,12 +470,11 @@ export class CommandHandler {
     });
 
     const minutes = Math.round((Date.parse(endedAt) - Date.parse(timeline.startedAt)) / 60000);
-    await i.editReply(
+    return (
       `⏹️ **Session ${active.session.number} recording stopped**: ${minutes} min, ` +
-        `${timeline.segments.length} clips from ${timeline.participants.length} speaker(s).\n` +
-        `Transcribing and summarizing now. I'll post here when it's done.`,
+      `${timeline.segments.length} clips from ${timeline.participants.length} speaker(s).\n` +
+      `Transcribing and summarizing now. I'll post here when it's done.`
     );
-    this.runPipeline(active.session.id, i.channelId);
   }
 
   /** Set by index.ts when the headless Foundry client is on: waits for a just-stopped session's chat log. */
@@ -550,29 +565,37 @@ export class CommandHandler {
     const user = i.options.getUser("user", true);
     this.assertCanEdit(i, user.id);
     const value = i.options.getString("character", true).trim();
+    await i.reply(`✅ ${user} → ${this.setMapping(i.guildId, user.id, value)}`);
+  }
 
-    const previous = this.store.getMappings(i.guildId).find((m) => m.discord_id === user.id);
+  /**
+   * `value` is `foundry:<user id>` (a synced Foundry user) or any character name. Returns how it
+   * reads, e.g. "**Thorin** (Foundry user Alice)". Shared by `/scrib map` and the Console.
+   */
+  setMapping(guildId: string, discordId: string, value: string) {
+    value = value.trim();
+    if (!value) throw new Error("Pick a character.");
+    const previous = this.store.getMappings(guildId).find((m) => m.discord_id === discordId);
     if (value.startsWith("foundry:")) {
       const r = this.store.getRoster().find((x) => x.foundry_user_id === value.slice(8));
       if (!r) throw new Error("That Foundry user is no longer in the synced roster.");
       this.store.upsertMapping({
-        guildId: i.guildId,
-        discordId: user.id,
+        guildId,
+        discordId,
         foundryUserId: r.foundry_user_id,
         actorId: r.actor_id,
         characterName: r.actor_name,
         isGm: Boolean(r.is_gm),
       });
       const links: RosterLink[] = [];
-      if (previous?.foundry_user_id && previous.foundry_user_id !== r.foundry_user_id) links.push(unlink(previous.foundry_user_id, user.id));
-      if (r.discord_id !== user.id) links.push({ foundryUserId: r.foundry_user_id, discordId: user.id });
+      if (previous?.foundry_user_id && previous.foundry_user_id !== r.foundry_user_id) links.push(unlink(previous.foundry_user_id, discordId));
+      if (r.discord_id !== discordId) links.push({ foundryUserId: r.foundry_user_id, discordId });
       this.sendLinks(links);
-      await i.reply(`✅ ${user} → **${r.actor_name ?? "GM"}** (Foundry user ${r.user_name})`);
-    } else {
-      this.store.upsertMapping({ guildId: i.guildId, discordId: user.id, foundryUserId: null, actorId: null, characterName: value });
-      if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, user.id)]);
-      await i.reply(`✅ ${user} → **${value}** (not linked to a Foundry actor)`);
+      return `**${r.actor_name ?? "GM"}** (Foundry user ${r.user_name})`;
     }
+    this.store.upsertMapping({ guildId, discordId, foundryUserId: null, actorId: null, characterName: value });
+    if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
+    return `**${value}** (not linked to a Foundry actor)`;
   }
 
   /** Have the Foundry module store (or clear) "Discord ID" flags; GM-only there (05 C11). */
@@ -585,19 +608,27 @@ export class CommandHandler {
   private async unmap(i: ChatInputCommandInteraction<"cached">) {
     const user = i.options.getUser("user", true);
     this.assertCanEdit(i, user.id);
-    const previous = this.store.getMappings(i.guildId).find((m) => m.discord_id === user.id);
-    this.store.deleteMapping(i.guildId, user.id);
-    if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, user.id)]);
+    this.clearMapping(i.guildId, user.id);
     await i.reply({ content: `Removed mapping for ${user}.`, flags: MessageFlags.Ephemeral });
+  }
+
+  clearMapping(guildId: string, discordId: string) {
+    const previous = this.store.getMappings(guildId).find((m) => m.discord_id === discordId);
+    this.store.deleteMapping(guildId, discordId);
+    if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
   }
 
   private async gm(i: ChatInputCommandInteraction<"cached">) {
     const user = i.options.getUser("user", true);
     this.assertCanEdit(i, user.id);
     const isGm = i.options.getBoolean("is_gm") ?? true;
-    this.store.upsertMapping({ guildId: i.guildId, discordId: user.id, isGm });
-    if (isGm) this.sendLinks(linksToWrite(this.store.getAllMappings(), this.store.getRoster()));
+    this.setGm(i.guildId, user.id, isGm);
     await i.reply(isGm ? `🎲 ${user} is the GM.` : `${user} is no longer marked as GM.`);
+  }
+
+  setGm(guildId: string, discordId: string, isGm: boolean) {
+    this.store.upsertMapping({ guildId, discordId, isGm });
+    if (isGm) this.sendLinks(linksToWrite(this.store.getAllMappings(), this.store.getRoster()));
   }
 
   private async listMappings(i: ChatInputCommandInteraction<"cached">) {
@@ -623,25 +654,31 @@ export class CommandHandler {
     const ref = i.options.getString("session");
     const session = ref ? this.store.findSession(i.guildId, ref) : defaultSessionToProcess(this.store.listSessions(1000), i.guildId);
     if (!session) throw new Error(ref ? "No such session." : "No finished session to process.");
+    const retranscribe = !summaryOnly && (i.options.getBoolean("retranscribe") ?? false);
+    await this.checkProcess(session, summaryOnly, retranscribe);
+
+    await i.reply(`🔄 ${summaryOnly ? "Summarizing" : "Processing"} session ${session.number}${retranscribe ? " (re-transcribing)" : ""}…`);
+    // /scrib summarize is the explicit request to send the transcript to the LLM.
+    this.runPipeline(session.id, i.channelId, { retranscribe, ...(summaryOnly ? { summarize: true } : {}) });
+  }
+
+  /** Why `/scrib process` or `summarize` would be refused, thrown as an Error. Shared with the Console. */
+  private async checkProcess(session: SessionRow, summaryOnly: boolean, retranscribe: boolean) {
     const into = mergedInto(session);
     if (into != null) throw new Error(`Session ${session.number} was merged into session ${into}; process that one instead.`);
+    if (session.deleted_at) throw new Error(`Session ${session.number} is in the trash. Restore it first.`);
     if (session.status === "recording") throw new Error("That session is still recording.");
     if (isProcessing(session.id)) throw new Error("That session is already being processed.");
     const paths = sessionPaths(session.id);
     if (summaryOnly && !fs.existsSync(paths.transcriptJson)) {
       throw new Error("That session has no transcript yet; use `/scrib process` instead.");
     }
-    const retranscribe = !summaryOnly && (i.options.getBoolean("retranscribe") ?? false);
     if (summaryOnly) {
       // Say why it would fail before anything starts (02 S14).
       const problem = await llmConfigProblem();
       if (problem) throw new Error(problem);
     }
     if (retranscribe && session.audio_purged) throw new Error("Audio for that session was already deleted.");
-
-    await i.reply(`🔄 ${summaryOnly ? "Summarizing" : "Processing"} session ${session.number}${retranscribe ? " (re-transcribing)" : ""}…`);
-    // /scrib summarize is the explicit request to send the transcript to the LLM.
-    this.runPipeline(session.id, i.channelId, { retranscribe, ...(summaryOnly ? { summarize: true } : {}) });
   }
 
   private async story(i: ChatInputCommandInteraction<"cached">) {
@@ -650,6 +687,7 @@ export class CommandHandler {
       ? this.store.findSession(i.guildId, ref)
       : this.store.listSessions(1000).find((s) => s.guild_id === i.guildId && findStoryFile(s.id) !== null);
     if (!session) throw new Error(ref ? "No such session." : "No session has a story yet. Write one with the summarize-session skill.");
+    if (session.deleted_at) throw new Error(`Session ${session.number} is in the trash. Restore it first.`);
     const story = announceStory(this.store, session);
     await i.reply(
       `📜 Sent **${story.title}** (session ${story.sessionNumbers.join(" + ")}) to Foundry. ` +
@@ -667,17 +705,122 @@ export class CommandHandler {
       if (!s) throw new Error(`No session ${ref}.`);
       return s;
     }) as [SessionRow, SessionRow];
+    await i.reply(this.mergeInto(a, b));
+  }
+
+  /** Merges continuation session `b` into `a` and returns the message. Shared by `/scrib merge` and the Console. */
+  mergeInto(a: SessionRow, b: SessionRow) {
+    for (const s of [a, b]) {
+      if (s.deleted_at) throw new Error(`Session ${s.number} is in the trash. Restore it first.`);
+    }
     const r = mergeSessions(this.store, a.id, b.id, { isBusy: isProcessing });
     console.log(`[merge] session ${b.number} merged into session ${a.number} (${r.linesAdded} lines, gap ${formatGap(r.gapSec)})`);
     bus.emitEvent({ type: "session.status", sessionId: a.id, status: r.target.status, error: r.target.error });
     bus.emitEvent({ type: "session.status", sessionId: b.id, status: r.source.status, error: r.source.error });
     const warnings = r.warnings.map((w) => `\n⚠️ ${w}`).join("");
-    await i.reply(
+    return (
       `🔗 **Session ${b.number} merged into session ${a.number}**: ${r.linesAdded} transcript lines ` +
         `(gap ${formatGap(r.gapSec)}), ${r.chatAdded} chat messages, ${r.combatsAdded} combats` +
         `${r.audioCopied ? `, ${r.audioCopied} audio clips` : ""}. ` +
         `Session ${b.number}'s files are kept; session ${a.number}'s originals are backed up as \`*.premerge-${b.number}\`.` +
-        `${warnings}\nRun \`/scrib summarize session:${a.number}\` to summarize the whole game.`,
+        `${warnings}\nRun \`/scrib summarize session:${a.number}\` to summarize the whole game.`
     );
+  }
+
+  // ---------- the Console (/admin/*, bot/src/api/admin.ts) ----------
+  // Same checks and messages as the slash commands. The table still hears about everything in
+  // the session's text channel; errors are thrown with a message the Console shows as is.
+
+  isRecording(sessionId: string) {
+    return [...this.recordings.values()].some((r) => r.session.id === sessionId);
+  }
+
+  /** Guilds the bot is in, their voice channels (who's in them, whether the bot may join) and text channels it can post in. */
+  listChannels() {
+    return this.client.guilds.cache.map((g) => {
+      const me = g.members.me;
+      const voice = g.channels.cache
+        .filter((c): c is VoiceBasedChannel => c.isVoiceBased())
+        .map((c) => {
+          const perms = me ? c.permissionsFor(me) : null;
+          return {
+            id: c.id,
+            name: c.name,
+            canJoin: Boolean(perms?.has(PermissionFlagsBits.Connect) && perms.has(PermissionFlagsBits.ViewChannel)),
+            members: c.members.filter((m) => !m.user.bot).map((m) => ({ id: m.id, name: m.displayName })),
+          };
+        });
+      const text = g.channels.cache
+        .filter((c) => c.type === ChannelType.GuildText)
+        .filter((c) => {
+          const perms = me ? c.permissionsFor(me) : null;
+          return Boolean(perms?.has(PermissionFlagsBits.ViewChannel) && perms.has(PermissionFlagsBits.SendMessages));
+        })
+        .map((c) => ({ id: c.id, name: c.name }));
+      const recording = this.recordings.get(g.id);
+      return {
+        id: g.id,
+        name: g.name,
+        recording: recording ? { sessionId: recording.session.id, number: recording.session.number } : null,
+        lastTextChannelId: this.store.latestSession(g.id)?.text_channel_id ?? null,
+        voice,
+        text,
+      };
+    });
+  }
+
+  /** Starts recording from the Console. The recording notice goes to `textChannelId`, as `/scrib start` would post it. */
+  async startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string }) {
+    if (!this.client.isReady()) throw new Error("The bot isn't connected to Discord yet.");
+    const guild = this.client.guilds.cache.get(opts.guildId);
+    if (!guild) throw new Error("The bot isn't in that server.");
+    if (this.recordings.has(guild.id)) throw new Error("Already recording in this server. Stop that recording first.");
+    const voice = guild.channels.cache.get(opts.voiceChannelId);
+    if (!voice?.isVoiceBased()) throw new Error("That voice channel doesn't exist any more.");
+    const text = guild.channels.cache.get(opts.textChannelId);
+    if (!text?.isSendable()) throw new Error("Pick a text channel the bot can post in: the table must see the recording notice.");
+    const perms = guild.members.me ? voice.permissionsFor(guild.members.me) : null;
+    if (!perms?.has(PermissionFlagsBits.Connect) || !perms.has(PermissionFlagsBits.ViewChannel)) {
+      throw new Error(`The bot needs View Channel and Connect in ${voice.name}.`);
+    }
+    const { session, text: notice } = await this.beginRecording(guild.id, voice, text.id);
+    console.log(`[commands] session ${session.number}: recording started from the Console in ${voice.name}`);
+    await this.send(text.id, notice).catch((err) => console.error("[commands] recording notice failed:", err));
+    return session;
+  }
+
+  /** Stops a recording from the Console; the table is told in the session's text channel, then it's processed. */
+  async stopFromConsole(sessionId: string) {
+    const entry = [...this.recordings.entries()].find(([, r]) => r.session.id === sessionId);
+    if (!entry) throw new Error("That session isn't recording.");
+    const [guildId, active] = entry;
+    const text = await this.endRecording(guildId, active);
+    console.log(`[commands] session ${active.session.number}: recording stopped from the Console`);
+    await this.send(active.textChannelId, text).catch((err) => console.error("[commands] stop notice failed:", err));
+    this.runPipeline(active.session.id, active.textChannelId);
+    return active.session;
+  }
+
+  /** `/scrib process` (or `summarize` with summaryOnly) from the Console; results are posted in the session's text channel. */
+  async processFromConsole(session: SessionRow, opts: { summaryOnly?: boolean; retranscribe?: boolean }) {
+    const summaryOnly = Boolean(opts.summaryOnly);
+    const retranscribe = !summaryOnly && Boolean(opts.retranscribe);
+    await this.checkProcess(session, summaryOnly, retranscribe);
+    console.log(`[commands] session ${session.number}: ${summaryOnly ? "summarize" : "process"} requested from the Console${retranscribe ? " (re-transcribing)" : ""}`);
+    this.runPipeline(session.id, session.text_channel_id, { retranscribe, ...(summaryOnly ? { summarize: true } : {}) });
+  }
+
+  /** Display names for Discord user ids, for the Console's mapping table. Unknown users come back as null. */
+  async memberNames(guildId: string, ids: string[]) {
+    const guild = this.client.guilds.cache.get(guildId);
+    const out: Record<string, string | null> = {};
+    await Promise.all(
+      ids.map(async (id) => {
+        const cached = guild?.members.cache.get(id);
+        const member = cached ?? (guild ? await guild.members.fetch(id).catch(() => null) : null);
+        out[id] = member?.displayName ?? null;
+      }),
+    );
+    return out;
   }
 }

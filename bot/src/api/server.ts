@@ -10,8 +10,9 @@ import { bus } from "../events.js";
 import { linksToWrite } from "../links.js";
 import { logsSince } from "../monitor.js";
 import { foundryActorsFile, sessionPaths } from "../paths.js";
-import { announceStory, findStoryFile, loadStory, storyAsset } from "../story.js";
-import { ChatLogSchema, RosterPayloadSchema } from "../types.js";
+import { announceStory, findStoryFile, loadStory, storyAsset, storySessionIds } from "../story.js";
+import { ChatLogSchema, JournalAckSchema, RosterPayloadSchema } from "../types.js";
+import { adminGuard, registerAdminRoutes, type AdminDeps } from "./admin.js";
 import { buildStatus, type FoundryActivity, type MonitorSources } from "./status.js";
 
 const DASHBOARD_FILE = new URL("../../public/dashboard.html", import.meta.url);
@@ -38,7 +39,8 @@ const publicSession = (s: SessionRow) => ({
   hasStory: findStoryFile(s.id) !== null,
 });
 
-export async function startApi(store: Store, getRecording: () => SessionRow | null, monitor: MonitorSources = {}) {
+/** `admin`: the Console's routes (/admin/*); left out, they don't exist. */
+export async function startApi(store: Store, getRecording: () => SessionRow | null, monitor: MonitorSources = {}, admin?: AdminDeps) {
   const foundry: FoundryActivity = { sockets: 0, lastRosterAt: null, lastRosterWorld: null, lastChatlogAt: null };
   if (config.api.token === "change-me") {
     console.warn("[api] API_TOKEN is still 'change-me': set a real secret in .env");
@@ -60,6 +62,8 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     if (!tokenMatches(header ?? query)) {
       return reply.code(401).send({ error: "invalid or missing API token" });
     }
+    const refused = adminGuard(req);
+    if (refused) return reply.code(403).send({ ok: false, error: refused });
   });
 
   const findSession = (ref: string) => {
@@ -123,6 +127,8 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     return { ok: true, users: rows.length, actors: parsed.data.actors.length, links: links.length };
   });
 
+  if (admin) registerAdminRoutes(app, store, admin, () => foundry.sockets);
+
   app.get("/sessions", async () => store.listSessions(50).map(publicSession));
 
   app.get<{ Params: { id: string } }>("/sessions/:id", async (req, reply) => {
@@ -140,6 +146,20 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     foundry.lastChatlogAt = new Date().toISOString();
     bus.emitEvent({ type: "chatlog.received", sessionId: s.id });
     return { ok: true, messages: parsed.data.messages.length, combats: parsed.data.combats.length };
+  });
+
+  // The bridge client confirms a journal entry exists (module 0.7.0+), so the Console can say
+  // "in Foundry" rather than only "sent". Older modules never call this; nothing depends on it.
+  app.post<{ Params: { id: string } }>("/sessions/:id/journal", async (req, reply) => {
+    const s = findSession(req.params.id);
+    if (!s) return reply.code(404).send({ error: "no such session" });
+    const parsed = JournalAckSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    const { kind, name } = parsed.data;
+    const ids = kind === "story" ? storySessionIds(store, s) : [s.id];
+    for (const id of ids) store.markJournal(id, kind, name);
+    console.log(`[api] Foundry confirmed the ${kind} of session ${s.number} as journal entry "${name}"`);
+    return { ok: true, sessions: ids.length };
   });
 
   const serveJson = (key: "summary" | "transcriptJson") =>

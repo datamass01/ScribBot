@@ -29,7 +29,8 @@ export type ImportResult = { imported: true; name: string } | { imported: false;
 
 export interface FoundryPage {
   status(): Promise<PageStatus | null>;
-  importSummary(sessionId: string): Promise<ImportResult>;
+  /** `force`: import even with the module's auto-import off (someone asked for it from the Console). */
+  importSummary(sessionId: string, opts?: { force?: boolean }): Promise<ImportResult>;
   /** Imports a story write-up (module 0.6.0+). Never skipped by the auto-import setting: it was asked for. */
   importStory(sessionId: string): Promise<ImportResult>;
   /** Has the module upload a session's chat and combat log (it normally does so on session.stopped). */
@@ -101,6 +102,8 @@ export interface ClientOptions {
 
 /** Pending-import keys for stories; summaries are keyed by the bare session id (older state files too). */
 const STORY_PREFIX = "story:";
+/** A summary someone asked for (the Console): imported even with auto-import off. */
+const MANUAL_PREFIX = "summary:";
 
 /** "ScribBot joined to record session 12 and to import a session journal." */
 export function joinAnnouncement(user: string, reasons: string[]): string {
@@ -192,7 +195,9 @@ export class HeadlessFoundry {
       case "story.ready":
         // While joined, the module hears the event itself and imports it.
         if (this.state === "connected") break;
-        this.pending.add(e.type === "story.ready" ? `${STORY_PREFIX}${e.sessionId}` : e.sessionId);
+        this.pending.add(
+          e.type === "story.ready" ? `${STORY_PREFIX}${e.sessionId}` : e.manual ? `${MANUAL_PREFIX}${e.sessionId}` : e.sessionId,
+        );
         this.savePending();
         this.reasons.add("import");
         this.reconcile();
@@ -315,10 +320,15 @@ export class HeadlessFoundry {
     }
     for (const key of [...this.pending]) {
       const isStory = key.startsWith(STORY_PREFIX);
-      const sessionId = isStory ? key.slice(STORY_PREFIX.length) : key;
+      const manual = key.startsWith(MANUAL_PREFIX);
+      const sessionId = isStory ? key.slice(STORY_PREFIX.length) : manual ? key.slice(MANUAL_PREFIX.length) : key;
       const what = isStory ? "story" : "summary";
       try {
-        const r = isStory ? await page.importStory(sessionId) : await page.importSummary(sessionId);
+        const r = isStory
+          ? await page.importStory(sessionId)
+          : manual
+            ? await page.importSummary(sessionId, { force: true })
+            : await page.importSummary(sessionId);
         if (r.imported) this.log(`imported the ${what} of ${sessionId} as "${r.name}"`);
         else if (r.reason === "auto-import-off") this.log(`summary ${sessionId} is ready; auto-import is off in Foundry, so import it from the Journal sidebar`);
         if (r.imported || r.reason === "auto-import-off") this.pending.delete(key);

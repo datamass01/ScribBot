@@ -7,7 +7,8 @@ export type BotEvent =
   | { type: "session.started"; sessionId: string; number: number; startedAt: string }
   | { type: "session.stopped"; sessionId: string; number: number; startedAt: string; endedAt: string }
   | { type: "session.status"; sessionId: string; status: SessionStatus; error?: string | null }
-  | { type: "summary.ready"; sessionId: string; number: number; title: string }
+  /** `manual`: someone asked for it (the Console), so import it even with auto-import off (module 0.7.0+). */
+  | { type: "summary.ready"; sessionId: string; number: number; title: string; manual?: boolean }
   /** A story write-up (summarize-session skill) to import as a journal entry: /scrib story or POST …/story/import. */
   | { type: "story.ready"; sessionId: string; number: number; title: string }
   /** The module uploaded a session's chat and combat log (the headless client waits for it). */

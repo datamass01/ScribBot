@@ -70,7 +70,12 @@ const EnvSchema = z.object({
   BACKLOG_WARN_MINUTES: z.coerce.number().min(0).default(10),
   // Daily bot log files in DATA_DIR/logs, kept this many days (0 = no log files).
   LOG_RETENTION_DAYS: z.coerce.number().min(0).default(14),
+  // Sessions deleted from the Console wait in DATA_DIR/trash this many days (0 = until emptied by hand).
+  TRASH_RETENTION_DAYS: z.coerce.number().min(0).default(30),
 });
+
+/** The env schema, exported for the settings catalog test (bot/src/settings-catalog.ts). */
+export { EnvSchema };
 
 const env = EnvSchema.parse(process.env);
 
@@ -88,6 +93,9 @@ export const config = {
   },
   dataDir: resolveFromRoot(env.DATA_DIR),
   sessionsDir: path.join(resolveFromRoot(env.DATA_DIR), "sessions"),
+  /** Deleted sessions (soft delete from the Console), one folder per session id. */
+  trashDir: path.join(resolveFromRoot(env.DATA_DIR), "trash"),
+  trashRetentionDays: env.TRASH_RETENTION_DAYS,
   campaignDir: resolveFromRoot(env.CAMPAIGN_DIR),
   api: {
     host: env.API_HOST,

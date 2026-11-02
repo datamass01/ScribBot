@@ -113,6 +113,19 @@ export const ChatLogSchema = z.object({
 export type ChatLog = z.infer<typeof ChatLogSchema>;
 
 /** Roster pushed from Foundry: each user and their assigned character. */
+/**
+ * The bridge client's confirmation that a summary or story journal entry now exists in Foundry
+ * (module 0.7.0+), sent after it created or updated the entry itself or through the GM's client.
+ */
+export const JournalAckSchema = z.object({
+  kind: z.enum(["summary", "story"]),
+  /** The JournalEntry's id in the world. */
+  journalId: z.string().min(1).max(64),
+  name: z.string().min(1).max(300),
+  world: z.string().max(200).nullable().optional(),
+});
+export type JournalAck = z.infer<typeof JournalAckSchema>;
+
 export const RosterPayloadSchema = z.object({
   world: z.string().nullable().default(null),
   users: z.array(

@@ -10,6 +10,7 @@ import { DailyLog } from "./logfile.js";
 import { installLogCapture, writeLogFile } from "./monitor.js";
 import { sessionPaths } from "./paths.js";
 import { purgeExpiredAudio } from "./pipeline.js";
+import { purgeExpiredTrash } from "./trash.js";
 import { createHeadlessFoundry } from "./foundry/index.js";
 import { planRestart } from "./recovery.js";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -91,16 +92,26 @@ await startApi(store, () => commands.currentRecording(), {
   }),
   recordings: () => commands.activeRecordings(),
   foundryHeadless: () => foundry.status(),
+}, {
+  sessions: commands,
+  // Exit code 75: start.ps1 starts the bot again at once (the Console's "Restart bot" after a settings change).
+  restart: (reason) => void shutdown(reason, RESTART_EXIT_CODE),
 });
 await client.login(token);
 foundry.start();
 
-purgeExpiredAudio(store, config.audioRetentionDays);
-setInterval(() => purgeExpiredAudio(store, config.audioRetentionDays), 6 * 3600_000).unref();
+const housekeeping = () => {
+  purgeExpiredAudio(store, config.audioRetentionDays);
+  purgeExpiredTrash(store, config.trashRetentionDays);
+};
+housekeeping();
+setInterval(housekeeping, 6 * 3600_000).unref();
 setInterval(() => void commands.checkBacklog(config.backlogWarnMinutes), 60_000).unref();
 
 // ---------- shutdown (02 S8) ----------
 
+/** start.ps1 restarts the bot at once, without counting it as a crash. */
+const RESTART_EXIT_CODE = 75;
 let shuttingDown = false;
 async function shutdown(reason: string, code: number) {
   if (shuttingDown) return;

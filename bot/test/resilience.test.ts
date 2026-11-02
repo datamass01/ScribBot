@@ -140,7 +140,9 @@ describe("readTimeline (S10)", () => {
 function row(over: Partial<SessionRow>): SessionRow {
   return {
     id: "x", guild_id: "g", channel_id: "c", text_channel_id: "t", number: 1, status: "complete", error: null,
-    started_at: "2026-11-01T18:00:00.000Z", ended_at: null, summarized_at: null, audio_purged: 0, ...over,
+    started_at: "2026-11-01T18:00:00.000Z", ended_at: null, summarized_at: null, audio_purged: 0,
+    title: null, notes: null, deleted_at: null, purged_at: null, summary_sent_at: null, story_sent_at: null,
+    summary_journal_at: null, summary_journal_name: null, story_journal_at: null, story_journal_name: null, ...over,
   };
 }
 

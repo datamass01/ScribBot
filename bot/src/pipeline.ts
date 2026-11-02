@@ -43,6 +43,7 @@ export async function processSession(
   const merged = store.getSession(sessionId);
   const into = merged ? mergedInto(merged) : null;
   if (into != null) throw new Error(`This session was merged into session ${into}; process that one instead`);
+  if (merged?.deleted_at) throw new Error("This session is in the trash; restore it first");
   running.add(sessionId);
   const log = opts.log ?? console.log;
   const notify = async (text: string) => {
@@ -117,6 +118,7 @@ export async function processSession(
     store.markSummarized(sessionId);
     bus.emitEvent({ type: "session.status", sessionId, status: "complete" });
     bus.emitEvent({ type: "summary.ready", sessionId, number: session.number, title: file.summary.title });
+    store.markSent(sessionId, "summary");
     await opts.onSummary?.(file);
     return file;
   } catch (err) {

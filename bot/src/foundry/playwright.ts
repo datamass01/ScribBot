@@ -177,7 +177,7 @@ async function joinWorld(browser: Browser, opts: LaunchOptions, log: (msg: strin
 
   return {
     status: () => readStatus(page),
-    importSummary: (sessionId) => importSummary(page, sessionId),
+    importSummary: (sessionId, opts) => importSummary(page, sessionId, opts?.force ?? false),
     importStory: (sessionId) => importStory(page, sessionId),
     announce: (text) => announce(page, text),
     exportChatlog: async (sessionId) => {
@@ -281,15 +281,15 @@ async function readStatus(page: Page): Promise<PageStatus | null> {
     .catch(() => null);
 }
 
-async function importSummary(page: Page, sessionId: string): Promise<ImportResult> {
+async function importSummary(page: Page, sessionId: string, force: boolean): Promise<ImportResult> {
   return page.evaluate(
-    async ({ module, sessionId }) => {
+    async ({ module, sessionId, force }) => {
       const g = (globalThis as any).game;
-      if (!g.settings.get(module, "autoImport")) return { imported: false, reason: "auto-import-off" } as const;
+      if (!force && !g.settings.get(module, "autoImport")) return { imported: false, reason: "auto-import-off" } as const;
       const result = await g.modules.get(module).api.importSummary(sessionId);
       return result ? ({ imported: true, name: String(result.name) } as const) : ({ imported: false, reason: "no-gm" } as const);
     },
-    { module: MODULE, sessionId },
+    { module: MODULE, sessionId, force },
   );
 }
 
