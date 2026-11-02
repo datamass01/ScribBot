@@ -56,7 +56,7 @@ Confirmed names show up in the pack's "People at the table" table ("Also called"
 
 ### Step 2: write and verify the story
 
-Output goes to `data/sessions/<id>/story/` (git-ignored):
+Output goes to the session's `story/` folder, `data/campaigns/<world>/sessions/<NNN>/story/` (git-ignored; `data/sessions/<id>/story/` for sessions not yet moved to the campaign layout). Given a session, `prepare.py` stitches all its recordings (a merged continuation too):
 
 | File | Use |
 |---|---|
@@ -69,12 +69,12 @@ Output goes to `data/sessions/<id>/story/` (git-ignored):
 
 Then write the story:
 
-1. Read `.claude/skills/summarize-session/PROMPT.md` and `data/sessions/<id>/story/pack.md` in full.
-2. Fill in every section of `data/sessions/<id>/story/summary.story.md`, replacing each `<note>`. Keep the headings and their order exactly as they are.
+1. Read `.claude/skills/summarize-session/PROMPT.md` and the session's `story/pack.md` in full (`prepare.py` prints where it wrote it).
+2. Fill in every section of the session's `story/summary.story.md`, replacing each `<note>`. Keep the headings and their order exactly as they are.
 3. Verify it:
 
 ```sh
-python .claude/skills/summarize-session/verify.py data/sessions/2026-11-01-6ae0bcc6/story/summary.story.md
+python .claude/skills/summarize-session/verify.py data/campaigns/erat/sessions/012/story/summary.story.md
 ```
 
 The command exits 0 with `PASS`. It lists the source line of every verified quote, so a reviewer can check them against the pack. Each `FAIL` names what to fix. `WARN` lines (a quote that reads like a described action, a quote from a mechanics line, an overlong paragraph) are worth fixing but don't fail the run.
@@ -110,7 +110,7 @@ It **trims rather than drops** when real speech carries an outro ("…a drop off
 
 ## Character and NPC details from Foundry
 
-The ScribBot Foundry module sends, with every roster sync, each character and NPC actor's name, race, sex/gender, age, height, weight, class(es) and levels, and max HP (`foundry-module/scripts/actors.js`; PF1, dnd5e and pf2e sheets, racial hit dice left out, PF1 mythic tiers labelled, a dnd5e NPC with no race gets its creature type). The bot saves them in `data/foundry-actors.json` and, for the session, in `data/sessions/<id>/actors.json`:
+The ScribBot Foundry module sends, with every roster sync, each character and NPC actor's name, race, sex/gender, age, height, weight, class(es) and levels, and max HP (`foundry-module/scripts/actors.js`; PF1, dnd5e and pf2e sheets, racial hit dice left out, PF1 mythic tiers labelled, a dnd5e NPC with no race gets its creature type). The bot saves them in `data/foundry-actors.json` and, for each recording, in its `recordings/<id>/actors.json`:
 
 - at `/scrib start` it copies the last sync there;
 - Foundry re-syncs when it hears the session start and again at `/scrib stop`, and every sync while recording replaces the session's copy;

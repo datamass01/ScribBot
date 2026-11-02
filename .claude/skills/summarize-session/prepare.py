@@ -3,7 +3,8 @@
 
 Reads only what the app already wrote (transcript.json or transcript.partial.jsonl,
 timeline.json, chatlog.json, summary.json, campaign/*.md, data/scribbot.db) and
-writes everything into <out>/ (default data/sessions/<first-id>/story/):
+writes everything into <out>/ (default: the game's folder, data/campaigns/<world>/sessions/<NNN>/story/,
+or data/sessions/<first-id>/story/ for sessions not moved to the campaign layout yet):
 
   pack.md         the whole session: participants, campaign notes, Foundry facts,
                   noise report, and the cleaned chronological stream with line IDs
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -39,10 +41,30 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO = SKILL_DIR.parents[2]
-DATA = REPO / "data"
+# DATA_DIR as the bot and worker read it (relative paths start at the repo root); default data/.
+DATA = (REPO / os.environ["DATA_DIR"]).resolve() if os.environ.get("DATA_DIR") else REPO / "data"
 SESSIONS = DATA / "sessions"
 sys.path.insert(0, str(SKILL_DIR))
 import layout  # noqa: E402  (section order, limits and the story template, shared with verify.py)
+
+
+# ---------------------------------------------------------------- where sessions are
+
+# A session row is one Discord recording. Since the campaign layout (docs/design.md 6.1) its
+# folder is data/campaigns/<world>/sessions/<NNN>/recordings/<id>/ (sessions.dir), and a game is
+# its recordings: the session itself and any merged into it. Older rows have no dir and live in
+# the flat data/sessions/<id>/, which is both the recording and the game.
+_DIRS: dict[str, str | None] = {}
+
+
+def recording_folder(sid: str) -> Path:
+    rel = _DIRS.get(sid)
+    return DATA.joinpath(*rel.split("/")) if rel else SESSIONS / sid
+
+
+def game_folder(sid: str) -> Path:
+    folder = recording_folder(sid)
+    return folder.parent.parent if folder.parent.name == "recordings" else folder
 
 
 def foundry_actors(session_ids: list[str]) -> tuple[list[dict], str]:
@@ -50,7 +72,7 @@ def foundry_actors(session_ids: list[str]) -> tuple[list[dict], str]:
     (data/sessions/<id>/actors.json, saved at session start and stop), else the world-wide
     data/foundry-actors.json from the last sync."""
     for sid in reversed(session_ids):
-        f = SESSIONS / sid / "actors.json"
+        f = recording_folder(sid) / "actors.json"
         try:
             return json.loads(f.read_text(encoding="utf-8")), f"session {sid}"
         except (OSError, ValueError):
@@ -252,29 +274,50 @@ def db_connect():
     return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
 
 
-def resolve_session(arg: str, db) -> tuple[str, dict]:
-    """Return (folder id, db row as dict or {})."""
-    rows = []
-    if db is not None:
-        cur = db.execute("select id, number, status, started_at, ended_at from sessions order by started_at desc")
-        rows = [dict(zip(("id", "number", "status", "started_at", "ended_at"), r)) for r in cur]
+def session_rows(db) -> list[dict]:
+    """Every session row, newest first, with dir and merged_into_id when the database has them."""
+    if db is None:
+        return []
+    cols = {r[1] for r in db.execute("pragma table_info(sessions)")}
+    extra = [c for c in ("dir", "merged_into_id") if c in cols]
+    names = ["id", "number", "status", "started_at", "ended_at", *extra]
+    rows = [dict(zip(names, r)) for r in db.execute(f"select {', '.join(names)} from sessions order by started_at desc")]
+    for r in rows:
+        _DIRS[r["id"]] = r.get("dir")
+    return rows
+
+
+def has_transcript(sid: str) -> bool:
+    return (recording_folder(sid) / "transcript.json").exists() or (game_folder(sid) / "transcript.json").exists()
+
+
+def resolve_session(arg: str, rows: list[dict]) -> list[tuple[str, dict]]:
+    """The recordings of the game `arg` names (a number, an id or "latest"), oldest first, as (id, row)."""
     if arg == "latest":
-        for r in rows:
-            if r["status"] != "recording" and (SESSIONS / r["id"] / "transcript.json").exists():
-                return r["id"], r
-        sys.exit("No finished session with a transcript.json found.")
-    if arg.isdigit():
-        for r in rows:
-            if r["number"] == int(arg):
-                return r["id"], r
-        sys.exit(f"No session number {arg} in data/scribbot.db.")
-    if not (SESSIONS / arg).is_dir():
-        sys.exit(f"No session folder data/sessions/{arg}.")
-    return arg, next((r for r in rows if r["id"] == arg), {})
+        row = next((r for r in rows if r["status"] != "recording" and not r.get("merged_into_id") and has_transcript(r["id"])), None)
+        if row is None:
+            sys.exit("No finished session with a transcript.json found.")
+    elif arg.isdigit():
+        # Numbers count per campaign: the newest game with that number.
+        row = next((r for r in rows if r["number"] == int(arg) and not r.get("merged_into_id")), None)
+        if row is None:
+            sys.exit(f"No session number {arg} in data/scribbot.db.")
+    else:
+        row = next((r for r in rows if r["id"] == arg), None)
+        if row is None:
+            if not (SESSIONS / arg).is_dir():
+                sys.exit(f"No session {arg} in data/scribbot.db and no folder data/sessions/{arg}.")
+            return [(arg, {})]
+    game = row.get("merged_into_id") or row["id"]
+    parts = [r for r in rows if r["id"] == game or r.get("merged_into_id") == game]
+    parts = [r for r in parts if (recording_folder(r["id"]) / "timeline.json").exists()]
+    if not parts:
+        sys.exit(f"Session {row['number']} ({game}) has no recording on disk.")
+    return [(r["id"], r) for r in sorted(parts, key=lambda r: r["started_at"])]
 
 
 def load_session(sid: str, row: dict, mapped: dict[str, tuple[str | None, bool]]):
-    folder = SESSIONS / sid
+    folder = recording_folder(sid)
     if row.get("status") == "recording":
         sys.exit(f"Session {row.get('number')} ({sid}) is still recording. Summarize it after /scrib stop.")
     timeline = json.loads((folder / "timeline.json").read_text(encoding="utf-8"))
@@ -331,8 +374,8 @@ def load_session(sid: str, row: dict, mapped: dict[str, tuple[str | None, bool]]
     if (folder / "chatlog.json").exists():
         chat = json.loads((folder / "chatlog.json").read_text(encoding="utf-8"))
     summary = None
-    if (folder / "summary.json").exists():
-        summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+    if (game_folder(sid) / "summary.json").exists():
+        summary = json.loads((game_folder(sid) / "summary.json").read_text(encoding="utf-8"))
     return {
         "id": sid, "row": row, "timeline": timeline, "participants": list(parts.values()),
         "lines": lines, "gaps": gaps, "chat": chat, "summary": summary, "source": source,
@@ -890,7 +933,12 @@ def main():
     args = ap.parse_args()
 
     db = db_connect()
-    resolved = [resolve_session(a, db) for a in args.sessions]
+    rows = session_rows(db)
+    resolved: list[tuple[str, dict]] = []
+    for a in args.sessions:
+        for sid, row in resolve_session(a, rows):
+            if sid not in {x for x, _ in resolved}:
+                resolved.append((sid, row))
     camp, glossary_names = read_campaign()
     mapped = {}
     if db is not None:
@@ -1001,7 +1049,7 @@ def main():
                           and has_details(a) and mentioned(a["name"], said)), key=lambda a: a["name"])[:40]
 
     first = sessions[0]
-    out = args.out or (SESSIONS / first["id"] / "story")
+    out = args.out or (game_folder(first["id"]) / "story")
     (out / "chunks").mkdir(parents=True, exist_ok=True)
     if cands and not args.unconfirmed_ok:
         report_unconfirmed(cands, folks, out)
@@ -1013,7 +1061,9 @@ def main():
     last = sessions[-1]
     span = ((last["end_ms"] or (last["start_ms"] + 1000 * max((l.end for l in last["lines"]), default=0))) - t0) / 1000
     notes = []
-    for s in sessions:
+    # Only the last recording's missing end matters: an earlier one is followed by the next
+    # recording, and the gap between them is marked [RECORDING RESUMED …] in the pack.
+    for s in sessions[-1:]:
         if not s["end_ms"]:
             notes.append(f"- Session #{s['row'].get('number')} has no end time: the recording was interrupted (bot crash), so the record stops mid-scene. Close the story on the last moment it supports, as a natural pause, without mentioning the recording, at {fmt(max((l.end for l in s['lines']), default=0) + (s['start_ms'] - t0) / 1000)}.")
         if not s["chat"]:
