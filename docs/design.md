@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Living document, describes the code as of 2026-11-01 |
-| **Components** | `bot/` (Node.js), `worker/` (Python), `foundry-module/` (FoundryVTT), `shared/schemas/`, `monitor/` (optional), `.claude/skills/summarize-session/` (story write-ups) |
+| **Components** | `bot/` (Node.js), `worker/` (Python), `foundry-module/` (FoundryVTT), `shared/schemas/`, `console/` (the Console, optional), `.claude/skills/summarize-session/` (story write-ups) |
 | **Audience** | Contributors and anyone deploying ScribBot for their table |
 
 ## 1. Purpose
@@ -77,6 +77,8 @@ ScribBot turns a tabletop RPG session played over Discord into a written record 
 |---|---|
 | Data contracts | JSON Schema files in `shared/schemas/`, generated from the Zod types with `npm run schemas` |
 | Monitoring UI | Single static page `bot/public/dashboard.html` (plain HTML/JS, polls `/status` every 3 s) |
+| Management UI | The Console (`console/`, §9.2a): Python standard library server plus plain ES modules, no build step |
+| Settings catalog | `bot/src/settings-catalog.ts`, exported to `shared/schemas/settings.json` for the Console's Configuration tab |
 | LLM providers | Anthropic Claude (default `claude-opus-5-5`), xAI Grok (`grok-4`), or any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, OpenRouter) |
 | Story write-ups | Agent skill `.claude/skills/summarize-session/`: standard-library Python scripts plus a prompt, usable with any LLM (§8.1) |
 
@@ -84,12 +86,13 @@ ScribBot turns a tabletop RPG session played over Discord into a written record 
 
 ![Component architecture](diagrams/architecture.svg)
 
-ScribBot is three processes plus Foundry:
+ScribBot is three processes plus Foundry, and the optional Console:
 
 | Process | Responsibility | Listens on |
 |---|---|---|
 | **Bot** (`bot/src/index.ts`) | Discord client, voice recording, pipeline orchestration, summarization, API for Foundry, dashboard | `127.0.0.1:7420` |
 | **Worker** (`worker/scribworker`) | Loads Whistle once and transcribes clips on a single background thread | `127.0.0.1:7421` |
+| **Console** (`console/scribconsole`, optional) | Desktop management page: sessions, monitoring, `.env` settings. Drives the bot through `/admin/*`; nothing depends on it (§9.2a) | `127.0.0.1:7422` |
 | **Foundry module** | Runs in the bridge user's browser (the active GM's by default, or a player chosen in the **Bridge user** setting, which can be the bot's own headless client, §3.2). It pushes the roster and chat log to the bot and pulls summaries into the journal. GM-only writes (journal entries, combat log) stay on the active GM's client, reached over Foundry's module socket when the bridge is a player | (client only) |
 | **LLM provider** | Remote or local model behind `LLMProvider.generateJson()` | (external) |
 
@@ -97,7 +100,7 @@ ScribBot is three processes plus Foundry:
 
 | Module | Role |
 |---|---|
-| `commands.ts` | `/scrib` slash command handler. Owns the map of active recordings (one per guild) and posts results to Discord. Also resumes interrupted recordings after a restart, stops them cleanly on shutdown, and warns about a worker backlog. |
+| `commands.ts` | `/scrib` slash command handler. Owns the map of active recordings (one per guild) and posts results to Discord. Also resumes interrupted recordings after a restart, stops them cleanly on shutdown, and warns about a worker backlog. Start, stop, process, merge and map are shared methods (`beginRecording`, `endRecording`, `checkProcess`, `mergeInto`, `setMapping`…) that the Console's routes call too, so both interfaces check and say the same things. |
 | `recorder.ts` | `SessionRecorder`: joins voice muted, subscribes to each speaker, writes one WAV per speech burst, journals each clip to `timeline.segments.jsonl` and snapshots `timeline.json`. Rejoins the channel by itself when the voice connection is lost. Never throws from a clip callback. |
 | `recovery.ts` | Startup plan for sessions the last process left mid-flight (resume, mark failed, or process), and the default session for `/scrib process`. |
 | `timeline.ts` | `readTimeline()`: the snapshot plus journal-only clips. |
@@ -112,6 +115,9 @@ ScribBot is three processes plus Foundry:
 | `db.ts` | `Store`: SQLite access with versioned migrations. |
 | `events.ts` | In-process `EventEmitter` bus. Its events are forwarded to Foundry over the WebSocket. |
 | `api/server.ts`, `api/status.ts`, `api/pipeline.ts` | Fastify routes, token auth, CORS, `/status` health aggregation with warnings, and its `pipeline` block (queue, conversion, quality, alerts, shutdown advice). |
+| `api/admin.ts` | The Console's `/admin/*` routes (§9.2), wrapping the same `CommandHandler` methods the slash commands use. |
+| `trash.ts` | Soft delete: moving a session folder to `DATA_DIR/trash/`, restoring it, emptying the trash (`TRASH_RETENTION_DAYS`). |
+| `settings-catalog.ts` | Every `.env` variable with its label, help, type, default, the processes that read it and the values known to cost speed; exported to `shared/schemas/settings.json`. |
 | `monitor.ts` | Captures console output into a ring buffer for `/logs` and the dashboard, and into the daily log file. |
 | `story.ts` | Finds a session's story write-up (§8.1), its own or a stitched one whose `lines.json` covers it, refuses unfinished ones, lists its images, and emits `story.ready`. |
 | `campaign.ts` | Loads `campaign/glossary.md` and `context.md` and builds STT keyword lists. Both are git-ignored; `ensureCampaignFiles()` creates them at startup from the committed `*.example.md` templates. |
@@ -144,7 +150,7 @@ While joined, the module handles `summary.ready` and `story.ready` itself. Other
 ![Recording session sequence](diagrams/session-sequence.svg)
 
 1. **Start.** `/scrib start` creates a session row (`recording`), joins the caller's voice channel muted and undeafened, posts a recording notice with the speaker-to-character map, and emits `session.started`.
-2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. The segment is appended (and fsynced) to `timeline.segments.jsonl` *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. `timeline.json` itself is a snapshot, written atomically on a new speaker, every 30 s while clips arrive, and at stop; readers (`readTimeline()` in the bot, `load_timeline()` in the worker, the watchdog) union the two by file. This keeps the I/O linear instead of rewriting a growing file per clip, and makes a failed rename (Windows `EPERM`/`EBUSY` while another process holds the file; retried with backoff) harmless. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
+2. **During play.** Each `speaking.start` opens an Opus subscription that ends after 800 ms of silence. The clip is decoded to 16 kHz mono and written as `audio/<userId>/<startMs>.wav`. The segment is appended (and fsynced) to `timeline.segments.jsonl` *before* the clip is handed to the worker, so the timeline always lists clips that may later be deleted. `timeline.json` itself is a snapshot, written atomically on a new speaker, every 30 s while clips arrive, and at stop; readers (`readTimeline()` in the bot, `load_timeline()` in the worker, the Console) union the two by file. This keeps the I/O linear instead of rewriting a growing file per clip, and makes a failed rename (Windows `EPERM`/`EBUSY` while another process holds the file; retried with backoff) harmless. With `DELETE_AUDIO_AFTER_TRANSCRIBE=true`, the clip is transcribed immediately and its WAV deleted.
 3. **Stop.** `/scrib stop` flushes open streams, finalizes the timeline, and emits `session.stopped`. The bridge user's Foundry module responds by uploading the chat, roll and combat log for the session's time window. With the headless client (§3.2), the summary waits for that upload.
 4. **Transcribe.** The bot submits a session job. The worker reuses every cached clip result, transcribes any leftovers (for example, clips recorded while it was down), and writes `transcript.json` and `transcript.md`. The Markdown is self-contained for any LLM or reader: an "About this transcript" section (what it is, when, the speech-to-text model and language, the line format, that names may be misheard), a player-to-character table, then the timed lines. With `AUTO_SUMMARIZE=false` (the default) the session is marked `complete` here, the bot posts where the transcript is saved, and nothing is sent to an LLM; steps 5 and 6 run only on `/scrib summarize`.
 5. **Summarize.** Two LLM passes produce `summary.json`, and quotes are verified (see §8).
@@ -197,13 +203,15 @@ The status is stored in `sessions.status` and broadcast as `session.status` even
 | `summary.json` / `.md` | Bot | Final summary plus `droppedQuotes`, provider and model | Kept |
 | `story/` | `summarize-session` skill (§8.1) | Evidence pack (`pack.md`, `chunks/`, `noise.md`, `lines.json`, `prompt-full.md`), the story `summary.story.md`, and any images it shows (`![alt](banner.png)`) | Kept; `prepare.py` never overwrites an existing `summary.story.md` |
 
+A session deleted from the Console moves, folder and all, to `DATA_DIR/trash/<id>/` until it is restored or the trash is emptied.
+
 All JSON contracts are defined in Zod (`bot/src/types.ts`, `bot/src/summarize/schema.ts`) and exported to `shared/schemas/*.schema.json`. The worker mirrors them in Pydantic (`worker/scribworker/models.py`).
 
 ### 6.2 SQLite (`data/scribbot.db`)
 
 | Table | Key | Purpose |
 |---|---|---|
-| `sessions` | `id` | Guild, channels, per-guild `number`, `status`, `error`, timestamps, `audio_purged` |
+| `sessions` | `id` | Guild, channels, per-guild `number`, `status`, `error`, timestamps, `audio_purged`; from migration 2: `title`, `notes`, `deleted_at` / `purged_at` (soft delete; the row stays so numbers are never reused, and `listSessions`/`latestSession` leave deleted ones out), `summary_sent_at` / `story_sent_at` (last `summary.ready` / `story.ready`); from migration 3: `summary_journal_at` / `summary_journal_name`, `story_journal_at` / `story_journal_name` (Foundry's confirmation, `POST /sessions/:id/journal`). The Console shows "in Foundry ✓" when the confirmation is at least as new as the last send, else "sent, not confirmed yet" |
 | `mappings` | `(guild_id, discord_id)` | Manual `/scrib map` and `/scrib gm` assignments |
 | `roster` | `foundry_user_id` | Latest Foundry users with their assigned actor and Discord ID flag |
 
@@ -268,7 +276,7 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 | `GET /health` | Liveness |
 | `GET /`, `/dashboard` | Monitoring page (the token is entered in the page) |
 | `GET /status`, `GET /logs?after=<seq>` | Component health, warnings, sessions, the `pipeline` block, and log lines |
-| `GET /ws` | WebSocket: `hello`, `session.started`, `session.stopped`, `session.status`, `summary.ready`, `story.ready`, `roster.request`, `roster.link` |
+| `GET /ws` | WebSocket: `hello`, `session.started`, `session.stopped`, `session.status`, `summary.ready` (with `manual: true` when someone asked for it from the Console: module 0.7.0+ and the headless client import it even with **Import summaries automatically** off), `story.ready`, `roster.request`, `roster.link` |
 | `POST /roster` | Foundry users, assigned characters, Discord ID flags and actor names, plus for each character and NPC actor its race, sex/gender, age, height, weight, classes and levels, and max HP (`foundry-module/scripts/actors.js`), saved to `data/foundry-actors.json`. The actors are also saved as the session's `actors.json`: the session named by an optional `sessionId` (the module sends one on `session.started` and `session.stopped`), else the one recording. Replies with `links`: how many `roster.link` corrections it sent |
 | `GET /sessions`, `GET /sessions/:id` | Session list and detail (`:id` may be `latest`) |
 | `POST /sessions/:id/chatlog` | Upload chat, roll and combat log, plus the game system (body limit 25 MB) |
@@ -276,6 +284,7 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 | `GET /sessions/:id/story` | The story write-up covering the session: `{ sessionId, sessionNumber, sessionNumbers, startedAt, title, markdown, assets }`. 404 if there is none or it still has template notes |
 | `GET /sessions/:id/story/assets/:name` | An image the story shows, from its folder. Only names the story references; anything else is 404 |
 | `POST /sessions/:id/story/import` | Emit `story.ready` for that story. Replies `{ ok, sessionId, title, foundryConnected }` |
+| `POST /sessions/:id/journal` | The bridge client's confirmation that a journal entry exists (module 0.7.0+): `{ kind: "summary"\|"story", journalId, name, world? }` (`JournalAckSchema`). Sent after every import it starts, whether it created the entry or the GM's client did over the relay, so it covers auto-import, the import dialog, macros and the headless client. Stored as `*_journal_at` / `*_journal_name`; a story's confirmation marks every session it covers. Best effort: the module only logs a failure, and an older module never sends it |
 
 **`roster.link`** carries `links: [{ foundryUserId, discordId, ifDiscordId? }]`: Discord IDs to store as Foundry users' "Discord ID" flag. It is sent after a `/scrib map`, `/scrib unmap` or `/scrib gm` that touches a Foundry user, and after every `POST /roster` for each mapped Foundry user whose reported flag is missing or different, so mappings made while Foundry was offline fill in by themselves. `/scrib map` wins over a different flag. A clear (`discordId: null`) only removes the flag if it still holds `ifDiscordId`. The GM mapping is written only when the world has exactly one GM user. Names are never matched. In Foundry only a GM may edit other users, so a player bridge relays the event to the active GM's client (`linkDiscord` over the module socket); `planDiscordLinks()` in `roles.js` decides which flags change, and the bridge re-syncs the roster afterwards.
 
@@ -287,13 +296,39 @@ Every route except `/health`, `/` and `/dashboard` requires `Authorization: Bear
 
 `/status` also reports each recording's voice `connection` (`connected`, `reconnecting`, `lost`), and `foundry.speakers`: how many of the latest session's speakers resolve to a character or the GM by any route, next to `foundry.rosterLinked` (users with the Foundry flag set).
 
-### 9.2a Optional watchdog (`monitor/scribmonitor.py`, `:7422`)
+**Admin routes (`/admin/*`, the Console's API).** Registered only when `index.ts` passes the `CommandHandler` (tests can leave them out). On top of the token they need a loopback peer and no `Origin` header, so no web page, Foundry's included, can call them even with the token. Each wraps a `CommandHandler` method or store call with the slash command's checks; refusals come back as `{ ok: false, error }` (409, or 400 for a bad body, 404 for an unknown session), never as an exception in the bot.
 
-A standalone, read-only Python program (standard library only) for the times the bot itself is down. The bot's dashboard on `:7420` is the one page to watch. While the bot answers, `/` and `/dashboard` redirect there. While it doesn't, they serve `monitor/offline.html`, which polls the watchdog's `/status`: the same shape as the bot's, built locally from the worker's `/health`, sessions and roster counts from `data/scribbot.db` (opened `mode=ro`), disk and `.env`, plus `monitor.pipeline` with the crash notice, worker queue and shutdown advice. `GET /monitor/recent-log` returns the last 40 lines of its log copy. The bot's `/status` is fetched with `API_TOKEN` from `.env`, so the token stays server-side. Requests whose `Host` isn't loopback are refused (DNS rebinding). Nothing depends on it.
+| Method and path | Does |
+|---|---|
+| `GET /admin/discord` | Guilds, voice channels (members, whether the bot may join), text channels it can post in, the last text channel used |
+| `GET /admin/sessions?deleted=exclude\|only\|include`, `GET /admin/sessions/:id` | Sessions with labels, files, Foundry send times, recording/processing state; the detail adds the folder, its files, speakers and clip count (never from `timeline.json` while recording) |
+| `GET /admin/sessions/:id/preview/:name` | `transcript.md`, `summary.md` or `story.md` as text (first 512 KB); no other file |
+| `POST /admin/sessions` `{guildId, voiceChannelId, textChannelId}` | Start recording; the recording notice goes to the text channel |
+| `POST /admin/sessions/:id/stop`, `/process` `{retranscribe?}`, `/summarize` | As `/scrib stop`, `process`, `summarize`; results are posted in the session's text channel |
+| `POST /admin/sessions/:id/summary/import`, `/story/import` | Send to the Foundry journal (`summary.ready` with `manual`, `story.ready`) |
+| `POST /admin/sessions/:id/merge` `{into}` | `/scrib merge` |
+| `PATCH /admin/sessions/:id` `{title?, notes?}` | Labels |
+| `DELETE /admin/sessions/:id`, `POST …/restore`, `DELETE /admin/trash/:id` | Soft delete (refused while recording or processing), restore, delete permanently |
+| `GET /admin/mappings`, `PUT`/`DELETE /admin/mappings/:guild/:discordId`, `POST …/gm` | `/scrib mappings`, `map`, `unmap`, `gm` |
+| `POST /admin/maintenance/purge-audio` | Audio retention now |
+| `POST /admin/llm/test` | One tiny structured call to the configured provider |
+| `POST /admin/restart` | Clean shutdown, exit code 75 (`start.ps1` starts the bot again at once); refused while recording or processing |
 
-A background sampler thread polls every 5 s. It remembers what was recording, so a bot that disappears mid-session is called out (with a hint when `timeline.json.tmp` was left behind), and while the bot is online it copies new `/logs` entries to `MONITOR_LOG_DIR` (default `<DATA_DIR>/logs`) as `scribbot-YYYY-MM-DD.log`, keeping 14 days. `monitor-state.json` in that folder records the bot's start time and the last copied sequence number, so lines are copied once across restarts of either side. It counts clips with the segment journal too, and never opens `timeline.json` while the bot is recording.
+### 9.2a The Console (`console/scribconsole`, `:7422`)
 
-With the bot's own log files (S9), its crash fixes and the supervisor (S3), the watchdog's crash role mostly goes away; `docs/assessment/05` C3 decides whether to delete it after a few sessions without a crash.
+A local web app for setting up and running ScribBot from the desktop (`.\start-console.ps1`; design and rationale in `docs/console-design.md`). It replaces the old watchdog (`monitor/scribmonitor.py` and `start-monitor.ps1` remain as shims that start it). Python standard library only, so it runs before the worker is installed. The bot and worker never depend on it: closing it, or the browser, stops nothing, and every `/scrib` command and Foundry dialog still works.
+
+| Tab | Backed by |
+|---|---|
+| **Sessions** | `/api/admin/*`, relayed to the bot's `/admin/*` with `API_TOKEN` added server-side. While the bot is down, `GET /api/admin/sessions` lists sessions from `data/scribbot.db` opened `mode=ro` (`readOnly: true`) and changes answer 503 |
+| **Monitoring** | `monitoring.py`, the watchdog's logic unchanged: `/status` is the bot's when it answers, else a stand-in of the same shape (worker `/health`, read-only database, disk, `.env`), plus `monitor.pipeline` (queue, conversion, quality, alerts, crash notice, shutdown advice). A sampler thread polls every 5 s and copies the bot's `/logs` to `scribbot-YYYY-MM-DD.log` (§ below). `/api/worker/pause|resume|restart` call the worker; restart is refused while recording and needs confirming while the worker has a queue |
+| **Configuration** | `settings.py` renders `shared/schemas/settings.json` against `.env`; `envfile.py` writes it (only changed values; comments, order, unknown keys and line endings kept; `.env.tmp` + rename, previous file as `.env.bak`; refused if the file changed since the page loaded it). Values are validated against the catalog and quoted so Node dotenv and python-dotenv read them alike. Secrets are never sent to the page (`set`, `isDefault` only). A variable set in the real environment is shown read-only. `setup_checks.py` runs the checklist. `/api/campaign/glossary\|context` edits the campaign notes |
+
+**Applying settings.** Each catalog entry lists the processes that read it. After a save the Console lists what needs a restart; the bot's entry clears when `/status` reports a newer `process.startedAt`, the worker's after it has been seen down and up again. Console settings apply at once (it reloads its config), except `CONSOLE_PORT` and `MONITOR_LOG_DIR`. When `API_TOKEN`, `API_HOST` or `API_PORT` change, the Console keeps the previous (URL, token) pairs and uses the first that answers (`botlink.py`), so it never locks itself out of a bot that hasn't restarted yet.
+
+**Security.** Binds `127.0.0.1`; refuses a `Host` that isn't loopback (DNS rebinding). Every change needs the `X-Scrib-Console: 1` header, a JSON body, no cross-site `Sec-Fetch-Site`, and an `Origin` (if any) of the Console itself; it never sends CORS headers, so a cross-site page can't pass the preflight. The token stays server-side. Every change is logged by key or path, never by value.
+
+**Log copy.** The sampler copies new `/logs` entries to `MONITOR_LOG_DIR` (default `<DATA_DIR>/logs`) as `scribbot-YYYY-MM-DD.log`, keeping 14 days; `monitor-state.json` records the bot's start time and the last sequence copied, so lines are copied once across restarts of either side. It notices a bot that disappears mid-recording (with a hint when `timeline.json.tmp` was left behind), and never opens `timeline.json` while the bot is recording.
 
 ### 9.3 Worker HTTP API (`:7421`)
 
@@ -304,6 +339,7 @@ With the bot's own log files (S9), its crash fixes and the supervisor (S3), the 
 | `POST /jobs/transcribe` | Build the full transcript for a session folder. Returns a job ID |
 | `GET /jobs/:id` | Job status and progress |
 | `POST /pause`, `POST /resume` | Hold or release the queue; the clip in progress finishes. A JSON body is required (`{}` or `{"reason": "…"}`), so a web page can't trigger them cross-site. Pausing doesn't survive a restart |
+| `POST /restart` | Answer, then exit with code 75 so `start-worker.ps1` starts it again at once (the Console, after a worker setting changed). Same JSON-body rule. Queued clips are re-queued from disk on start |
 
 **Short clips (Whisper).** Most clips are one to two seconds long, and Whisper always processes a 30-second window. Each clip is therefore screened with Silero VAD on the CPU first, and clips without speech never reach the model. The rest are decoded with `vad_filter`, temperatures `0.0/0.4/0.8` instead of six steps, `max_new_tokens` of 8 per second of audio plus 16 (at most 200), beam size `WHISPER_BEAM_SIZE`, and at most `WHISPER_MAX_HOTWORDS` hotwords. Clips under `WHISPER_HOTWORDS_MIN_SECONDS` get no hotwords at all, because on near-silence Whisper writes the hotword list back out. On session clips this took silent sub-second clips from 19–56 s to about 0.01 s, with identical text on real speech (see `docs/assessment/01`). After decoding, a clip whose whole text is a stock silence phrase ("thank you", "you", "bye"…) is dropped when it is shorter than `WHISPER_FILLER_MAX_SECONDS` **and** its mean word probability is below `WHISPER_FILLER_MAX_PROBABILITY` (01 R9).
 
@@ -332,7 +368,7 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 |---|---|
 | Worker down during play | Live clip calls fail silently (one log line). The session job at stop transcribes the waiting WAVs. |
 | Worker or bot crash mid-transcription | `transcript.partial.jsonl` keeps finished clips, so only the rest are redone. A waiting bot retries unreachable polls for 5 minutes and resubmits a job the restarted worker doesn't know; the failure message names the session and the clips are kept. |
-| Process exits | `start.ps1` and `start-worker.ps1` restart a crashed bot or worker after 5 s (at most 5 times in 10 minutes); a clean exit ends the loop. Daily log files in `DATA_DIR/logs` keep what led up to it, and the bot logs its exit code and reason. |
+| Process exits | `start.ps1` and `start-worker.ps1` restart a crashed bot or worker after 5 s (at most 5 times in 10 minutes); a clean exit ends the loop. Exit code 75 (a restart asked for from the Console) starts it again at once and isn't counted. Daily log files in `DATA_DIR/logs` keep what led up to it, and the bot logs its exit code and reason. |
 | Worker falls behind | The bot posts once per session in the text channel when the queue is more than `BACKLOG_WARN_MINUTES` behind. |
 | Bot crash or restart mid-session | Within `RESUME_WINDOW_MINUTES`, the bot rejoins and keeps recording the same session (§4.1). Otherwise the session is marked `failed`, the table is told, and `/scrib process` resumes from what is on disk. If a game still ends up as two sessions, once both are transcribed, `/scrib merge` (or `npm run merge`, `bot/src/merge.ts`) folds it into the first: B's lines and clips shifted by `B.startedAt − A.startedAt`, a `discordId: "scribbot"` marker line at the gap, participants unioned, chat and combats de-duplicated by `id`, A's files backed up as `*.premerge-<B number>`, B marked `complete` with error `Merged into session N` (the pipeline refuses to process it). B's WAVs are copied into A only if all of them still exist, so a retranscribe of A keeps B (but loses the marker line). |
 | LLM error, rate limit or refusal | Session marked `failed` with the error posted to Discord. `/scrib summarize` retries without re-transcribing. The Anthropic adapter retries on the API's fallback model for refusals. |
@@ -347,7 +383,7 @@ The worker rejects any `sessionDir` outside `DATA_DIR`, and any language outside
 
 ## 12. Configuration
 
-All configuration lives in `.env` at the repo root (see `.env.example`), is validated by Zod in `bot/src/config.ts`, and is read by the worker in `worker/scribworker/config.py`.
+All configuration lives in `.env` at the repo root (see `.env.example`), is validated by Zod in `bot/src/config.ts`, and is read by the worker in `worker/scribworker/config.py`. The Console edits it from `shared/schemas/settings.json` (`bot/src/settings-catalog.ts`); tests keep the catalog in step with `EnvSchema`, the worker's `Settings` defaults and `.env.example`.
 
 | Group | Variables |
 |---|---|
@@ -357,7 +393,8 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Headless Foundry client | `FOUNDRY_HEADLESS` (`off`/`session`/`always`), `FOUNDRY_URL`, `FOUNDRY_USER` (`ScribBot`), `FOUNDRY_PASSWORD`, `FOUNDRY_BROWSER`, `FOUNDRY_BOT_URL`, `FOUNDRY_CHATLOG_WAIT_SECONDS` (120), `FOUNDRY_ANNOUNCE` (true) |
 | Worker | `WORKER_URL`, `STT_LANGUAGE`, `WHISTLE_WEIGHTS`, `STT_ENGINE` (`whistle`/`whisper`), `WHISPER_MODEL`, `WHISPER_DEVICE` (`cuda`/`cpu`), `WHISPER_COMPUTE_TYPE`, `WHISPER_BEAM_SIZE`, `WHISPER_MAX_HOTWORDS`, `WHISPER_HOTWORDS_MIN_SECONDS`, `WHISPER_VAD`, `WHISPER_VAD_THRESHOLD`, `WHISPER_FILLER_MAX_SECONDS`, `WHISPER_FILLER_MAX_PROBABILITY`, `WORKER_RECOVER_HOURS`, `WORKER_RELOAD_AFTER_FAILURES`, `WORKER_SLOW_CLIP_SECONDS` (also reads `DELETE_AUDIO_AFTER_TRANSCRIBE`, `CAMPAIGN_DIR`, `LOG_RETENTION_DAYS`) |
 | Recovery and logs | `RESUME_WINDOW_MINUTES` (30), `BACKLOG_WARN_MINUTES` (10), `LOG_RETENTION_DAYS` (14, shared by bot and worker) |
-| Watchdog (optional) | `MONITOR_PORT`, `MONITOR_LOG_DIR` |
+| Console (optional) | `CONSOLE_PORT` (7422; `MONITOR_PORT` is still read when it's blank), `MONITOR_LOG_DIR` |
+| Trash | `TRASH_RETENTION_DAYS` (30; 0 = only emptied by hand) |
 | LLM | `LLM_PROVIDER`, `LLM_MODEL`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `SUMMARY_CHUNK_MINUTES`, `AUTO_SUMMARIZE` (default `false`) |
 | Retention | `DELETE_AUDIO_AFTER_TRANSCRIBE`, `AUDIO_RETENTION_DAYS` |
 
@@ -369,7 +406,8 @@ All configuration lives in `.env` at the repo root (see `.env.example`), is vali
 | Headless join | `cd bot && npm run foundry` | A real login to Foundry as `FOUNDRY_USER` with the configured browser |
 | Bot types | `cd bot && npm run typecheck` | Strict TypeScript across `src/`, `scripts/` and `test/` |
 | Worker | `cd worker && .venv\Scripts\python -m pytest` | Clip-to-line conversion and labels, noise filtering, pause splitting, cache resume, live clip then delete, 48 to 16 kHz resampling, path confinement in the API, the segment journal, the filler filter, queue priorities, model reload after repeated errors, log files |
-| Monitor | `cd monitor && ..\worker\.venv\Scripts\python -m pytest` | `.env` parsing, relaying with the token, offline fallback shape, read-only database access, pipeline (conversion counts, rate/ETA, shutdown verdict, quality, alerts, no live `timeline.json` reads), log copy across restarts, redirect to the bot's dashboard while it's up and the fallback page while it's down, loopback `Host` check, token never in responses |
+| Console | `cd console && ..\worker\.venv\Scripts\python -m pytest` | Monitoring (the old watchdog's tests: `.env` parsing, relaying with the token, offline fallback, read-only database, pipeline, alerts, log copy, no live `timeline.json` reads), `.env` round trips (comments, CRLF, quoting both dotenv readers agree on, stale-version refusal), settings validation and secret masking against the real catalog, and the server end to end against a fake bot: CSRF checks, token never in a response, offline read-only sessions, restart tracking, token fallback, worker restart refusals |
+| Admin API | `cd bot && npm test` (`admin.test.ts`, `settings-catalog.test.ts`) | Lock-down (token, no Origin), soft delete and restore, refusals as messages, manual summary posting, previews, mappings, restart refusal; the catalog against `EnvSchema`, `.env.example` and the generated JSON |
 | Merge | `npm run merge -- <A> <B>` | Folds continuation session B into A (`bot/test/merge.test.ts` covers it on fixture copies) |
 | End to end without Discord | `npx tsx scripts/transcribe-dir.ts <dir>`, then `npm run summarize -- <id>` | Real Whistle and a real LLM on a recorded session folder (`data/sessions/fixture-tts` is a TTS fixture) |
 

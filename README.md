@@ -36,6 +36,8 @@ cp .env.example .env    # then fill in DISCORD_TOKEN, DISCORD_CLIENT_ID, API_TOK
 ```
 Set `DISCORD_GUILD_ID` to your server's ID so slash commands appear instantly.
 
+Or let the Console do it: run `.\start-console.ps1` (any Python 3.10+, nothing to install), open **Configuration**, and use **Create .env from the template**. The setup checklist there says what's still missing and how to fix it.
+
 ### 3. Transcription worker (Python 3.10+, no GPU needed; optional NVIDIA GPU for Whisper)
 ```sh
 cd worker
@@ -106,6 +108,20 @@ The bot sets the module's URL and token in its own browser, waits for the chat l
 
 **Character and NPC details.** With each roster sync the module sends every character and NPC actor's race, sex/gender, age, height, weight, class(es) and levels, and max HP, read from PF1, dnd5e or pf2e sheets. The bot keeps the latest in `data/foundry-actors.json`, and a copy for each session in `data/sessions/<id>/actors.json`: it seeds the copy at `/scrib start`, and Foundry re-syncs on session start, on sheet changes during play and at `/scrib stop`. The story skill uses that copy for the character table, descriptions and pronouns.
 
+## The Console
+
+`.\start-console.ps1` opens the ScribBot Console at <http://127.0.0.1:7422/> (`CONSOLE_PORT`): one local page to set up and run ScribBot from your desktop. It doesn't replace anything: every `/scrib` command, the Foundry module's dialogs and the bot's own dashboard keep working, and closing the Console (or the browser) stops nothing. The bot and the worker never depend on it.
+
+| Tab | What it does |
+|---|---|
+| **Sessions** (default) | Start a recording in a voice channel (the recording notice is still posted in the text channel you pick), stop it, resume a failed session, re-transcribe, summarize, merge a continuation, post the summary or story to the Foundry journal (the Foundry column shows ✓ with the entry's name once ScribBot Bridge 0.7.0+ confirms it exists, or "sent" until then), give a session a title and notes, preview its transcript and summary, and delete it to the trash (restore it, or delete it permanently; the trash empties itself after `TRASH_RETENTION_DAYS`, default 30). Also the **Players and characters** table (`/scrib map`, `unmap`, `gm`) |
+| **Monitoring** | The dashboard below, plus pause, resume and restart buttons for the worker. It works while the bot is down too: then it shows a crash notice if the bot went down mid-recording, the worker's queue, whether it's safe to shut down, and the bot's last log lines |
+| **Configuration** | A setup checklist, and a form for `.env` with labels, help, validation and the processes each setting needs restarted. Secrets are write-only: the page only learns whether one is set. The speed-tuned transcription settings sit under **Advanced**, each with its tuned default and **Reset to default**, and a value known to slow transcription (turning VAD off, a long hotword list) asks before saving. Saves keep your comments and write `.env.bak`. After a save, **Restart bot** / **Restart worker** apply the change (refused while recording; they rely on `start.ps1` / `start-worker.ps1`, which start the process again on exit code 75). Also an editor for `campaign/glossary.md` and `context.md` |
+
+Every action goes to the bot's `/admin` API, which runs the same code as the slash command, with the same checks. While the bot is down, sessions are listed read-only from the database. The Console reads `API_TOKEN` from `.env` itself, so the token never reaches the browser; it listens on `127.0.0.1` only, refuses other host names, and accepts changes only from its own page. Every change is written to its log, `data/logs/scribbot-YYYY-MM-DD.log`, which also gets a copy of the bot's log (`MONITOR_LOG_DIR`, kept 14 days), so the lines before a crash survive it.
+
+It uses only the Python standard library, so it runs before the worker is installed. Flags: `-NoBrowser`, `-Port <n>`, `-NoLogFile`. `.\start-monitor.ps1` still works and starts the Console.
+
 ## Monitoring dashboard
 
 While the bot is running, open <http://localhost:7420/> and enter your `API_TOKEN` (it is kept only in that browser; `http://localhost:7420/#token=...` also works as a bookmark). This is the one page to watch. It refreshes every 3 seconds and shows:
@@ -132,13 +148,6 @@ The pipeline never opens `timeline.json` while the bot is recording into it; it 
 ### Logs
 The bot writes `data/logs/bot-YYYY-MM-DD.log` and the worker `data/logs/worker-YYYY-MM-DD.log`, kept `LOG_RETENTION_DAYS` (14) days, so the lines before a crash survive it. The bot's file ends with its exit code and reason.
 
-### Optional watchdog
-`.\start-monitor.ps1` starts a small Python helper on <http://127.0.0.1:7422/> (`MONITOR_PORT`). While the bot is running, that address simply redirects to the bot's dashboard. When the bot is down it serves a fallback page instead: a crash notice if the bot went down mid-recording (and a leftover `timeline.json.tmp`, a sign it died while saving the timeline), the worker's queue, whether it's safe to shut down, and the bot's last log lines. It reads `API_TOKEN` from `.env` itself, so the token never reaches the browser, checks the worker directly, and reads sessions from `data/scribbot.db` read-only.
-
-Its background sampler also copies the bot's log to `data/logs/scribbot-YYYY-MM-DD.log` (`MONITOR_LOG_DIR`, kept 14 days), along with its own events. With the bot's own log files and the supervisor in `start.ps1`, the watchdog is mostly redundant; it is kept until those have run for a few sessions without a crash (docs/assessment/05 C3).
-
-It is entirely optional. It uses only the Python standard library (any Python 3.10+, the worker's venv by default), only reads ScribBot's data (it writes only its log folder), and listens on `127.0.0.1` only. The bot and worker work the same whether it runs or not. Flags: `-NoBrowser`, `-Port <n>`, `-NoLogFile`.
-
 ## Running a session
 
 | Command | What it does |
@@ -152,6 +161,8 @@ It is entirely optional. It uses only the Python standard library (any Python 3.
 | `/scrib summarize [session]` | Send the session's transcript to the configured LLM and write the summary (or rewrite it, e.g. after editing `campaign/context.md`). The only way a transcript reaches an LLM unless `AUTO_SUMMARIZE=true`. Refuses up front if the LLM setup would fail (e.g. an empty `LLM_MODEL`) |
 | `/scrib story [session]` | Import the session's story write-up (from the `summarize-session` skill) into Foundry as a journal entry. Default: the latest session with a story |
 | `/scrib merge a:<N> b:<M>` | Fold session M (the continuation after a crash or restart) into session N, so the game gets one transcript and one summary. Needs Manage Server. Then run `/scrib summarize session:N` |
+
+Each of these is also on the Console's **Sessions** tab.
 
 **Tell your players they are being recorded.** ScribBot posts a notice on `/scrib start`, but get consent from your group first. Audio never leaves your machine. The transcript text is sent to the LLM provider you configure only when a summary is written: on `/scrib summarize`, or after every session if `AUTO_SUMMARIZE=true`. The notice's wording is in `bot/src/notice.ts`. It adds a sentence naming the online service only when sessions are summarized automatically by one (not with `AUTO_SUMMARIZE=false`, or with a local summarizer: `openai-compatible` at a loopback or private-network address, e.g. Ollama).
 
@@ -210,5 +221,6 @@ Import a finished story into Foundry with `/scrib story [session]` (default: the
 ```sh
 cd bot && npm test && npm run typecheck      # vitest (also tests foundry-module/scripts/journal.js)
 cd worker && .venv\Scripts\python -m pytest
+cd console && ..\worker\.venv\Scripts\python -m pytest
 cd bot && npm run schemas                    # regenerate shared/schemas from the zod definitions
 ```
