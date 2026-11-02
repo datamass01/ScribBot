@@ -155,7 +155,8 @@ class Bridge {
         await this.exportChatlog(msg.sessionId, msg.startedAt, msg.endedAt);
         break;
       case "summary.ready":
-        if (setting("autoImport")) await this.importSummary(msg.sessionId);
+        // manual: someone asked for this one (the ScribBot Console), so it's imported either way.
+        if (msg.manual || setting("autoImport")) await this.importSummary(msg.sessionId);
         else ui.notifications.info(`ScribBot summary for session ${msg.number} is ready. Import it from the Journal sidebar.`);
         break;
       case "story.ready":
@@ -285,8 +286,25 @@ class Bridge {
     }
     const result = target === "self" ? await createSessionJournal(file, transcript) : await relay.request("createJournal", { file, transcript });
     this.pendingImports.delete(`summary:${file.sessionId}`);
+    await this.confirmJournal("summary", file.sessionId, result);
     if (target === "gm") ui.notifications.info(`ScribBot: the GM's client imported "${result.name}".`);
     return result;
+  }
+
+  /**
+   * Tells the bot the journal entry now exists, so the ScribBot Console shows it as in Foundry
+   * rather than only sent. Best effort: an older bot (404) or a network error only logs.
+   */
+  async confirmJournal(kind, sessionId, result) {
+    if (!result?.id) return;
+    try {
+      await this.api(`/sessions/${encodeURIComponent(sessionId)}/journal`, {
+        method: "POST",
+        body: { kind, journalId: String(result.id), name: String(result.name ?? ""), world: game.world?.id ?? null },
+      });
+    } catch (err) {
+      log(`couldn't confirm the ${kind} journal to the bot: ${err.message}`);
+    }
   }
 
   /** Imports a story write-up (summarize-session skill) as its own journal entry, one page per section. */
@@ -301,6 +319,7 @@ class Bridge {
     const images = await this.uploadStoryImages(file);
     const result = target === "self" ? await createStoryJournal(file, images) : await relay.request("createStory", { file, images });
     this.pendingImports.delete(`story:${file.sessionId}`);
+    await this.confirmJournal("story", file.sessionId, result);
     if (target === "gm") ui.notifications.info(`ScribBot: the GM's client imported "${result.name}".`);
     return result;
   }
