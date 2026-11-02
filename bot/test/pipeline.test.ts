@@ -65,7 +65,7 @@ describe("summarizeSession", () => {
     const startedAt = "2026-01-01T18:00:00.000Z";
     const s = store.createSession({ id: "sess", guildId: "g", channelId: "c", textChannelId: null, startedAt });
     const p = sessionPaths(s.id);
-    fs.mkdirSync(p.dir, { recursive: true });
+    fs.mkdirSync(p.recording, { recursive: true }); // the recording folder sits inside the game's
     const participants = [
       { discordId: "1", displayName: "Alice", character: "Thorin", actorId: null, isGm: false },
       { discordId: "2", displayName: "Bob", character: null, actorId: null, isGm: true },

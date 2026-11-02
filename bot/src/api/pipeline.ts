@@ -11,6 +11,7 @@ import path from "node:path";
 import { sttKeywords } from "../campaign.js";
 import { config } from "../config.js";
 import type { SessionStatus } from "../db.js";
+import { sessionPaths } from "../paths.js";
 import { readTimeline } from "../timeline.js";
 
 const CACHE_NAME = "transcript.partial.jsonl"; // the worker's per-clip results
@@ -154,11 +155,16 @@ export class PipelineTracker {
   private clipSeen = new Map<string, { clips: number; at: number }>();
   private memo = new Map<string, { key: string; value: unknown }>();
 
+  /** `folderOf`: a session's recording folder (a plain directory in tests: <dir>/<id>). */
+  private folderOf: (id: string) => string;
+
   constructor(
-    private sessionsDir = config.sessionsDir,
+    folders: string | ((id: string) => string) = (id) => sessionPaths(id).recording,
     private clock: () => number = Date.now,
     private keywords: (party: string[]) => string[] = sttKeywords,
-  ) {}
+  ) {
+    this.folderOf = typeof folders === "string" ? (id) => path.join(folders, id) : folders;
+  }
 
   /** `parse(text)` of a file, re-run only when it changes. Missing → null; unreadable → last value. */
   private read<T>(file: string, parse: (text: string) => T): T | null {
@@ -184,7 +190,7 @@ export class PipelineTracker {
   private recentFailed(s: PipelineSession) {
     if (s.status !== "failed" || s.hasTranscript) return false;
     try {
-      return this.clock() - fs.statSync(path.join(this.sessionsDir, s.id, CACHE_NAME)).mtimeMs < FAILED_RECENT_MS;
+      return this.clock() - fs.statSync(path.join(this.folderOf(s.id), CACHE_NAME)).mtimeMs < FAILED_RECENT_MS;
     } catch {
       return false;
     }
@@ -218,7 +224,7 @@ export class PipelineTracker {
   }
 
   private conversion(s: PipelineSession, recording: PipelineRecording | undefined, hotwordWords: Set<string>): Conversion {
-    const folder = path.join(this.sessionsDir, s.id);
+    const folder = this.folderOf(s.id);
     let recorded = recording?.clips ?? s.clips ?? 0;
     if (!recording) {
       const fromDisk = this.read(path.join(folder, "timeline.json"), () => readTimeline(folder).segments.length);

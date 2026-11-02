@@ -32,11 +32,11 @@ const b = find(refB);
 try {
   const r = mergeSessions(store, a.id, b.id);
   console.log(
-    `[merge] session ${b.number} merged into session ${a.number}: ${r.linesAdded} lines shifted by ` +
-      `${formatGap(r.offsetSec)} (gap ${formatGap(r.gapSec)}), ${r.chatAdded} chat messages, ` +
-      `${r.combatsAdded} combats, ${r.audioCopied} clips copied.`,
+    `[merge] session ${b.number} merged into session ${a.number}: ${r.linesAdded} lines ` +
+      `(gap ${formatGap(r.gapSec)}), ${r.chatAdded} chat messages, ${r.combatsAdded} combats. ` +
+      `Its recording folder moved into session ${a.number}'s recordings/.`,
   );
-  for (const f of r.backups) console.log(`[merge] backup: ${f}`);
+  if (r.archive) console.log(`[merge] session ${b.number}'s own summary/story kept in ${r.archive}`);
   for (const w of r.warnings) console.warn(`[merge] warning: ${w}`);
   console.log(`[merge] next: npm run summarize -- ${a.id}`);
 } catch (err) {

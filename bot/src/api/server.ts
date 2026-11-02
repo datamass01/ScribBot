@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { writeFileAtomic } from "../fsutil.js";
 import type { RosterRow, SessionRow, Store } from "../db.js";
 import { bus } from "../events.js";
+import { composeSession } from "../layout.js";
 import { linksToWrite } from "../links.js";
 import { logsSince } from "../monitor.js";
 import { foundryActorsFile, sessionPaths } from "../paths.js";
@@ -107,13 +108,17 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       discord_id: u.discordId,
     }));
     store.replaceRoster(rows);
+    // Each Foundry world is a campaign; the one synced most recently gets new recordings.
+    if (parsed.data.world) store.touchWorld(parsed.data.world, parsed.data.worldTitle ?? null);
     const actorsJson = JSON.stringify(parsed.data.actors, null, 2);
     writeFileAtomic(foundryActorsFile(), actorsJson);
     // The session's own copy: the session named in the sync (start/stop), else the one recording.
     const session = (parsed.data.sessionId ? findSession(parsed.data.sessionId) : null) ?? getRecording();
     if (session) {
-      fs.mkdirSync(sessionPaths(session.id).dir, { recursive: true });
-      writeFileAtomic(sessionPaths(session.id).actors, actorsJson);
+      const p = sessionPaths(session.id);
+      fs.mkdirSync(p.recording, { recursive: true });
+      writeFileAtomic(p.recordingActors, actorsJson);
+      if (p.recordingActors !== p.actors) writeFileAtomic(p.actors, actorsJson);
     }
     foundry.lastRosterAt = new Date().toISOString();
     foundry.lastRosterWorld = parsed.data.world;
@@ -141,8 +146,18 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     if (!s) return reply.code(404).send({ error: "no such session" });
     const parsed = ChatLogSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    fs.mkdirSync(sessionPaths(s.id).dir, { recursive: true });
-    writeFileAtomic(sessionPaths(s.id).chatlog, JSON.stringify(parsed.data, null, 2));
+    // Saved with the recording whose time window it covers; the game's chatlog.json is rebuilt
+    // from all its recordings (a merged continuation keeps its own).
+    const p = sessionPaths(s.id);
+    fs.mkdirSync(p.recording, { recursive: true });
+    writeFileAtomic(p.recordingChatlog, JSON.stringify(parsed.data, null, 2));
+    if (p.recordingChatlog !== p.chatlog) {
+      try {
+        composeSession(store, s.id);
+      } catch (err) {
+        console.warn(`[api] chat log of session ${s.number} saved, but the session's files couldn't be rebuilt: ${err}`);
+      }
+    }
     foundry.lastChatlogAt = new Date().toISOString();
     bus.emitEvent({ type: "chatlog.received", sessionId: s.id });
     return { ok: true, messages: parsed.data.messages.length, combats: parsed.data.combats.length };

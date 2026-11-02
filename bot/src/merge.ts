@@ -2,24 +2,16 @@
  * Merge an interrupted game's continuation session (B) into the session it continues (A),
  * so one evening of play gets one transcript and one summary (docs/assessment/02 S15).
  *
- * Used by `npm run merge` (bot/scripts/merge-sessions.ts) and `/scrib merge`.
+ * Used by `npm run merge` (bot/scripts/merge-sessions.ts), `/scrib merge` and the Console.
  */
 import fs from "node:fs";
 import path from "node:path";
 import type { SessionRow, Store } from "./db.js";
-import { writeFileAtomic } from "./fsutil.js";
-import { sessionPaths } from "./paths.js";
-import { readTimeline } from "./timeline.js";
-import {
-  ChatLogSchema,
-  TranscriptSchema,
-  type ChatLog,
-  type Participant,
-  type Segment,
-  type Timeline,
-  type Transcript,
-  type TranscriptLine,
-} from "./types.js";
+import { recordingRel, sessionFolderName } from "./db.js";
+import { renameWithRetry } from "./fsutil.js";
+import { composeSession, isLegacy, moveFolder, removeIfEmpty, sessionTimeline } from "./layout.js";
+import { sessionPaths, sessionRecordings } from "./paths.js";
+import type { Timeline, Transcript, TranscriptLine } from "./types.js";
 
 /** discordId of the marker line inserted where the recording resumed. */
 export const MERGE_MARKER_ID = "scribbot";
@@ -34,27 +26,17 @@ export function mergedInto(session: Pick<SessionRow, "error">): number | null {
 export interface MergeResult {
   target: SessionRow;
   source: SessionRow;
-  /** Seconds between A's start and B's start; B's times are shifted by this. */
-  offsetSec: number;
   /** Seconds between the end of A's recording and the start of B's. */
   gapSec: number;
   linesAdded: number;
   chatAdded: number;
   combatsAdded: number;
-  /** B's clips copied into A, so a re-transcription of A keeps B's lines. */
-  audioCopied: number;
-  /** Paths of the `.premerge-<n>` backups written. */
-  backups: string[];
+  /** Where B's own summary, notes and story went (nothing is deleted), or null. */
+  archive: string | null;
   warnings: string[];
 }
 
 const BUSY = new Set(["recording", "transcribing", "summarizing"]);
-
-function readJson(file: string): unknown {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-const writeAtomic = (file: string, text: string) => writeFileAtomic(file, text);
 
 /** "12 min", "45 s", "1 h 05 min". */
 export function formatGap(sec: number) {
@@ -64,26 +46,19 @@ export function formatGap(sec: number) {
   return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` : `${m} min`;
 }
 
-/** When A's recording actually ended: endedAt, or (after a crash) its last clip or line. */
-function recordingEndMs(timeline: Timeline, transcript: Transcript | null) {
-  if (timeline.endedAt) return Date.parse(timeline.endedAt);
-  const start = Date.parse(timeline.startedAt);
-  const lastClip = Math.max(0, ...timeline.segments.map((s) => s.endMs));
-  const lastLine = Math.max(0, ...(transcript?.lines ?? []).map((l) => l.end * 1000));
-  return start + Math.max(lastClip, lastLine);
-}
-
-/** Where B's clip lands inside A's folder: `audio/<speaker>/m<B number>-<name>.wav`. */
-function mergedClipPath(file: string, sourceNumber: number) {
-  const parts = file.split("/");
-  const name = parts.pop()!;
-  return [...parts, `m${sourceNumber}-${name}`].join("/");
-}
+const count = (file: string, key: "lines" | "messages" | "combats") => {
+  try {
+    return (JSON.parse(fs.readFileSync(file, "utf8"))[key] ?? []).length as number;
+  } catch {
+    return 0;
+  }
+};
 
 /**
- * Merge session `sourceId` (B, the continuation) into `targetId` (A). B's folder is left
- * untouched; A's files are backed up first and rewritten atomically. Throws, changing nothing,
- * if the merge isn't possible.
+ * Merge session `sourceId` (B, the continuation) into `targetId` (A): B's recording folders move
+ * into A's recordings/, then A's transcript, chat log and actors are rebuilt from all its
+ * recordings (layout.ts composeSession). B's own summary, notes and story are kept, moved
+ * next to its recording. Throws, changing nothing, if the merge isn't possible.
  */
 export function mergeSessions(
   store: Store,
@@ -97,151 +72,85 @@ export function mergeSessions(
   if (!b) throw new Error(`Unknown session ${sourceId}`);
   if (a.id === b.id) throw new Error("Can't merge a session into itself.");
   if (a.guild_id !== b.guild_id) throw new Error("Those sessions belong to different servers.");
+  if (a.campaign_id !== b.campaign_id) throw new Error("Those sessions belong to different campaigns.");
   for (const s of [a, b]) {
     if (BUSY.has(s.status) || opts.isBusy?.(s.id)) {
       throw new Error(`Session ${s.number} is ${s.status === "recording" ? "still recording" : "being processed"}; wait for it to finish.`);
     }
     const into = mergedInto(s);
     if (into != null) throw new Error(`Session ${s.number} was already merged into session ${into}.`);
+    if (isLegacy(s.id)) {
+      throw new Error(
+        `Session ${s.number} is still in the old folder layout. Move sessions to the campaign layout first ` +
+          "(Console → Sessions → Update folder layout, or npm run migrate-layout).",
+      );
+    }
+    for (const rid of sessionRecordings(s.id)) {
+      const p = sessionPaths(rid);
+      if (fs.existsSync(p.timeline) && !fs.existsSync(p.recordingTranscript)) {
+        throw new Error(`Session ${s.number} isn't transcribed yet. Transcribe it first (\`/scrib process session:${s.number}\`).`);
+      }
+    }
   }
+  const tlA = sessionTimeline(store, a.id);
+  const tlB = sessionTimeline(store, b.id);
+  const startA = Date.parse(tlA.startedAt);
+  const startB = Date.parse(tlB.startedAt);
+  if (!(startB >= startA)) throw new Error(`Session ${b.number} started before session ${a.number}; merge them the other way round.`);
+  const endA = tlA.endedAt ? Date.parse(tlA.endedAt) : startA + Math.max(0, ...tlA.segments.map((x) => x.endMs));
+  const gapSec = Math.max(0, (startB - endA) / 1000);
 
   const pa = sessionPaths(a.id);
   const pb = sessionPaths(b.id);
-  for (const [s, p] of [[a, pa], [b, pb]] as const) {
-    if (!fs.existsSync(p.timeline)) throw new Error(`Session ${s.number} has no timeline.json.`);
-    if (!fs.existsSync(p.transcriptJson)) {
-      throw new Error(`Session ${s.number} isn't transcribed yet. Transcribe it first (\`/scrib process session:${s.number}\`).`);
-    }
-  }
-
-  const tlA = readTimeline(pa.dir);
-  const tlB = readTimeline(pb.dir);
-  const trA = TranscriptSchema.parse(readJson(pa.transcriptJson));
-  const trB = TranscriptSchema.parse(readJson(pb.transcriptJson));
-  const chatA = fs.existsSync(pa.chatlog) ? ChatLogSchema.parse(readJson(pa.chatlog)) : null;
-  const chatB = fs.existsSync(pb.chatlog) ? ChatLogSchema.parse(readJson(pb.chatlog)) : null;
-
-  const startA = Date.parse(tlA.startedAt);
-  const startB = Date.parse(tlB.startedAt);
-  if (!(startB >= startA)) {
-    throw new Error(`Session ${b.number} started before session ${a.number}; merge them the other way round.`);
-  }
-  const offsetMs = startB - startA;
-  const offsetSec = offsetMs / 1000;
-  const endA = recordingEndMs(tlA, trA);
-  const gapSec = Math.max(0, (startB - endA) / 1000);
+  const campaign = store.getCampaign(a.campaign_id!)!;
+  const before = { lines: count(pa.transcriptJson, "lines"), chat: count(pa.chatlog, "messages"), combats: count(pa.chatlog, "combats") };
   const warnings: string[] = [];
 
-  // ---------- transcript ----------
-  const shift = (x: number) => Math.round((x + offsetSec) * 100) / 100;
-  const marker: TranscriptLine = {
-    t: shift(0),
-    end: shift(0),
-    discordId: MERGE_MARKER_ID,
-    speaker: "ScribBot",
-    character: null,
-    isGm: false,
-    text: `— recording resumed after ${formatGap(gapSec)} gap (session ${b.number} merged in) —`,
-  };
-  const linesB = trB.lines.map((l) => ({ ...l, t: shift(l.t), end: shift(l.end) }));
-  const lines = [...trA.lines, marker, ...linesB].sort((x, y) => x.t - y.t || (x === marker ? -1 : y === marker ? 1 : 0));
-  const transcript: Transcript = {
-    ...trA,
-    model: trA.model === trB.model ? trA.model : `${trA.model} + ${trB.model}`,
-    language: trA.language ?? trB.language,
-    createdAt: new Date().toISOString(),
-    lines,
-  };
-
-  // ---------- timeline + audio ----------
-  const participants: Participant[] = [...tlA.participants];
-  const known = new Set(participants.map((p) => p.discordId));
-  for (const p of tlB.participants) if (!known.has(p.discordId)) participants.push(p);
-  const endedB = tlB.endedAt ?? b.ended_at ?? new Date(recordingEndMs(tlB, trB)).toISOString();
-
-  const copies: { from: string; to: string }[] = [];
-  let segments: Segment[] = tlA.segments;
-  const missing = tlB.segments.filter((s) => !fs.existsSync(path.join(pb.dir, s.file))).length;
-  if (a.audio_purged) {
-    warnings.push(`Session ${a.number}'s audio is already deleted, so B's clips weren't copied; it can't be re-transcribed.`);
-  } else if (!tlB.segments.length) {
-    // nothing to copy
-  } else if (missing) {
-    warnings.push(
-      `${missing} of session ${b.number}'s ${tlB.segments.length} clips have no audio left, so its clips weren't added ` +
-        `to session ${a.number}'s timeline. Re-transcribing session ${a.number} would drop session ${b.number}'s lines.`,
-    );
-  } else {
-    const shifted = tlB.segments.map((s) => {
-      const file = mergedClipPath(s.file, b.number);
-      copies.push({ from: path.join(pb.dir, s.file), to: path.join(pa.dir, file) });
-      return { ...s, startMs: s.startMs + offsetMs, endMs: s.endMs + offsetMs, file };
-    });
-    const clash = copies.find((c) => fs.existsSync(c.to));
-    if (clash) throw new Error(`Session ${a.number} already has ${clash.to}; was this merge started before?`);
-    segments = [...tlA.segments, ...shifted].sort((x, y) => x.startMs - y.startMs);
-  }
-  const timeline: Timeline = { ...tlA, endedAt: endedB, participants, segments };
-
-  // ---------- chat log ----------
-  let chatlog: ChatLog | null = null;
-  let chatAdded = 0;
-  let combatsAdded = 0;
-  if (chatA || chatB) {
-    const base = chatA ?? { world: null, system: null, messages: [], combats: [] };
-    const msgIds = new Set(base.messages.map((m) => m.id));
-    const newMsgs = (chatB?.messages ?? []).filter((m) => !msgIds.has(m.id));
-    const combatIds = new Set(base.combats.map((c) => c.id));
-    const newCombats = (chatB?.combats ?? []).filter((c) => !combatIds.has(c.id));
-    // A combat spanning the break shows up in both exports; keep the later (more complete) copy.
-    const laterCombat = new Map((chatB?.combats ?? []).map((c) => [c.id, c]));
-    chatAdded = newMsgs.length;
-    combatsAdded = newCombats.length;
-    const exportedAt = Math.max(chatA?.exportedAt ?? 0, chatB?.exportedAt ?? 0);
-    chatlog = {
-      world: base.world ?? chatB?.world ?? null,
-      system: base.system ?? chatB?.system ?? null,
-      ...(exportedAt ? { exportedAt } : {}),
-      messages: [...base.messages, ...newMsgs].sort((x, y) => x.timestamp - y.timestamp),
-      combats: [...base.combats.map((c) => laterCombat.get(c.id) ?? c), ...newCombats],
-    };
+  // ---------- move B's recordings into A, recording the move in the database as each lands ----------
+  const moved = sessionRecordings(b.id);
+  for (const rid of moved) {
+    const from = sessionPaths(rid).recording;
+    const to = path.join(pa.dir, "recordings", rid);
+    if (fs.existsSync(from)) moveFolder(from, to);
+    store.db.transaction(() => {
+      store.setSessionPlace(rid, { dir: recordingRel(campaign.folder, a.number, rid), campaignId: campaign.id });
+      store.setMergedInto(rid, a.id);
+    })();
   }
 
-  // ---------- write: backups, audio, files, then the database ----------
-  const suffix = `.premerge-${b.number}`;
-  const backups: string[] = [];
-  for (const file of [pa.timeline, pa.transcriptJson, pa.transcriptMd, pa.chatlog]) {
-    if (!fs.existsSync(file)) continue;
-    const backup = file + suffix;
-    if (fs.existsSync(backup)) throw new Error(`Backup ${backup} already exists; was this merge started before?`);
-    backups.push(backup);
+  // ---------- B's own write-ups go next to its recording; its rebuilt files are dropped ----------
+  let archive: string | null = null;
+  const keep = ["summary.json", "summary.md", "notes.json", "story"].filter((f) => fs.existsSync(path.join(pb.dir, f)));
+  if (keep.length) {
+    archive = path.join(pa.dir, "recordings", b.id, `from-session-${sessionFolderName(b.number)}`);
+    fs.mkdirSync(archive, { recursive: true });
+    for (const f of keep) {
+      try {
+        renameWithRetry(path.join(pb.dir, f), path.join(archive, f));
+      } catch (err) {
+        warnings.push(`Couldn't move session ${b.number}'s ${f} (${(err as Error).message}); it is still in ${pb.dir}.`);
+      }
+    }
   }
-  for (const backup of backups) fs.copyFileSync(backup.slice(0, -suffix.length), backup);
-  for (const c of copies) {
-    fs.mkdirSync(path.dirname(c.to), { recursive: true });
-    fs.copyFileSync(c.from, c.to, fs.constants.COPYFILE_EXCL);
-  }
-  writeAtomic(pa.timeline, JSON.stringify(timeline, null, 2));
-  writeAtomic(pa.transcriptJson, JSON.stringify(transcript, null, 2));
-  writeAtomic(pa.transcriptMd, renderTranscriptMarkdown(transcript, `Session transcript, ${tlA.startedAt.slice(0, 10)}`, timeline));
-  if (chatlog) writeAtomic(pa.chatlog, JSON.stringify(chatlog, null, 2));
+  for (const f of [pb.transcriptJson, pb.transcriptMd, pb.chatlog, pb.actors]) fs.rmSync(f, { force: true });
+  removeIfEmpty(path.join(pb.dir, "recordings"), pb.dir);
+  removeIfEmpty(pb.dir, path.dirname(pb.dir));
 
   store.db.transaction(() => {
-    store.endSession(a.id, endedB);
+    store.endSession(a.id, tlB.endedAt ?? b.ended_at ?? new Date().toISOString());
     store.setSessionStatus(a.id, "complete", null);
     store.setSessionStatus(b.id, "complete", `${MERGED_PREFIX}${a.number} (${a.id}).`);
   })();
+  const composed = composeSession(store, a.id);
 
   return {
     target: store.getSession(a.id)!,
     source: store.getSession(b.id)!,
-    offsetSec,
     gapSec,
-    linesAdded: linesB.length,
-    chatAdded,
-    combatsAdded,
-    audioCopied: copies.length,
-    backups,
+    linesAdded: Math.max(0, (composed.lines ?? before.lines) - before.lines - (moved.length ? 1 : 0)),
+    chatAdded: Math.max(0, composed.chatMessages - before.chat),
+    combatsAdded: Math.max(0, composed.combats - before.combats),
+    archive,
     warnings,
   };
 }

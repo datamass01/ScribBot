@@ -55,13 +55,21 @@ describe("resolveParticipant", () => {
 });
 
 describe("Store", () => {
-  it("numbers sessions per guild and merges partial mapping updates", () => {
+  it("numbers sessions per campaign, files them by number, and merges partial mapping updates", () => {
     const store = new Store(":memory:");
+    const strahd = store.touchWorld("curse-of-strahd", "Curse of Strahd");
     const a = store.createSession({ id: "a", guildId: "g1", channelId: "c", textChannelId: null, startedAt: "2026-01-01T00:00:00Z" });
     const b = store.createSession({ id: "b", guildId: "g1", channelId: "c", textChannelId: null, startedAt: "2026-01-08T00:00:00Z" });
+    // Another Discord server playing in the same world continues its numbering: one folder per number.
     const c = store.createSession({ id: "c", guildId: "g2", channelId: "c", textChannelId: null, startedAt: "2026-01-09T00:00:00Z" });
-    expect([a.number, b.number, c.number]).toEqual([1, 2, 1]);
+    const other = store.touchWorld("tomb", null, false);
+    const d = store.createSession({ id: "d", guildId: "g1", channelId: "c", textChannelId: null, startedAt: "2026-01-10T00:00:00Z", campaignId: other.id });
+    expect([a.number, b.number, c.number, d.number]).toEqual([1, 2, 3, 1]);
+    expect([a, b, c].every((x) => x.campaign_id === strahd.id)).toBe(true); // the world synced most recently
+    expect(b.dir).toBe("campaigns/curse-of-strahd/sessions/002/recordings/b");
+    expect(d.dir).toBe("campaigns/tomb/sessions/001/recordings/d");
     expect(store.findSession("g1", "2")?.id).toBe("b");
+    expect(store.findSession("g1", "1")?.id).toBe("a"); // the default campaign's #1 wins over tomb's
 
     store.upsertMapping({ guildId: "g1", discordId: "u", characterName: "Thorin" });
     store.upsertMapping({ guildId: "g1", discordId: "u", isGm: true });

@@ -13,6 +13,7 @@
     "register": "tsx scripts/register-commands.ts",
     "summarize": "tsx scripts/summarize-session.ts",
     "merge": "tsx scripts/merge-sessions.ts",
+    "migrate-layout": "tsx scripts/migrate-layout.ts",
     "schemas": "tsx scripts/export-schemas.ts",
     "foundry": "tsx scripts/foundry-join.ts",
     "test": "vitest run"

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { loadCampaign } from "../campaign.js";
 import type { Store } from "../db.js";
+import { sessionTimeline } from "../layout.js";
 import { sessionPaths } from "../paths.js";
 import { ChatLogSchema, TimelineSchema, TranscriptSchema, type ChatLog, type TranscriptLine } from "../types.js";
 import { buildEventStream, chunkStream, fmtTime, renderStream, stripHtml } from "./format.js";
@@ -38,7 +39,8 @@ export async function summarizeSession(
   if (!session) throw new Error(`Unknown session ${sessionId}`);
   const paths = sessionPaths(sessionId);
 
-  const timeline = TimelineSchema.parse(readJson(paths.timeline));
+  // The game's timeline: every recording of it (a merged continuation too), from the first start.
+  const timeline = sessionTimeline(store, sessionId);
   const transcript = TranscriptSchema.parse(readJson(paths.transcriptJson));
   let chatlog: ChatLog | null = null;
   if (fs.existsSync(paths.chatlog)) chatlog = ChatLogSchema.parse(readJson(paths.chatlog));

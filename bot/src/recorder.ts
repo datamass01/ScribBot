@@ -266,7 +266,7 @@ export class SessionRecorder {
         discordId: userId,
         startMs,
         endMs: Math.round(startMs + durationMs),
-        file: path.relative(this.paths.dir, file).split(path.sep).join("/"),
+        file: path.relative(this.paths.recording, file).split(path.sep).join("/"),
       };
       this.segments.push(segment);
       this.dirty = true;

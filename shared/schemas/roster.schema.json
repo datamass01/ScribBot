@@ -9,6 +9,17 @@
         "null"
       ]
     },
+    "worldTitle": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 300
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "users": {
       "type": "array",
       "items": {

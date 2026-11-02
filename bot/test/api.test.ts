@@ -116,9 +116,12 @@ describe("Foundry API", () => {
     expect(await res.json()).toMatchObject({ ok: true, messages: 1 });
     // The headless Foundry client waits for this before letting the summary run.
     expect(events).toContainEqual({ type: "chatlog.received", sessionId: "s1" });
-    expect(fs.existsSync(path.join(dataDir, "sessions", s.id, "chatlog.json"))).toBe(true);
+    const { sessionPaths } = await import("../src/paths.js");
+    // Saved with the recording, and the game's chatlog.json rebuilt from its recordings.
+    expect(fs.existsSync(sessionPaths(s.id).recordingChatlog)).toBe(true);
+    expect(sessionPaths(s.id).recordingChatlog).toContain(path.join("sessions", "001", "recordings", s.id));
     // Older modules send no game system; it is stored as null.
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", s.id, "chatlog.json"), "utf8")).system).toBeNull();
+    expect(JSON.parse(fs.readFileSync(sessionPaths(s.id).chatlog, "utf8")).system).toBeNull();
 
     const summary = await fetch(`${base}/sessions/s1/summary`, { headers: auth });
     expect(summary.status).toBe(404);
@@ -135,7 +138,8 @@ describe("Foundry API", () => {
       body: JSON.stringify({ world: "w", system, messages: [], combats: [] }),
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", s.id, "chatlog.json"), "utf8")).system).toEqual(system);
+    const { sessionPaths } = await import("../src/paths.js");
+    expect(JSON.parse(fs.readFileSync(sessionPaths(s.id).chatlog, "utf8")).system).toEqual(system);
   });
 
   it("serves the dashboard page without the token", async () => {
@@ -185,8 +189,10 @@ describe("Foundry API", () => {
     });
     store.replaceRoster(roster);
     expect(res.status).toBe(200);
-    const copy = JSON.parse(fs.readFileSync(path.join(dataDir, "sessions", "s-actors", "actors.json"), "utf8"));
-    expect(copy).toEqual([{ ...actor, classes: [], level: null }]);
+    const { sessionPaths } = await import("../src/paths.js");
+    for (const file of [sessionPaths("s-actors").recordingActors, sessionPaths("s-actors").actors]) {
+      expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([{ ...actor, classes: [], level: null }]);
+    }
   });
 
 });
@@ -209,15 +215,16 @@ describe("story API", () => {
     store.createSession({ id: "st-b", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-10-31T21:00:00.000Z" });
     store.createSession({ id: "st-c", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-11-02T20:00:00.000Z" });
     // A story stitched from st-a and st-b, written into st-b's folder (prepare.py --out).
-    const dir = path.join(dataDir, "sessions", "st-b", "story");
+    const { sessionPaths } = await import("../src/paths.js");
+    const dir = path.join(sessionPaths("st-b").dir, "story");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "summary.story.md"), story);
     fs.writeFileSync(path.join(dir, "lines.json"), JSON.stringify({ sessions: [{ id: "st-a", number: 1 }, { id: "st-b", number: 2 }] }));
     fs.writeFileSync(path.join(dir, "banner.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     fs.writeFileSync(path.join(dir, "secret.png"), Buffer.from([1, 2, 3])); // next to the story, but not in it
     // st-c's story is still the unfilled template.
-    fs.mkdirSync(path.join(dataDir, "sessions", "st-c", "story"), { recursive: true });
-    fs.writeFileSync(path.join(dataDir, "sessions", "st-c", "story", "summary.story.md"), "# T\n\n## High level summary\n\n<One paragraph>\n");
+    fs.mkdirSync(path.join(sessionPaths("st-c").dir, "story"), { recursive: true });
+    fs.writeFileSync(path.join(sessionPaths("st-c").dir, "story", "summary.story.md"), "# T\n\n## High level summary\n\n<One paragraph>\n");
   });
   afterAll(() => app?.close());
 

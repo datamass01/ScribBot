@@ -6,12 +6,14 @@ import { config } from "../config.js";
 import type { SessionRow, Store } from "../db.js";
 import { bus } from "../events.js";
 import { mergedInto } from "../merge.js";
-import { sessionPaths } from "../paths.js";
+import { sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
 import { announceStory, findStoryFile, storyPath } from "../story.js";
 import { createProvider } from "../summarize/provider.js";
 import type { SummaryFile } from "../summarize/schema.js";
-import { readTimeline } from "../timeline.js";
+import { moveToCampaign, sessionTimeline } from "../layout.js";
+import { applyLayout, planLayout } from "../migrate-layout.js";
+import { workerHealth } from "../worker-client.js";
 import { deleteSession, purgeSession, restoreSession, trashFolder, unusableReason } from "../trash.js";
 import { llmConfigProblem } from "./status.js";
 
@@ -26,7 +28,7 @@ import { llmConfigProblem } from "./status.js";
 export interface AdminSessions {
   listChannels(): unknown[];
   isRecording(sessionId: string): boolean;
-  startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string }): Promise<SessionRow>;
+  startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string; campaignId?: number }): Promise<SessionRow>;
   stopFromConsole(sessionId: string): Promise<SessionRow>;
   processFromConsole(session: SessionRow, opts: { summaryOnly?: boolean; retranscribe?: boolean }): Promise<void>;
   mergeInto(a: SessionRow, b: SessionRow): string;
@@ -86,7 +88,7 @@ function filesIn(dir: string) {
       const rel = prefix ? `${prefix}/${e.name}` : e.name;
       if (e.isDirectory()) {
         // Audio clips are many and small: one line for the folder.
-        if (rel === "audio") {
+        if (e.name === "audio") {
           let bytes = 0;
           let count = 0;
           const sum = (x: string) => {
@@ -103,7 +105,7 @@ function filesIn(dir: string) {
           } catch {
             /* being written to */
           }
-          out.push({ name: `audio/ (${count} clips)`, bytes });
+          out.push({ name: `${rel}/ (${count} clips)`, bytes });
         } else walk(path.join(d, e.name), rel);
       } else {
         try {
@@ -121,12 +123,21 @@ function filesIn(dir: string) {
 export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: AdminDeps, foundrySockets: () => number) {
   const { sessions } = deps;
 
+  const campaignName = (id: number | null) => {
+    const c = id == null ? null : store.getCampaign(id);
+    return c ? { campaignId: c.id, campaign: c.alias || c.title || c.folder, campaignFolder: c.folder } : { campaignId: null, campaign: null, campaignFolder: null };
+  };
+
   const summary = (s: SessionRow) => {
     const p = sessionPaths(s.id);
     const live = !s.deleted_at;
     return {
       id: s.id,
       guildId: s.guild_id,
+      ...campaignName(s.campaign_id),
+      /** Still in the old flat data/sessions/<id> folder (the layout migration hasn't run). */
+      legacyLayout: !s.dir,
+      recordings: sessionRecordings(s.id).length,
       number: s.number,
       title: s.title,
       notes: s.notes,
@@ -196,7 +207,8 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     handle((req: FastifyRequest<{ Querystring: { deleted?: string; limit?: string } }>) => {
       const deleted = req.query.deleted === "only" ? "only" : req.query.deleted === "include" ? "include" : "exclude";
       const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
-      return { sessions: store.listSessions(limit, { deleted }).map(summary) };
+      // A recording merged into another game is shown as part of that game (its `recordings` count).
+      return { sessions: store.listSessions(limit, { deleted }).filter((x) => !x.merged_into_id).map(summary) };
     }),
   );
 
@@ -209,7 +221,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       let timeline: { participants: unknown[]; clips: number } | null = null;
       if (!sessions.isRecording(s.id) && !s.deleted_at && fs.existsSync(dir)) {
         try {
-          const t = readTimeline(dir);
+          const t = sessionTimeline(store, s.id);
           timeline = { participants: t.participants, clips: t.segments.length };
         } catch {
           timeline = null;
@@ -237,7 +249,12 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     }),
   );
 
-  const StartBody = z.object({ guildId: z.string().min(1), voiceChannelId: z.string().min(1), textChannelId: z.string().min(1) });
+  const StartBody = z.object({
+    guildId: z.string().min(1),
+    voiceChannelId: z.string().min(1),
+    textChannelId: z.string().min(1),
+    campaignId: z.number().int().optional(),
+  });
   app.post(
     "/admin/sessions",
     handle(async (req) => ({ ok: true, session: summary(await sessions.startFromConsole(StartBody.parse(req.body))) })),
@@ -332,6 +349,97 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       const s = find(req.params.id);
       purgeSession(store, s);
       return { ok: true };
+    }),
+  );
+
+  // ---------- campaigns (one per Foundry world) and the folder layout ----------
+
+  app.get(
+    "/admin/campaigns",
+    handle(() => {
+      const all = store.listSessions(1_000_000, { deleted: "include" });
+      const def = store.defaultCampaign({ create: false });
+      return {
+        campaigns: store.listCampaigns().map((c) => ({
+          id: c.id,
+          worldId: c.world_id,
+          folder: c.folder,
+          title: c.title,
+          alias: c.alias,
+          name: c.alias || c.title || c.folder,
+          lastSeenAt: c.last_seen_at,
+          isDefault: def?.id === c.id,
+          sessions: all.filter((x) => x.campaign_id === c.id && !x.merged_into_id && !x.deleted_at).length,
+          folderPath: path.join(config.dataDir, "campaigns", c.folder),
+        })),
+      };
+    }),
+  );
+
+  const Alias = z.object({ alias: z.string().max(100).nullable() });
+  app.patch(
+    "/admin/campaigns/:id",
+    handle((req: FastifyRequest<{ Params: { id: string } }>) => {
+      const c = store.getCampaign(Number(req.params.id));
+      if (!c) throw new HttpError(404, "No such campaign.");
+      store.setCampaignAlias(c.id, Alias.parse(req.body).alias?.trim() || null);
+      return { ok: true };
+    }),
+  );
+
+  const MoveBody = z.object({ campaignId: z.number().int() });
+  app.post(
+    "/admin/sessions/:id/campaign",
+    handle((req: IdReq) => {
+      const s = usable(find(req.params.id));
+      if (!s.dir) throw new HttpError(409, "Update the folder layout first (Sessions → Update folder layout).");
+      if (sessions.isRecording(s.id) || isProcessing(s.id)) throw new HttpError(409, `Session ${s.number} is busy; wait for it to finish.`);
+      const moved = moveToCampaign(store, s.id, MoveBody.parse(req.body).campaignId);
+      return { ok: true, session: summary(moved) };
+    }),
+  );
+
+  /** Why moving folders now would get in the way, or null. */
+  const layoutBusy = async () => {
+    const all = store.listSessions(1_000_000, { deleted: "include" });
+    const rec = all.filter((x) => sessions.isRecording(x.id) || x.status === "recording");
+    if (rec.length) return `Session ${rec.map((x) => x.number).join(", ")} is recording. Stop it first.`;
+    const busy = all.filter((x) => isProcessing(x.id));
+    if (busy.length) return `Session ${busy.map((x) => x.number).join(", ")} is being processed. Wait for it to finish.`;
+    try {
+      const health = await workerHealth(2000);
+      if (health.queued) return `The worker still has ${health.queued} clip(s) queued. Wait until it's idle.`;
+    } catch {
+      // Not running: it can't be writing into a session folder.
+    }
+    return null;
+  };
+
+  app.get(
+    "/admin/layout",
+    handle(async () => {
+      const plan = planLayout(store);
+      return {
+        pending: plan.games.length,
+        plan: plan.games.map((g) => ({ number: g.oldNumber, newNumber: g.number, campaign: g.campaign, from: g.from, to: g.to, inTrash: g.inTrash,
+          merged: g.merged.map((m) => m.number), notes: g.notes })),
+        campaigns: plan.campaigns,
+        warnings: plan.warnings,
+        backupDir: plan.backupDir,
+        backupBytes: plan.backupBytes,
+        busy: plan.games.length ? await layoutBusy() : null,
+      };
+    }),
+  );
+
+  app.post(
+    "/admin/layout/migrate",
+    handle(async () => {
+      const busy = await layoutBusy();
+      if (busy) throw new HttpError(409, busy);
+      const r = applyLayout(store);
+      if (r.errors.length) return { ok: false, moved: r.moved, backupDir: r.backupDir, errors: r.errors, error: r.errors.join(" ") };
+      return { ok: true, moved: r.moved, backupDir: r.backupDir };
     }),
   );
 

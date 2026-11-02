@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import type { SessionRow, Store } from "./db.js";
 import { renameWithRetry } from "./fsutil.js";
 import { mergedInto } from "./merge.js";
-import { sessionPaths } from "./paths.js";
+import { sessionPaths, sessionRecordings } from "./paths.js";
 import { isProcessing } from "./pipeline.js";
 
 /**
@@ -17,6 +17,7 @@ export const trashFolder = (sessionId: string) => path.join(config.trashDir, ses
 
 export function deleteSession(store: Store, session: SessionRow, isRecording: (id: string) => boolean) {
   if (session.deleted_at) throw new Error(`Session ${session.number} is already in the trash.`);
+  if (session.merged_into_id) throw new Error(`Session ${session.number} was merged into another session; delete that one instead.`);
   if (session.status === "recording" || isRecording(session.id)) throw new Error(`Session ${session.number} is recording. Stop it first.`);
   if (isProcessing(session.id)) throw new Error(`Session ${session.number} is being processed. Wait for it to finish.`);
   const from = sessionPaths(session.id).dir;
@@ -33,7 +34,8 @@ export function deleteSession(store: Store, session: SessionRow, isRecording: (i
       );
     }
   }
-  store.markDeleted(session.id, true);
+  // The game's folder holds all its recordings: they go to the trash together.
+  for (const rid of sessionRecordings(session.id)) store.markDeleted(rid, true);
   console.log(`[trash] session ${session.number} (${session.id}) moved to the trash`);
 }
 
@@ -44,17 +46,17 @@ export function restoreSession(store: Store, session: SessionRow) {
   const to = sessionPaths(session.id).dir;
   if (fs.existsSync(to)) throw new Error(`A folder for session ${session.number} already exists (${to}).`);
   if (fs.existsSync(from)) {
-    fs.mkdirSync(config.sessionsDir, { recursive: true });
+    fs.mkdirSync(path.dirname(to), { recursive: true });
     renameWithRetry(from, to);
   }
-  store.markDeleted(session.id, false);
+  for (const rid of sessionRecordings(session.id)) store.markDeleted(rid, false);
   console.log(`[trash] session ${session.number} (${session.id}) restored`);
 }
 
 export function purgeSession(store: Store, session: SessionRow) {
   if (!session.deleted_at) throw new Error(`Session ${session.number} isn't in the trash. Delete it first.`);
   fs.rmSync(trashFolder(session.id), { recursive: true, force: true });
-  if (!session.purged_at) store.markPurged(session.id);
+  if (!session.purged_at) for (const rid of sessionRecordings(session.id)) store.markPurged(rid);
   console.log(`[trash] session ${session.number} (${session.id}) deleted permanently`);
 }
 

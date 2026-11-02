@@ -216,7 +216,7 @@ export class CommandHandler {
    * Creates the session, joins the voice channel and returns the recording notice to post.
    * Shared by `/scrib start` and the Console; the callers check permissions first.
    */
-  private async beginRecording(guildId: string, voice: VoiceBasedChannel, textChannelId: string | null) {
+  private async beginRecording(guildId: string, voice: VoiceBasedChannel, textChannelId: string | null, campaignId?: number) {
     // Warn early (but still record) if the worker is down: transcription can run later.
     let workerNote = "";
     try {
@@ -233,13 +233,15 @@ export class CommandHandler {
       channelId: voice.id,
       textChannelId,
       startedAt,
+      campaignId,
     });
 
     // Seed the session's copy of the character and NPC details with the last roster sync;
     // Foundry replaces it with fresh ones when it hears "session.started" (and again at stop).
     try {
       if (fs.existsSync(foundryActorsFile())) {
-        fs.mkdirSync(sessionPaths(id).dir, { recursive: true });
+        fs.mkdirSync(sessionPaths(id).recording, { recursive: true });
+        fs.copyFileSync(foundryActorsFile(), sessionPaths(id).recordingActors);
         fs.copyFileSync(foundryActorsFile(), sessionPaths(id).actors);
       }
     } catch (err) {
@@ -274,7 +276,7 @@ export class CommandHandler {
         return resolveParticipant(userId, member.displayName, this.store.getMappings(voice.guild.id), this.store.getRoster());
       },
       {
-        onSegment: makeLiveTranscriber(sessionPaths(sessionId).dir),
+        onSegment: makeLiveTranscriber(sessionPaths(sessionId).recording),
         resume,
         onConnection: (e) => {
           const text =
@@ -324,7 +326,7 @@ export class CommandHandler {
           continue;
         }
         const paths = sessionPaths(s.id);
-        const timeline = readTimeline(paths.dir);
+        const timeline = readTimeline(paths.recording);
         const last = lastActivityMs(s, paths);
         const recorder = this.makeRecorder(s.id, channel, s.text_channel_id, {
           startedAtMs: Date.parse(timeline.startedAt),
@@ -721,8 +723,8 @@ export class CommandHandler {
     return (
       `🔗 **Session ${b.number} merged into session ${a.number}**: ${r.linesAdded} transcript lines ` +
         `(gap ${formatGap(r.gapSec)}), ${r.chatAdded} chat messages, ${r.combatsAdded} combats` +
-        `${r.audioCopied ? `, ${r.audioCopied} audio clips` : ""}. ` +
-        `Session ${b.number}'s files are kept; session ${a.number}'s originals are backed up as \`*.premerge-${b.number}\`.` +
+        `. Session ${b.number}'s recording moved into session ${a.number}'s folder` +
+        `${r.archive ? `, with its own summary and story beside it` : ""}; nothing was deleted.` +
         `${warnings}\nRun \`/scrib summarize session:${a.number}\` to summarize the whole game.`
     );
   }
@@ -770,7 +772,7 @@ export class CommandHandler {
   }
 
   /** Starts recording from the Console. The recording notice goes to `textChannelId`, as `/scrib start` would post it. */
-  async startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string }) {
+  async startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string; campaignId?: number }) {
     if (!this.client.isReady()) throw new Error("The bot isn't connected to Discord yet.");
     const guild = this.client.guilds.cache.get(opts.guildId);
     if (!guild) throw new Error("The bot isn't in that server.");
@@ -783,7 +785,8 @@ export class CommandHandler {
     if (!perms?.has(PermissionFlagsBits.Connect) || !perms.has(PermissionFlagsBits.ViewChannel)) {
       throw new Error(`The bot needs View Channel and Connect in ${voice.name}.`);
     }
-    const { session, text: notice } = await this.beginRecording(guild.id, voice, text.id);
+    if (opts.campaignId != null && !this.store.getCampaign(opts.campaignId)) throw new Error("That campaign doesn't exist.");
+    const { session, text: notice } = await this.beginRecording(guild.id, voice, text.id, opts.campaignId);
     console.log(`[commands] session ${session.number}: recording started from the Console in ${voice.name}`);
     await this.send(text.id, notice).catch((err) => console.error("[commands] recording notice failed:", err));
     return session;

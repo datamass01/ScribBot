@@ -3,7 +3,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import type { SessionRow, Store } from "./db.js";
 import { bus } from "./events.js";
-import { sessionPaths } from "./paths.js";
+import { primarySession, sessionPaths, sessionRecordings } from "./paths.js";
 
 /**
  * Story write-ups from the summarize-session skill (.claude/skills/summarize-session), saved as
@@ -55,24 +55,47 @@ function coveredSessions(storyDir: string): string[] {
   }
 }
 
-/** The story file for a session: its own folder's, else one whose lines.json covers it. */
+/** Story files on disk with the game they belong to: campaign games, then old flat folders. */
+function storyFolders(): { file: string; folderId: string }[] {
+  const out: { file: string; folderId: string }[] = [];
+  const campaigns = path.join(config.dataDir, "campaigns");
+  const list = (d: string) => {
+    try {
+      return fs.readdirSync(d);
+    } catch {
+      return [];
+    }
+  };
+  for (const c of list(campaigns)) {
+    for (const n of list(path.join(campaigns, c, "sessions"))) {
+      const game = path.join(campaigns, c, "sessions", n);
+      const file = path.join(game, "story", STORY_FILE);
+      if (!fs.existsSync(file)) continue;
+      // The game's own id: the recording in it that wasn't merged into another.
+      const folderId =
+        list(path.join(game, "recordings")).find((rid) => primarySession(rid) === rid) ??
+        coveredSessions(path.dirname(file)).find((id) => sessionPaths(id).dir === game);
+      if (folderId) out.push({ file, folderId });
+    }
+  }
+  for (const id of list(config.sessionsDir)) {
+    const file = path.join(config.sessionsDir, id, "story", STORY_FILE);
+    if (fs.existsSync(file)) out.push({ file, folderId: id });
+  }
+  return out;
+}
+
+/** The story file for a session: its game's own, else one whose lines.json covers it. */
 export function findStoryFile(sessionId: string): { file: string; folderId: string; covers: string[] } | null {
   const own = storyPath(sessionId);
   if (fs.existsSync(own)) {
     const covers = coveredSessions(path.dirname(own));
-    return { file: own, folderId: sessionId, covers: covers.length ? covers : [sessionId] };
+    const game = primarySession(sessionId);
+    return { file: own, folderId: game, covers: covers.length ? covers : sessionRecordings(game) };
   }
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(config.sessionsDir);
-  } catch {
-    return null;
-  }
-  for (const folderId of dirs) {
-    const file = storyPath(folderId);
-    if (!fs.existsSync(file)) continue;
+  for (const { file, folderId } of storyFolders()) {
     const covers = coveredSessions(path.dirname(file));
-    if (covers.includes(sessionId)) return { file, folderId, covers };
+    if (covers.includes(sessionId) || covers.includes(primarySession(sessionId))) return { file, folderId, covers };
   }
   return null;
 }

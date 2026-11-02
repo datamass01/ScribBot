@@ -155,7 +155,7 @@ function sessionStatus(s: SessionRow, live: RecordingStatus | undefined) {
   // Never open timeline.json while the bot is recording into it (02 S1/S11): use the live counts.
   if (!live) {
     try {
-      const timeline = readTimeline(paths.dir);
+      const timeline = readTimeline(paths.recording);
       clips = timeline.segments.length;
       speakers = timeline.participants.length;
     } catch {
@@ -198,7 +198,7 @@ function speakerMapping(store: Store, rows: SessionRow[], recordings: RecordingS
   } else {
     for (const s of rows) {
       try {
-        people = readTimeline(sessionPaths(s.id).dir).participants;
+        people = readTimeline(sessionPaths(s.id).recording).participants;
       } catch {
         continue;
       }

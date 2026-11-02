@@ -18,6 +18,7 @@ process.env.AUDIO_RETENTION_DAYS = "14";
 type Store = import("../src/db.js").Store;
 type SessionRow = import("../src/db.js").SessionRow;
 type BotEvent = import("../src/events.js").BotEvent;
+const { sessionPaths } = await import("../src/paths.js");
 
 /** Records what the routes asked the Discord side to do. */
 function fakeSessions() {
@@ -77,7 +78,7 @@ describe("Console admin API", () => {
     const id = `2026-11-01-s${++seq}`;
     const row = store.createSession({ id, guildId: "g1", channelId: "v1", textChannelId: "t1", startedAt: new Date(Date.UTC(2026, 10, 1, seq)).toISOString() });
     store.setSessionStatus(id, "complete");
-    const dir = path.join(dataDir, "sessions", id);
+    const dir = sessionPaths(id).dir;
     fs.mkdirSync(dir, { recursive: true });
     for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
     return row;
@@ -119,7 +120,7 @@ describe("Console admin API", () => {
 
   it("moves a deleted session to the trash, restores it, and empties it for good", async () => {
     const s = newSession({ "transcript.md": "# hi" });
-    const dir = path.join(dataDir, "sessions", s.id);
+    const dir = sessionPaths(s.id).dir;
     const trash = path.join(dataDir, "trash", s.id);
 
     const del = await call("DELETE", `/admin/sessions/${s.id}`);
@@ -151,7 +152,7 @@ describe("Console admin API", () => {
     const res = await call("DELETE", `/admin/sessions/${s.id}`);
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/recording/);
-    expect(fs.existsSync(path.join(dataDir, "sessions", s.id))).toBe(true);
+    expect(fs.existsSync(sessionPaths(s.id).dir)).toBe(true);
   });
 
   it("passes process, summarize and merge to the same code as the slash commands", async () => {
@@ -209,7 +210,7 @@ describe("Console admin API", () => {
   it("marks every session a stitched story covers when Foundry confirms it", async () => {
     const a = newSession();
     const b = newSession();
-    const dir = path.join(dataDir, "sessions", b.id, "story");
+    const dir = path.join(sessionPaths(b.id).dir, "story");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "summary.story.md"), "# The Long Night\n\n## High level summary\n\nThey won.\n");
     fs.writeFileSync(path.join(dir, "lines.json"), JSON.stringify({ sessions: [{ id: a.id }, { id: b.id }] }));

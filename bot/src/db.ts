@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { setSessionLookup } from "./paths.js";
 
 export type SessionStatus =
   | "recording"
@@ -37,6 +38,39 @@ export interface SessionRow {
   summary_journal_name: string | null;
   story_journal_at: string | null;
   story_journal_name: string | null;
+  /** The campaign (Foundry world) it belongs to; null until the layout migration (layout.ts). */
+  campaign_id: number | null;
+  /** Its recording folder relative to DATA_DIR, e.g. campaigns/<world>/sessions/012/recordings/<id>; null: the old flat sessions/<id>. */
+  dir: string | null;
+  /** The session it was merged into (its recording folder then lives in that session's recordings/). */
+  merged_into_id: string | null;
+}
+
+export interface CampaignRow {
+  id: number;
+  /** Foundry's game.world.id; null for the "_unassigned" campaign. */
+  world_id: string | null;
+  /** Folder name under DATA_DIR/campaigns: the world id, never changed afterwards. */
+  folder: string;
+  /** The world's title as Foundry reports it. */
+  title: string | null;
+  /** A display name set in the Console; the folder doesn't change. */
+  alias: string | null;
+  /** The last roster sync from this world: the most recent one is where new recordings go. */
+  last_seen_at: string | null;
+  created_at: string;
+}
+
+/** The campaign for recordings made before any Foundry world was known. */
+export const UNASSIGNED_FOLDER = "_unassigned";
+
+/** "012": zero-padded so folders sort by number. */
+export const sessionFolderName = (n: number) => String(n).padStart(3, "0");
+
+/** Windows-safe folder name for a world id (Foundry ids are already lowercase letters, digits and dashes). */
+export function worldFolderName(worldId: string) {
+  const clean = worldId.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");
+  return clean && !/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(clean) && clean !== UNASSIGNED_FOLDER ? clean : `world-${clean || "unnamed"}`;
 }
 
 export interface MappingRow {
@@ -102,6 +136,19 @@ const MIGRATIONS: string[] = [
    ALTER TABLE sessions ADD COLUMN summary_journal_name TEXT;
    ALTER TABLE sessions ADD COLUMN story_journal_at TEXT;
    ALTER TABLE sessions ADD COLUMN story_journal_name TEXT;`,
+  // 4: campaigns (one per Foundry world) and the campaigns/<world>/sessions/<NNN>/recordings/<id> layout.
+  `CREATE TABLE campaigns (
+     id INTEGER PRIMARY KEY,
+     world_id TEXT UNIQUE,
+     folder TEXT NOT NULL UNIQUE,
+     title TEXT,
+     alias TEXT,
+     last_seen_at TEXT,
+     created_at TEXT NOT NULL
+   );
+   ALTER TABLE sessions ADD COLUMN campaign_id INTEGER REFERENCES campaigns(id);
+   ALTER TABLE sessions ADD COLUMN dir TEXT;
+   ALTER TABLE sessions ADD COLUMN merged_into_id TEXT;`,
 ];
 
 export class Store {
@@ -112,6 +159,15 @@ export class Store {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.migrate();
+    // sessionPaths() resolves folders through the database (the newest Store wins; one per process).
+    const dirOf = this.db.prepare("SELECT dir FROM sessions WHERE id = ?");
+    const recordingsOf = this.db.prepare("SELECT id FROM sessions WHERE id = ? OR merged_into_id = ? ORDER BY started_at");
+    const mergedOf = this.db.prepare("SELECT merged_into_id AS m FROM sessions WHERE id = ?");
+    setSessionLookup({
+      dir: (id) => (dirOf.get(id) as { dir: string | null } | undefined)?.dir ?? null,
+      recordings: (id) => (recordingsOf.all(id, id) as { id: string }[]).map((r) => r.id),
+      primary: (id) => (mergedOf.get(id) as { m: string | null } | undefined)?.m ?? id,
+    });
   }
 
   private migrate() {
@@ -126,29 +182,136 @@ export class Store {
 
   // ---------- sessions ----------
 
-  createSession(s: { id: string; guildId: string; channelId: string; textChannelId: string | null; startedAt: string }) {
-    const { n } = this.db
-      .prepare("SELECT COALESCE(MAX(number), 0) + 1 AS n FROM sessions WHERE guild_id = ?")
-      .get(s.guildId) as { n: number };
+  /**
+   * A new recording, numbered within its campaign (default: the world Foundry last synced from)
+   * and filed as campaigns/<world>/sessions/<NNN>/recordings/<id>.
+   */
+  createSession(s: { id: string; guildId: string; channelId: string; textChannelId: string | null; startedAt: string; campaignId?: number }) {
+    const campaign = this.getCampaign(s.campaignId ?? this.defaultCampaign().id);
+    if (!campaign) throw new Error("No such campaign.");
+    const n = this.nextNumber(campaign.id, s.guildId);
+    const dir = recordingRel(campaign.folder, n, s.id);
     this.db
       .prepare(
-        `INSERT INTO sessions (id, guild_id, channel_id, text_channel_id, number, status, started_at)
-         VALUES (?, ?, ?, ?, ?, 'recording', ?)`,
+        `INSERT INTO sessions (id, guild_id, channel_id, text_channel_id, number, status, started_at, campaign_id, dir)
+         VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?)`,
       )
-      .run(s.id, s.guildId, s.channelId, s.textChannelId, n, s.startedAt);
+      .run(s.id, s.guildId, s.channelId, s.textChannelId, n, s.startedAt, campaign.id, dir);
     return this.getSession(s.id)!;
+  }
+
+  /**
+   * The next number in a campaign. Sessions not yet moved to the campaign layout count too
+   * (they were numbered per server), so a new session never repeats an old number.
+   */
+  nextNumber(campaignId: number, guildId: string) {
+    const { n } = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(number), 0) + 1 AS n FROM sessions
+         WHERE campaign_id = ? OR (campaign_id IS NULL AND guild_id = ?)`,
+      )
+      .get(campaignId, guildId) as { n: number };
+    return n;
+  }
+
+  /** A recording and any merged into it, oldest first: the recordings of one game. */
+  recordingsOf(id: string) {
+    return this.db
+      .prepare("SELECT * FROM sessions WHERE id = ? OR merged_into_id = ? ORDER BY started_at")
+      .all(id, id) as SessionRow[];
+  }
+
+  setSessionPlace(id: string, place: { dir: string; campaignId: number; number?: number }) {
+    this.db.prepare("UPDATE sessions SET dir = ?, campaign_id = ?, number = COALESCE(?, number) WHERE id = ?").run(place.dir, place.campaignId, place.number ?? null, id);
+  }
+
+  setMergedInto(id: string, intoId: string | null) {
+    this.db.prepare("UPDATE sessions SET merged_into_id = ? WHERE id = ?").run(intoId, id);
+  }
+
+  // ---------- campaigns ----------
+
+  listCampaigns() {
+    return this.db.prepare("SELECT * FROM campaigns ORDER BY last_seen_at IS NULL, last_seen_at DESC, id").all() as CampaignRow[];
+  }
+
+  getCampaign(id: number) {
+    return this.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(id) as CampaignRow | undefined;
+  }
+
+  campaignByWorld(worldId: string) {
+    return this.db.prepare("SELECT * FROM campaigns WHERE world_id = ?").get(worldId) as CampaignRow | undefined;
+  }
+
+  /** The campaign for a Foundry world, created on first sight; records the sync time and title. */
+  touchWorld(worldId: string, title?: string | null, seen = true) {
+    const existing = this.campaignByWorld(worldId);
+    const now = new Date().toISOString();
+    if (existing) {
+      this.db
+        .prepare("UPDATE campaigns SET title = COALESCE(?, title), last_seen_at = CASE WHEN ? THEN ? ELSE last_seen_at END WHERE id = ?")
+        .run(title ?? null, seen ? 1 : 0, now, existing.id);
+      return this.getCampaign(existing.id)!;
+    }
+    let folder = worldFolderName(worldId);
+    for (let i = 2; this.db.prepare("SELECT 1 FROM campaigns WHERE folder = ?").get(folder); i++) folder = `${worldFolderName(worldId)}-${i}`;
+    const { lastInsertRowid } = this.db
+      .prepare("INSERT INTO campaigns (world_id, folder, title, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(worldId, folder, title ?? null, seen ? now : null, now);
+    return this.getCampaign(Number(lastInsertRowid))!;
+  }
+
+  unassignedCampaign() {
+    const row = this.db.prepare("SELECT * FROM campaigns WHERE folder = ?").get(UNASSIGNED_FOLDER) as CampaignRow | undefined;
+    if (row) return row;
+    const { lastInsertRowid } = this.db
+      .prepare("INSERT INTO campaigns (world_id, folder, created_at) VALUES (NULL, ?, ?)")
+      .run(UNASSIGNED_FOLDER, new Date().toISOString());
+    return this.getCampaign(Number(lastInsertRowid))!;
+  }
+
+  /**
+   * Where a new recording goes: the world Foundry synced from most recently, else the campaign of
+   * the newest session, else "_unassigned" (created only when `create` is true).
+   */
+  defaultCampaign(): CampaignRow;
+  defaultCampaign(opts: { create: false }): CampaignRow | null;
+  defaultCampaign(opts: { create?: boolean } = {}): CampaignRow | null {
+    const seen = this.db
+      .prepare("SELECT * FROM campaigns WHERE world_id IS NOT NULL AND last_seen_at IS NOT NULL ORDER BY last_seen_at DESC LIMIT 1")
+      .get() as CampaignRow | undefined;
+    if (seen) return seen;
+    const latest = this.db
+      .prepare("SELECT c.* FROM sessions s JOIN campaigns c ON c.id = s.campaign_id WHERE s.deleted_at IS NULL ORDER BY s.started_at DESC LIMIT 1")
+      .get() as CampaignRow | undefined;
+    if (latest) return latest;
+    if (opts.create === false) {
+      return (this.db.prepare("SELECT * FROM campaigns WHERE folder = ?").get(UNASSIGNED_FOLDER) as CampaignRow | undefined) ?? null;
+    }
+    return this.unassignedCampaign();
+  }
+
+  setCampaignAlias(id: number, alias: string | null) {
+    this.db.prepare("UPDATE campaigns SET alias = ? WHERE id = ?").run(alias, id);
   }
 
   getSession(id: string) {
     return this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
   }
 
-  /** Accepts a full id, or a session number scoped to the guild. */
+  /**
+   * Accepts a full id, or a session number. Numbers count per campaign, so with several
+   * campaigns the one new recordings go to wins, then the newest.
+   */
   findSession(guildId: string, ref: string) {
     if (/^\d+$/.test(ref)) {
+      const def = this.defaultCampaign({ create: false })?.id ?? -1;
       return this.db
-        .prepare("SELECT * FROM sessions WHERE guild_id = ? AND number = ?")
-        .get(guildId, Number(ref)) as SessionRow | undefined;
+        .prepare(
+          `SELECT * FROM sessions WHERE guild_id = ? AND number = ? AND merged_into_id IS NULL
+           ORDER BY (campaign_id = ?) DESC, started_at DESC LIMIT 1`,
+        )
+        .get(guildId, Number(ref), def) as SessionRow | undefined;
     }
     return this.getSession(ref);
   }
@@ -290,3 +453,7 @@ export class Store {
     return this.db.prepare("SELECT * FROM roster ORDER BY user_name").all() as RosterRow[];
   }
 }
+
+/** campaigns/<folder>/sessions/<NNN>/recordings/<id>, relative to DATA_DIR. */
+export const recordingRel = (campaignFolder: string, number: number, id: string) =>
+  `campaigns/${campaignFolder}/sessions/${sessionFolderName(number)}/recordings/${id}`;

@@ -2,7 +2,8 @@ import fs from "node:fs";
 import { sttKeywords } from "./campaign.js";
 import type { Store } from "./db.js";
 import { bus } from "./events.js";
-import { sessionPaths } from "./paths.js";
+import { composeSession } from "./layout.js";
+import { sessionPaths, sessionRecordings } from "./paths.js";
 import { summarizeSession } from "./summarize/summarize.js";
 import type { SummaryFile } from "./summarize/schema.js";
 import { readTimeline } from "./timeline.js";
@@ -65,41 +66,59 @@ export async function processSession(
     if (opts.retranscribe && session.audio_purged) {
       throw new Error("This session's audio was already deleted, so it can't be re-transcribed");
     }
-    if (opts.retranscribe || !fs.existsSync(paths.transcriptJson)) {
-      const timeline = readTimeline(paths.dir);
-      if (!timeline.segments.length) throw new Error("No speech was recorded in this session");
+    // A game is one or more recordings (a merged continuation keeps its own folder); each is
+    // transcribed by the worker in its own folder, then the game's files are built from them.
+    const recordings = sessionRecordings(sessionId)
+      .map((rid) => ({ rid, p: sessionPaths(rid) }))
+      .filter(({ p }) => fs.existsSync(p.timeline) || fs.existsSync(p.segmentsJournal));
+    const todo = recordings.filter(({ p }) => opts.retranscribe || !fs.existsSync(p.recordingTranscript));
+    if (todo.length) {
+      const timelines = todo.map(({ p }) => readTimeline(p.recording));
+      const total = timelines.reduce((n, t) => n + t.segments.length, 0);
+      if (!total) throw new Error("No speech was recorded in this session");
       setStatus("transcribing");
-      const names = timeline.participants.flatMap((p) => (p.character ? [p.character] : []));
       const started = Date.now();
       const deleteAudio = config.deleteAudioAfterTranscribe;
       progress.set(sessionId, 0);
       let toldTable = false;
-      await transcribe(paths.dir, sttKeywords(names), {
-        deleteAudio,
-        clipCount: timeline.segments.length,
-        onWaiting: (msg) => {
-          log(`[pipeline] session ${session.number}: ${msg}`);
-          if (!toldTable) {
-            toldTable = true;
-            void notify(
-              `⏳ Session ${session.number}: ${msg}. Retrying for a few minutes; nothing is lost if it doesn't come back.`,
-            );
-          }
-        },
-        onProgress: (f) => {
-          progress.set(sessionId, f);
-          log(`[pipeline] session ${session.number}: transcribing ${Math.round(f * 100)}%`);
-        },
-      });
-      progress.delete(sessionId);
-      if (deleteAudio) {
-        // Every clip's text is in transcript.json; only empty folders are left.
-        fs.rmSync(paths.audio, { recursive: true, force: true });
-        store.markAudioPurged(sessionId);
+      let done = 0;
+      for (const [i, { p }] of todo.entries()) {
+        const timeline = timelines[i]!;
+        if (!timeline.segments.length) continue;
+        const names = timeline.participants.flatMap((x) => (x.character ? [x.character] : []));
+        await transcribe(p.recording, sttKeywords(names), {
+          deleteAudio,
+          clipCount: timeline.segments.length,
+          onWaiting: (msg) => {
+            log(`[pipeline] session ${session.number}: ${msg}`);
+            if (!toldTable) {
+              toldTable = true;
+              void notify(
+                `⏳ Session ${session.number}: ${msg}. Retrying for a few minutes; nothing is lost if it doesn't come back.`,
+              );
+            }
+          },
+          onProgress: (f) => {
+            const overall = (done + f * timeline.segments.length) / total;
+            progress.set(sessionId, overall);
+            log(`[pipeline] session ${session.number}: transcribing ${Math.round(overall * 100)}%`);
+          },
+        });
+        done += timeline.segments.length;
+        if (deleteAudio) {
+          // Every clip's text is in the recording's transcript.json; only empty folders are left.
+          fs.rmSync(p.audio, { recursive: true, force: true });
+        }
       }
+      progress.delete(sessionId);
+      if (deleteAudio) store.markAudioPurged(sessionId);
+      composeSession(store, sessionId);
       const secs = Math.round((Date.now() - started) / 1000);
       const took = secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`;
-      await notify(`📝 Session ${session.number} transcribed (${timeline.segments.length} clips in ${took}).`);
+      await notify(`📝 Session ${session.number} transcribed (${total} clips in ${took}).`);
+    } else if (!fs.existsSync(paths.transcriptJson)) {
+      if (!recordings.length) throw new Error("No speech was recorded in this session");
+      composeSession(store, sessionId);
     }
 
     if (opts.skipSummary) {
@@ -144,10 +163,10 @@ export async function processSession(
  * Hand a just-finished clip to the worker while the session is still running.
  * Failures are only logged: the end-of-session job picks up anything missed.
  */
-export function makeLiveTranscriber(sessionDir: string, log: (msg: string) => void = console.log) {
+export function makeLiveTranscriber(recordingDir: string, log: (msg: string) => void = console.log) {
   let warned = false;
   return (file: string, characterNames: string[]) => {
-    transcribeClip(sessionDir, file, sttKeywords(characterNames), config.deleteAudioAfterTranscribe).catch((err) => {
+    transcribeClip(recordingDir, file, sttKeywords(characterNames), config.deleteAudioAfterTranscribe).catch((err) => {
       if (!warned) log(`[live] could not reach the worker; clips will be transcribed at /scrib stop: ${err.message}`);
       warned = true;
     });
@@ -159,7 +178,7 @@ export function purgeExpiredAudio(store: Store, days: number, log: (msg: string)
   if (days <= 0) return;
   const cutoff = new Date(Date.now() - days * 86_400_000);
   for (const s of store.sessionsWithExpiredAudio(cutoff)) {
-    fs.rmSync(sessionPaths(s.id).audio, { recursive: true, force: true });
+    for (const rid of sessionRecordings(s.id)) fs.rmSync(sessionPaths(rid).audio, { recursive: true, force: true });
     store.markAudioPurged(s.id);
     log(`[retention] purged audio for session ${s.number} (${s.id})`);
   }

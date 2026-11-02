@@ -128,6 +128,8 @@ export type JournalAck = z.infer<typeof JournalAckSchema>;
 
 export const RosterPayloadSchema = z.object({
   world: z.string().nullable().default(null),
+  /** The world's title (game.world.title, module 0.7.1+): the campaign's name in the Console. */
+  worldTitle: z.string().max(300).nullable().optional(),
   users: z.array(
     z.object({
       id: z.string(),
