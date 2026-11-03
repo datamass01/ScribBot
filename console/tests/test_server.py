@@ -188,7 +188,8 @@ def test_saving_settings_writes_env_and_reports_restarts(setup):
     assert view["values"]["DISCORD_TOKEN"]["set"] is True and "value" not in view["values"]["DISCORD_TOKEN"]
     status, body = request(port, "POST", "/api/config", {"version": view["version"], "changes": {"WHISPER_BEAM_SIZE": "3", "LLM_MODEL": "m"}})
     assert status == 200 and sorted(body["changed"]) == ["LLM_MODEL", "WHISPER_BEAM_SIZE"]
-    assert set(body["pendingRestart"]) == {"bot", "worker"}  # LLM_MODEL applies to the Console at once
+    # LLM_MODEL is live: the bot re-reads it for the next summary and the Console reloads at once.
+    assert set(body["pendingRestart"]) == {"worker"}
     text = setup["env"].read_text("utf-8")
     assert "WHISPER_BEAM_SIZE=3" in text and "LLM_MODEL=m" in text and "DISCORD_TOKEN=discord-secret" in text
     status, body = request(port, "POST", "/api/config", {"version": view["version"], "changes": {"LLM_MODEL": "n"}})
@@ -252,3 +253,16 @@ def test_bot_link_promotes_the_pair_that_works():
     seen.clear()
     link.call("GET", "/admin/x")
     assert seen == ["b"]
+
+
+def test_setup_check_flags_an_empty_model(tmp_path):
+    from scribconsole.setup_checks import run_checks
+
+    def llm_check(llm):
+        checks = run_checks(tmp_path, {}, {"llm": llm}, NodeVersion(lambda: "v22.12.0"), env_exists=True)
+        return next(c for c in checks if c["id"] == "llm")
+
+    # openai-compatible with no LLM_MODEL: the bot reports model null, which /scrib summarize rejects.
+    check = llm_check({"provider": "openai-compatible", "model": None, "credentials": "base url http://localhost:11434/v1"})
+    assert check["state"] == "err" and "Model is empty" in check["detail"]
+    assert llm_check({"provider": "anthropic", "model": "claude-opus-5-5", "credentials": "api key"})["state"] == "ok"

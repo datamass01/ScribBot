@@ -28,6 +28,12 @@ class SettingsError(ValueError):
         self.problems = problems
 
 
+def restart_needed_by(setting: dict[str, Any]) -> list[str]:
+    """Processes that must restart to see a change: those that read it at startup, except the bot
+    for a `live` setting, which it re-reads from .env for each summary."""
+    return [p for p in setting["readBy"] if not (p == "bot" and setting.get("live"))]
+
+
 def check_value(setting: dict[str, Any], value: str) -> str | None:
     """Why `value` isn't valid for `setting`, or None. A blank value always means "the default"."""
     if value == "":
@@ -158,6 +164,6 @@ class Settings:
         changed = [k for k, v in clean.items() if current.get(k, "") != v]
         if changed:
             self.env.save({k: clean[k] for k in changed}, expected_version=version)
-        restart = sorted({p for k in changed for p in self.by_key[k]["readBy"]})
+        restart = sorted({p for k in changed for p in restart_needed_by(self.by_key[k])})
         warnings = {k: w for k in changed if self.by_key[k]["type"] != "secret" and (w := warnings_for(self.by_key[k], clean[k]))}
         return SaveResult(changed=changed, restart=restart, warnings=warnings)

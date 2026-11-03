@@ -29,7 +29,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "xai": "grok-4"}
+DEFAULT_MODELS = {
+    "anthropic": "claude-opus-5-5",
+    "xai": "grok-4",
+    "codex": "codex default",
+    "antigravity": "gemini-3.8-flash",
+    "claude-code": "Claude Code default",
+    "grok-cli": "Grok CLI default",
+}
+CLI_COMMANDS = {"codex": "codex", "antigravity": "agy", "claude-code": "claude", "grok-cli": "grok"}  # same as bot/src/summarize/cli-agent.ts
 REQUEST_TIMEOUT_S = 3
 SESSION_LIMIT = 20  # same as the bot's /status
 LOW_DISK_BYTES = 1024**3
@@ -137,6 +145,9 @@ class Config:
             creds = "api key" if get("ANTHROPIC_API_KEY") else "auth token" if get("ANTHROPIC_AUTH_TOKEN") else None
         elif provider == "xai":
             creds = "api key" if get("XAI_API_KEY") else None
+        elif provider in CLI_COMMANDS:
+            # The CLI's own sign-in; only that it can be found is checked here, like the bot's /status.
+            creds = f"{provider} cli login" if shutil.which(get("LLM_CLI_PATH") or CLI_COMMANDS[provider]) else None
         else:
             creds = "api key" if get("OPENAI_API_KEY") else ("none needed" if get("OPENAI_BASE_URL") else None)
         data_dir = _resolve(get("DATA_DIR", "./data"))
@@ -505,6 +516,11 @@ class Monitor:
             pass  # sessions end at a transcript; a missing LLM setup isn't a problem
         elif not cfg.llm_credentials and cfg.llm_provider == "anthropic":
             warnings.append("No ANTHROPIC_API_KEY in .env. That's fine if you used `ant auth login`; the bot checks that when it runs.")
+        elif not cfg.llm_credentials and cfg.llm_provider in CLI_COMMANDS:
+            warnings.append(
+                f"The {CLI_COMMANDS[cfg.llm_provider]} command for LLM provider '{cfg.llm_provider}' wasn't found. "
+                "Install it and sign in, or set LLM_CLI_PATH."
+            )
         elif not cfg.llm_credentials:
             warnings.append(f"No credentials in .env for LLM provider '{cfg.llm_provider}'.")
         failed = [s for s in sessions if s["status"] == "failed"]

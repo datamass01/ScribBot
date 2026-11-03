@@ -6,6 +6,15 @@ import { restartWorker } from "./monitoring.js";
 let root = null;
 let view = null; // GET /api/config
 let edits = {}; // key -> new value ("" = default)
+// For a setting with a kindPicker (LLM_PROVIDER: API or CLI): the kind picked in the form, and the
+// value last chosen under each kind, so switching back restores it. Form state only, never saved.
+let kindChoice = {}; // key -> kind
+let kindPicks = {}; // key -> {kind: value}
+// The "Which models?" box under Model: open or not, and each provider's list from the bot
+// (GET /admin/llm/models), kept for the page's life. {loading} while asked, {failed} on an error.
+let modelsOpen = false;
+let modelLists = {}; // provider -> list | {loading: true} | {failed: message}
+let pendingRestart = {}; // process -> {keys}: saved settings it hasn't restarted with yet
 let group = null;
 let status = null;
 
@@ -51,6 +60,7 @@ export function update(s) {
 async function load() {
   try {
     view = await api("GET", "/api/config");
+    kindChoice = {}; kindPicks = {};
   } catch (err) {
     $("c-form").innerHTML = `<p class="error-text">${esc(err.message)}</p>`;
     return;
@@ -97,6 +107,99 @@ function warningsFor(s, value) {
   }).map((w) => w.text);
 }
 
+const kindOf = (s, value) => s.options.find((o) => o.value === value)?.kind;
+
+/** The kind the form lists for `s`: what the user picked, else the kind of its current value. */
+function currentKind(s) {
+  if (s.key in kindChoice) return kindChoice[s.key];
+  const v = current(s);
+  return kindOf(s, v === "" ? s.default : v) ?? s.kindPicker.kinds[0].value;
+}
+
+function kindRow(s) {
+  const v = view.values[s.key] || {};
+  const kind = currentKind(s);
+  const opts = s.kindPicker.kinds
+    .map((k) => `<option value="${esc(k.value)}" ${k.value === kind ? "selected" : ""}>${esc(k.label)}</option>`).join("");
+  return `<div class="setting">
+    <div class="name"><label for="k-${s.key}"><b>${esc(s.kindPicker.label)}</b></label>
+      <div class="small muted">picks the ${esc(s.label.toLowerCase())} list below</div></div>
+    <div class="control"><div class="row"><select id="k-${s.key}" data-kind-for="${s.key}" ${v.overridden ? "disabled" : ""}>${opts}</select></div>
+      <div class="help">${esc(s.kindPicker.help)}</div></div></div>`;
+}
+
+/** Switches `s` to another kind: the value last picked there, the saved one if it's of that kind, or its first option. */
+function switchKind(s, kind) {
+  const prev = current(s) === "" ? s.default : current(s);
+  (kindPicks[s.key] ||= {})[kindOf(s, prev)] = prev;
+  kindChoice[s.key] = kind;
+  const saved = view.values[s.key]?.value || s.default;
+  const value = kindPicks[s.key][kind] ?? (kindOf(s, saved) === kind ? saved : s.options.find((o) => o.kind === kind).value);
+  setValue(s, value);
+}
+
+// ---------- "Which models?" under Model
+
+/** The provider selected in the form (saved or not), and its label. */
+function selectedProvider() {
+  const s = view.settings.find((x) => x.key === "LLM_PROVIDER");
+  const value = current(s) || s.default;
+  return { value, label: s.options.find((o) => o.value === value)?.label || value };
+}
+
+function modelHelp() {
+  const link = `<a href="#" class="help-link" data-act="models" aria-expanded="${modelsOpen}">${modelsOpen ? "Hide the model list" : "Which models?"}</a>`;
+  if (!modelsOpen) return `<div class="help">${link}</div>`;
+  const { value } = selectedProvider();
+  if (!modelLists[value]) fetchModels(value);
+  return `<div class="help">${link}</div><div class="model-help" id="model-help">${modelBox()}</div>`;
+}
+
+function modelBox() {
+  const { value, label } = selectedProvider();
+  const l = modelLists[value];
+  if (!l || l.loading) return `<p class="muted small">Asking ${esc(label)} which models it has…</p>`;
+  if (l.failed) return `<p class="error-text small">${esc(l.failed)}</p>`;
+  const chosen = current(view.settings.find((x) => x.key === "LLM_MODEL"));
+  const from = l.source === "cli"
+    ? `listed by <code>${esc(l.command)}</code> <button class="linkish" data-act="refresh-models">Refresh</button>`
+    : "built into ScribBot";
+  const rows = l.models.map((m) => `<tr class="${m.id === chosen ? "chosen" : ""}">
+      <td><button class="linkish" data-act="use-model" data-model="${esc(m.id)}" title="Put ${esc(m.id)} in Model"><code>${esc(m.id)}</code></button></td>
+      <td>${esc(m.label || "")}${m.isDefault ? ` <span class="muted">(default)</span>` : ""}</td>
+      <td class="muted">${esc(m.note || "")}</td></tr>`).join("");
+  return `<div class="small"><b>${esc(label)}</b>: ${from}</div>
+    ${l.error ? `<p class="error-text small">Couldn't read the list: ${esc(l.error)}${l.command ? `. Run <code>${esc(l.command)}</code> yourself to see why.` : ""}</p>` : ""}
+    ${rows ? `<table class="models"><tbody>${rows}</tbody></table><div class="small muted">Click an id to put it in Model.</div>` : ""}
+    <ul class="small">${l.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+    <p class="small muted model-note">Your LLM provider's support site may list more or different models than shown here. If you have trouble setting the right model, check it for the exact model id to use.</p>`;
+}
+
+/** Asks the bot for a provider's models, then redraws only the box (never under the cursor in Model). */
+async function fetchModels(provider, refresh = false) {
+  modelLists[provider] = { loading: true };
+  const redraw = () => {
+    const box = document.getElementById("model-help");
+    if (box && selectedProvider().value === provider) box.innerHTML = modelBox();
+  };
+  queueMicrotask(redraw);
+  try {
+    modelLists[provider] = await api("GET", `/api/admin/llm/models?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`);
+  } catch (err) {
+    modelLists[provider] = { failed: err.message };
+  }
+  redraw();
+}
+
+/** Records `value` as the form's value for `s` (an edit unless it's what .env already says). */
+function setValue(s, value) {
+  const original = s.type === "secret" ? null : (view.values[s.key]?.value ?? "");
+  if (s.type !== "secret" && (s.type === "enum" || s.type === "bool") && value === s.default && original === "") value = "";
+  if (s.type !== "secret" && value === original) delete edits[s.key];
+  else edits[s.key] = value;
+  return value;
+}
+
 function visibleSetting(s) {
   if (!s.showIf) return true;
   const other = view.settings.find((o) => o.key === s.showIf.key);
@@ -125,7 +228,8 @@ function control(s) {
   const ph = s.blankMeans ? `blank = ${s.blankMeans}` : s.default ? `blank = ${s.default}` : "";
   let input;
   if (s.type === "enum" || s.type === "bool") {
-    const opts = s.options.map((o) => `<option value="${esc(o.value)}" ${(value === "" ? s.default : value) === o.value ? "selected" : ""}>${esc(o.label)}${o.value === s.default ? " (default)" : ""}</option>`).join("");
+    const listed = s.kindPicker ? s.options.filter((o) => o.kind === currentKind(s)) : s.options;
+    const opts = listed.map((o) => `<option value="${esc(o.value)}" ${(value === "" ? s.default : value) === o.value ? "selected" : ""}>${esc(o.label)}${o.value === s.default ? " (default)" : ""}</option>`).join("");
     input = `<select id="${id}" data-key="${s.key}" ${locked}>${opts}</select>`;
   } else {
     const type = s.type === "int" || s.type === "number" ? "number" : "text";
@@ -143,12 +247,15 @@ function control(s) {
 function settingRow(s) {
   const v = view.values[s.key] || {};
   const warn = warningsFor(s, s.type === "secret" ? "" : current(s));
-  const procs = s.readBy.map((p) => `<span title="Read by the ${p} at startup">${PROC_LABEL[p]}</span>`).join("");
-  return `<div class="setting ${s.key in edits ? "changed" : ""}" data-row="${s.key}">
+  const procs = s.readBy.map((p) => p === "bot" && s.live
+    ? `<span title="The bot re-reads it for each summary: no restart needed">${PROC_LABEL[p]} · live</span>`
+    : `<span title="Read by the ${p} at startup">${PROC_LABEL[p]}</span>`).join("");
+  return `${s.kindPicker ? kindRow(s) : ""}<div class="setting ${s.key in edits ? "changed" : ""}" data-row="${s.key}">
     <div class="name"><label for="f-${s.key}"><b>${esc(s.label)}</b></label><code>${esc(s.key)}</code>
       <div class="procs">${procs}</div>${s.tuned ? `<div class="small muted">tuned default: ${esc(s.default)}</div>` : ""}</div>
     <div class="control">${control(s)}
       ${s.help ? `<div class="help">${esc(s.help)}</div>` : ""}
+      ${s.key === "LLM_MODEL" ? modelHelp() : ""}
       ${v.overridden ? `<div class="notice warn small">Set in the environment, which wins over .env; change it there.</div>` : ""}
       ${warn.length ? `<div class="warnings">${warn.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
     </div></div>`;
@@ -178,6 +285,7 @@ function renderSavebar() {
 }
 
 function renderRestart(pending) {
+  pendingRestart = pending;
   const procs = Object.keys(pending);
   const el = $("c-restart");
   if (!el) return;
@@ -195,14 +303,18 @@ function renderRestart(pending) {
 
 // ---------- events
 function onInput(e) {
+  const kindFor = e.target.dataset?.kindFor;
+  if (kindFor && view) {
+    if (e.type !== "change") return;
+    switchKind(view.settings.find((x) => x.key === kindFor), e.target.value);
+    renderForm();
+    document.getElementById(`k-${kindFor}`)?.focus();
+    return;
+  }
   const key = e.target.dataset?.key;
   if (!key || !view) return;
   const s = view.settings.find((x) => x.key === key);
-  const original = s.type === "secret" ? null : (view.values[key]?.value ?? "");
-  let value = e.target.value;
-  if (s.type !== "secret" && (s.type === "enum" || s.type === "bool") && value === s.default && original === "") value = "";
-  if (s.type !== "secret" && value === original) delete edits[key];
-  else edits[key] = value;
+  const value = setValue(s, e.target.value);
   // Re-render only when it changes what's shown (showIf, warnings), and never under the cursor while typing text.
   if (e.type === "change" || s.type === "enum" || s.type === "bool") {
     renderForm();
@@ -244,7 +356,7 @@ async function onClick(e) {
       renderForm();
       return;
     }
-    case "discard": edits = {}; return renderForm();
+    case "discard": edits = {}; kindChoice = {}; kindPicks = {}; return renderForm();
     case "save": return save();
     case "recheck": return loadSetup();
     case "create-env": {
@@ -252,7 +364,32 @@ async function onClick(e) {
       if (ok) { await load(); loadSetup(); }
       return;
     }
+    case "models":
+      e.preventDefault();
+      modelsOpen = !modelsOpen;
+      return renderForm();
+    case "refresh-models":
+      return fetchModels(selectedProvider().value, true);
+    case "use-model": {
+      setValue(view.settings.find((x) => x.key === "LLM_MODEL"), btn.dataset.model);
+      renderForm();
+      return document.getElementById("f-LLM_MODEL")?.focus();
+    }
     case "test-llm": {
+      // The test runs in the bot with what .env says (summary settings are live), not what this form shows.
+      const llmKeys = view.settings.filter((s) => s.group === "Summaries").map((s) => s.key);
+      const label = (keys) => keys.map((k) => view.settings.find((s) => s.key === k)?.label || k).join(", ");
+      const unsaved = llmKeys.filter((k) => k in edits);
+      if (unsaved.length) {
+        toast(`Save first: Test summaries uses the saved settings, not the unsaved ${label(unsaved)}.`, "err");
+        return;
+      }
+      // Only reached for a summary setting that isn't live (none today).
+      const notApplied = (pendingRestart.bot?.keys || []).filter((k) => llmKeys.includes(k));
+      if (notApplied.length) {
+        toast(`Restart the bot first: it's still running with the old ${label(notApplied)}.`, "err");
+        return;
+      }
       btn.disabled = true;
       toast("Asking the LLM… (uses the settings the bot is running with)");
       await attempt(() => api("POST", "/api/admin/llm/test", {}), (r) => r.ok ? `${r.provider} / ${r.model} answered in ${(r.ms / 1000).toFixed(1)} s.` : "The LLM answered, but not as expected.");
@@ -279,7 +416,7 @@ async function save() {
   }
   try {
     const r = await api("POST", "/api/config", { version: view.version, changes: edits });
-    edits = {};
+    edits = {}; kindChoice = {}; kindPicks = {};
     toast(r.changed.length ? `Saved ${r.changed.length} setting(s) to .env.` : "Nothing changed.", "ok");
     await load();
     loadSetup();

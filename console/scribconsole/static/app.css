@@ -185,3 +185,14 @@ details.advanced > summary { cursor: pointer; color: var(--muted); padding: 10px
   .actions-cell { white-space: normal; }
   .actions-cell button { margin: 2px 0; }
 }
+
+/* "Which models?" under the summary Model setting */
+.help-link { font-size: 12.5px; }
+.model-help { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--bg); display: grid; gap: 8px; }
+.model-help ul { margin: 0; padding-left: 18px; color: var(--muted); }
+.model-help table.models { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.model-help table.models td { padding: 3px 8px 3px 0; vertical-align: top; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.model-help table.models tr.chosen td { background: var(--info-bg); }
+button.linkish { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+button.linkish:hover { text-decoration: underline; }
+.model-help .model-note { margin: 0; border-top: 1px solid var(--border); padding-top: 6px; }

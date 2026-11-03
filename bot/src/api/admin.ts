@@ -10,6 +10,7 @@ import { sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
 import { announceStory, findStoryFile, storyPath } from "../story.js";
 import { createProvider } from "../summarize/provider.js";
+import { listModels } from "../summarize/models.js";
 import type { SummaryFile } from "../summarize/schema.js";
 import { moveToCampaign, sessionTimeline } from "../layout.js";
 import { applyLayout, planLayout } from "../migrate-layout.js";
@@ -509,6 +510,21 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       purgeExpiredAudio(store, config.audioRetentionDays);
       const after = store.listSessions(100_000).filter((s) => s.audio_purged).length;
       return { ok: true, purged: after - before };
+    }),
+  );
+
+  // The model ids a provider accepts, for the Console's "Which models?" box. `provider` is the one
+  // selected in the form (maybe unsaved); LLM_CLI_PATH applies only if it was saved for that provider.
+  app.get(
+    "/admin/llm/models",
+    handle(async (req: FastifyRequest<{ Querystring: { provider?: string; refresh?: string } }>) => {
+      const provider = req.query.provider || config.llm.provider;
+      const cliPath = provider === config.llm.provider ? config.llm.cliPath : undefined;
+      try {
+        return await listModels(provider, { cliPath, refresh: req.query.refresh === "1" });
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+      }
     }),
   );
 

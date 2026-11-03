@@ -253,6 +253,17 @@ describe("Console admin API", () => {
     expect(restarts).toEqual(["restart requested from the Console"]);
   });
 
+  it("lists the models a provider accepts, for the Console's model help", async () => {
+    const claude = await call("GET", "/admin/llm/models?provider=claude-code");
+    expect(claude.status).toBe(200);
+    expect(claude.body).toMatchObject({ provider: "claude-code", source: "fixed" });
+    expect(claude.body.models.map((m: { id: string }) => m.id)).toEqual(expect.arrayContaining(["opus", "sonnet", "claude-opus-5-5"]));
+    const local = await call("GET", "/admin/llm/models?provider=openai-compatible");
+    expect(local.body.models).toEqual([]);
+    expect(local.body.notes.join(" ")).toMatch(/ollama list/);
+    expect((await call("GET", "/admin/llm/models?provider=nope")).status).toBe(400);
+  });
+
   it("says why an LLM test can't run without credentials", async () => {
     const res = await call("POST", "/admin/llm/test", {});
     expect(res.status).toBe(409);

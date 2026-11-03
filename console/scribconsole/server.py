@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 from .botlink import SLOW_TIMEOUT_S, BotLink, BotUnreachable, admin_path, worker_call
 from .envfile import EnvFile, EnvValueError
 from .monitoring import REPO_ROOT, Config, LogFile, Monitor, log
-from .settings import Settings, SettingsError
+from .settings import Settings, SettingsError, restart_needed_by
 from .setup_checks import NodeVersion, run_checks
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -159,7 +159,7 @@ class Console:
                 self.audit.event(f"settings saved: {', '.join(result.changed)}")  # names only, never values
                 since = _now_iso()
                 for proc in result.restart:
-                    keys = [k for k in result.changed if proc in self.settings.by_key[k]["readBy"]]
+                    keys = [k for k in result.changed if proc in restart_needed_by(self.settings.by_key[k])]
                     if proc == "console":
                         keys = [k for k in keys if k in CONSOLE_RESTART_KEYS]
                         if not keys:
@@ -325,7 +325,8 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
             target = admin_path(rest, query)
             if not target:
                 return self._json(400, {"ok": False, "error": "bad path"})
-            slow = method != "GET" and target.startswith(SLOW_ADMIN)
+            # Listing a CLI's models starts that CLI, which can take a while.
+            slow = (method != "GET" and target.startswith(SLOW_ADMIN)) or target.startswith("/admin/llm/models")
             listing = method == "GET" and target.split("?")[0] == "/admin/sessions"
             try:
                 # The sampler already knows the bot is down: on Windows a refused connection takes ~2 s.

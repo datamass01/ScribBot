@@ -18,11 +18,23 @@ export interface Setting {
   default: string;
   /** Shown next to a blank field, e.g. "blank = claude-opus-5-5". */
   blankMeans?: string;
-  options?: { value: string; label: string }[];
+  /** For an enum: its choices. `kind` sorts them under `kindPicker`. */
+  options?: { value: string; label: string; kind?: string }[];
+  /**
+   * A dropdown the Console shows before this enum, choosing which kind of option it lists (e.g. API
+   * or CLI providers). It isn't a setting of its own: the kind follows from the value, so nothing
+   * extra is written to .env.
+   */
+  kindPicker?: { label: string; help: string; kinds: { value: string; label: string }[] };
   min?: number;
   max?: number;
   /** Processes that read it at startup: a change needs them restarted. */
   readBy: Process[];
+  /**
+   * The bot re-reads it from .env for each summary (summaryConfig() in bot/src/config.ts), so a
+   * change takes effect on the next summary or test without restarting the bot.
+   */
+  live?: boolean;
   /** In the collapsed "Advanced" part of its group. */
   advanced?: boolean;
   /** Tuned for speed or accuracy; the form offers "Reset to default" and shows the default. */
@@ -155,28 +167,45 @@ export const SETTINGS: Setting[] = [
     readBy: WORKER, advanced: true, help: "Log a clip that has been transcribing longer than this (0 = never)." },
 
   // ---------------------------------------------------------------- Summaries
-  { key: "LLM_PROVIDER", group: "Summaries", label: "Provider", type: "enum", default: "anthropic", readBy: ["bot", "console"],
+  { key: "LLM_PROVIDER", group: "Summaries", live: true, label: "Provider", type: "enum", default: "anthropic", readBy: ["bot", "console"],
+    kindPicker: {
+      label: "Summaries via",
+      help: "API: an API key, or a local server such as Ollama. CLI: a coding-agent CLI on this computer, signed in with your own Claude, ChatGPT, Google or Grok account; no API key.",
+      kinds: [
+        { value: "api", label: "API" },
+        { value: "cli", label: "CLI (signed-in account)" },
+      ],
+    },
     options: [
-      { value: "anthropic", label: "Anthropic Claude" },
-      { value: "xai", label: "xAI Grok" },
-      { value: "openai-compatible", label: "OpenAI-compatible (OpenAI, Ollama, LM Studio, OpenRouter…)" },
+      { value: "anthropic", label: "Anthropic Claude", kind: "api" },
+      { value: "xai", label: "xAI Grok", kind: "api" },
+      { value: "openai-compatible", label: "OpenAI-compatible (OpenAI, Ollama, LM Studio, OpenRouter…)", kind: "api" },
+      { value: "claude-code", label: "Claude Code (Claude sign-in)", kind: "cli" },
+      { value: "codex", label: "OpenAI Codex (ChatGPT sign-in)", kind: "cli" },
+      { value: "antigravity", label: "Google Antigravity (Gemini, Google sign-in)", kind: "cli" },
+      { value: "grok-cli", label: "xAI Grok CLI (Grok sign-in)", kind: "cli" },
     ],
     help: "Who writes the summaries. Only transcript text and campaign notes are sent." },
-  { key: "LLM_MODEL", group: "Summaries", label: "Model", type: "string", default: "", readBy: ["bot", "console"],
-    blankMeans: "the provider's default (claude-opus-5-5, grok-4)", help: "Required for OpenAI-compatible providers." },
-  { key: "ANTHROPIC_API_KEY", group: "Summaries", label: "Anthropic API key", type: "secret", default: "", readBy: ["bot", "console"],
+  { key: "LLM_MODEL", group: "Summaries", live: true, label: "Model", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "the provider's default",
+    help: "Required for OpenAI-compatible providers. 'Which models?' below lists the ids the selected provider accepts." },
+  { key: "ANTHROPIC_API_KEY", group: "Summaries", live: true, label: "Anthropic API key", type: "secret", default: "", readBy: ["bot", "console"],
     showIf: { key: "LLM_PROVIDER", values: ["anthropic"] },
     help: "Leave blank to use an `ant auth login` profile instead." },
-  { key: "XAI_API_KEY", group: "Summaries", label: "xAI API key", type: "secret", default: "", readBy: ["bot", "console"],
+  { key: "XAI_API_KEY", group: "Summaries", live: true, label: "xAI API key", type: "secret", default: "", readBy: ["bot", "console"],
     showIf: { key: "LLM_PROVIDER", values: ["xai"] }, help: "" },
-  { key: "OPENAI_BASE_URL", group: "Summaries", label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+  { key: "OPENAI_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
     blankMeans: "https://api.openai.com/v1", showIf: { key: "LLM_PROVIDER", values: ["openai-compatible"] },
     help: "e.g. http://localhost:11434/v1 for Ollama." },
-  { key: "OPENAI_API_KEY", group: "Summaries", label: "API key", type: "secret", default: "", readBy: ["bot", "console"],
+  { key: "OPENAI_API_KEY", group: "Summaries", live: true, label: "API key", type: "secret", default: "", readBy: ["bot", "console"],
     showIf: { key: "LLM_PROVIDER", values: ["openai-compatible"] }, help: "Not needed for most local servers." },
-  { key: "SUMMARY_CHUNK_MINUTES", group: "Summaries", label: "Minutes per chunk", type: "number", default: "25", min: 1, readBy: ["bot", "console"],
+  { key: "LLM_CLI_PATH", group: "Summaries", live: true, label: "CLI path", type: "path", default: "", readBy: ["bot", "console"],
+    blankMeans: "codex, agy, claude or grok on PATH",
+    showIf: { key: "LLM_PROVIDER", values: ["codex", "antigravity", "claude-code", "grok-cli"] },
+    help: "Sign in with the CLI first (`codex login`, `grok login`, or start `agy` or `claude` once). It runs once per summary pass, so summaries are slower than through an API." },
+  { key: "SUMMARY_CHUNK_MINUTES", group: "Summaries", live: true, label: "Minutes per chunk", type: "number", default: "25", min: 1, readBy: ["bot", "console"],
     advanced: true, help: "Minutes of transcript per extraction pass." },
-  { key: "AUTO_SUMMARIZE", group: "Summaries", label: "Summarize automatically", type: "bool", default: "false", options: yesNo,
+  { key: "AUTO_SUMMARIZE", group: "Summaries", live: true, label: "Summarize automatically", type: "bool", default: "false", options: yesNo,
     readBy: ["bot", "console"],
     help: "Send every transcript to the LLM when it's done. Off: sessions end at a saved transcript until someone asks for a summary." },
 

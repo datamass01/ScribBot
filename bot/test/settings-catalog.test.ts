@@ -35,7 +35,20 @@ describe("settings catalog", () => {
       expect(s.readBy.length, s.key).toBeGreaterThan(0);
       if (s.type === "enum" || s.type === "bool") expect(s.options?.map((o) => o.value), s.key).toContain(s.default);
       if (s.showIf) expect(SETTINGS.some((o) => o.key === s.showIf!.key), s.key).toBe(true);
+      if (s.kindPicker) {
+        // Every option sits under exactly one listed kind, and no kind is empty.
+        const kinds = s.kindPicker.kinds.map((k) => k.value);
+        for (const o of s.options ?? []) expect(kinds, `${s.key}=${o.value}`).toContain(o.kind);
+        for (const k of kinds) expect(s.options?.some((o) => o.kind === k), `${s.key} kind ${k}`).toBe(true);
+      }
     }
+  });
+
+  it("sorts every summary provider under API or CLI, as the providers themselves work", () => {
+    const provider = SETTINGS.find((s) => s.key === "LLM_PROVIDER")!;
+    const kind = (v: string) => provider.options!.find((o) => o.value === v)!.kind;
+    const cliPath = SETTINGS.find((s) => s.key === "LLM_CLI_PATH")!.showIf!.values;
+    for (const o of provider.options!) expect(kind(o.value), o.value).toBe(cliPath.includes(o.value) ? "cli" : "api");
   });
 
   it("matches the generated shared/schemas/settings.json (run npm run schemas)", () => {

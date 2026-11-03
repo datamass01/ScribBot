@@ -85,6 +85,22 @@ def test_config_defaults_and_overrides(tmp_path):
     assert cfg.llm_model == "claude-opus-5-5"
 
 
+def test_config_cli_providers_need_the_cli(tmp_path):
+    cli = tmp_path / "agy.exe"
+    cli.write_bytes(b"")
+    cli.chmod(0o755)
+    env = tmp_path / ".env"
+    env.write_text(f"LLM_PROVIDER=antigravity\nLLM_CLI_PATH={cli}\n", encoding="utf-8")
+    cfg = sm.Config.load(env, environ={})
+    assert cfg.llm_credentials == "antigravity cli login"
+    assert cfg.llm_model == "gemini-3.8-flash"
+
+    env.write_text(f"LLM_PROVIDER=codex\nLLM_CLI_PATH={tmp_path / 'missing.exe'}\n", encoding="utf-8")
+    cfg = sm.Config.load(env, environ={})
+    assert cfg.llm_credentials is None
+    assert cfg.llm_model == "codex default"
+
+
 # ---------------------------------------------------------------- status
 
 

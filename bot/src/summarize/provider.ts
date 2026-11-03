@@ -47,5 +47,12 @@ export async function createProvider(): Promise<LLMProvider> {
         model,
       });
     }
+    case "codex":
+    case "antigravity":
+    case "claude-code":
+    case "grok-cli": {
+      const { CliAgentProvider } = await import("./cli-agent.js");
+      return new CliAgentProvider(provider, { model, command: config.llm.cliPath });
+    }
   }
 }

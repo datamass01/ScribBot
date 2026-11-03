@@ -62,7 +62,7 @@ def test_save_reports_which_processes_need_a_restart(tmp_path):
     s = make(tmp_path, "WHISPER_BEAM_SIZE=5\nAUTO_SUMMARIZE=false\n")
     r = s.save({"WHISPER_BEAM_SIZE": "8", "AUTO_SUMMARIZE": "false", "LLM_MODEL": "x"}, s.env.version())
     assert r.changed == ["WHISPER_BEAM_SIZE", "LLM_MODEL"]  # AUTO_SUMMARIZE didn't change
-    assert r.restart == ["bot", "console", "worker"]
+    assert r.restart == ["console", "worker"]  # LLM_MODEL is live for the bot
     assert r.warnings["WHISPER_BEAM_SIZE"][0].startswith("Wider beams")
 
 
@@ -85,3 +85,13 @@ def test_blank_resets_to_the_default(tmp_path):
     s = make(tmp_path, "WHISPER_BEAM_SIZE=8\n")
     s.save({"WHISPER_BEAM_SIZE": None}, None)
     assert s.env.values()["WHISPER_BEAM_SIZE"] == ""
+
+
+def test_live_settings_need_no_bot_restart(tmp_path):
+    from scribconsole.settings import restart_needed_by
+
+    assert "bot" not in restart_needed_by(BY_KEY["LLM_PROVIDER"])  # re-read for each summary
+    assert "bot" in restart_needed_by(BY_KEY["DISCORD_TOKEN"])  # read once, at startup
+    s = make(tmp_path, "LLM_PROVIDER=anthropic\n")
+    r = s.save({"LLM_PROVIDER": "claude-code", "LLM_CLI_PATH": "C:/tools/claude.exe"}, s.env.version())
+    assert "bot" not in r.restart

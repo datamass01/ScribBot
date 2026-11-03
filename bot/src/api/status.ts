@@ -8,6 +8,7 @@ import { resolveParticipant } from "../participants.js";
 import { readTimeline } from "../timeline.js";
 import { workerHealth } from "../worker-client.js";
 import { PipelineTracker } from "./pipeline.js";
+import { cliDefaultModel, isCliProvider, resolveCli } from "../summarize/cli-agent.js";
 import type { HeadlessStatus } from "../foundry/client.js";
 
 export interface DiscordStatus {
@@ -55,6 +56,10 @@ const DEFAULT_MODELS: Record<string, string | null> = {
   anthropic: "claude-opus-5-5",
   xai: "grok-4",
   "openai-compatible": null,
+  codex: cliDefaultModel("codex"),
+  antigravity: cliDefaultModel("antigravity"),
+  "claude-code": cliDefaultModel("claude-code"),
+  "grok-cli": cliDefaultModel("grok-cli"),
 };
 
 type ProfileLoader = () => Promise<{ authentication?: { type?: string } } | null>;
@@ -96,6 +101,12 @@ async function llmStatus() {
     }));
   } else if (provider === "xai") {
     credentials = config.llm.xaiApiKey ? "api key" : null;
+  } else if (isCliProvider(provider)) {
+    // The CLI's own sign-in (a ChatGPT or Google account); only its presence can be checked here.
+    // Same lookup as a summary run: found, and startable without a shell.
+    const cli = resolveCli(provider, config.llm.cliPath);
+    credentials = cli.launch ? `${provider} cli login` : null;
+    credentialsError = cli.error ?? null;
   } else {
     credentials = config.llm.openaiBaseUrl ? `base url ${config.llm.openaiBaseUrl}` : null;
   }
@@ -127,6 +138,10 @@ const CREDENTIAL_HINTS: Record<string, string> = {
   anthropic: "Set ANTHROPIC_API_KEY in .env or run `ant auth login`.",
   xai: "Set XAI_API_KEY in .env.",
   "openai-compatible": "Set OPENAI_BASE_URL in .env.",
+  codex: "Install the Codex CLI and run `codex login`, or set LLM_CLI_PATH.",
+  antigravity: "Install the Antigravity CLI (agy) and sign in, or set LLM_CLI_PATH.",
+  "claude-code": "Install Claude Code and sign in (run `claude` once), or set LLM_CLI_PATH.",
+  "grok-cli": "Install the Grok CLI and run `grok login`, or set LLM_CLI_PATH.",
 };
 
 async function workerStatus() {

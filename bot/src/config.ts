@@ -1,11 +1,15 @@
-import { config as loadEnv } from "dotenv";
+import { config as loadEnv, parse as parseEnv } from "dotenv";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-loadEnv({ path: path.join(REPO_ROOT, ".env"), quiet: true });
+const ENV_FILE = path.join(REPO_ROOT, ".env");
+// Set in the real environment before .env was loaded: these win over .env, now and on every re-read.
+const realEnvKeys = new Set(Object.keys(process.env));
+loadEnv({ path: ENV_FILE, quiet: true });
 
 const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
 const optionalString = z.preprocess(emptyToUndefined, z.string().optional());
@@ -43,12 +47,15 @@ const EnvSchema = z.object({
 
   WORKER_URL: z.string().default("http://127.0.0.1:7421"),
 
-  LLM_PROVIDER: z.enum(["anthropic", "xai", "openai-compatible"]).default("anthropic"),
+  LLM_PROVIDER: z.enum(["anthropic", "xai", "openai-compatible", "codex", "antigravity", "claude-code", "grok-cli"]).default("anthropic"),
   LLM_MODEL: optionalString,
   ANTHROPIC_API_KEY: optionalString,
   XAI_API_KEY: optionalString,
   OPENAI_BASE_URL: optionalString,
   OPENAI_API_KEY: optionalString,
+  // codex / antigravity / claude-code / grok-cli: the CLI to run when it isn't on PATH as
+  // `codex` / `agy` / `claude` / `grok`.
+  LLM_CLI_PATH: optionalString,
   SUMMARY_CHUNK_MINUTES: z.coerce.number().positive().default(25),
   // Off by default: sessions stop at a saved transcript, and nothing is sent to an LLM until
   // someone runs /scrib summarize.
@@ -78,6 +85,94 @@ const EnvSchema = z.object({
 export { EnvSchema };
 
 const env = EnvSchema.parse(process.env);
+
+// ---------------------------------------------------------------- live summary settings
+//
+// Summaries build their provider fresh for every run (and the CLI providers start a new process per
+// request), so nothing needs a restart to pick up a new provider, model, key or CLI path. These keys
+// are re-read from .env whenever the file changes (its mtime and size), with the same precedence as at
+// startup: a variable set in the real environment wins. The settings catalog marks them `live`.
+
+/** The .env keys the bot re-reads for each summary instead of only at startup. */
+export const SUMMARY_KEYS = [
+  "LLM_PROVIDER",
+  "LLM_MODEL",
+  "ANTHROPIC_API_KEY",
+  "XAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_KEY",
+  "LLM_CLI_PATH",
+  "SUMMARY_CHUNK_MINUTES",
+  "AUTO_SUMMARIZE",
+] as const;
+
+const SummaryEnvSchema = EnvSchema.pick(Object.fromEntries(SUMMARY_KEYS.map((k) => [k, true])) as { [K in (typeof SUMMARY_KEYS)[number]]: true });
+
+function buildSummaryConfig(e: z.infer<typeof SummaryEnvSchema>) {
+  return {
+    llm: {
+      provider: e.LLM_PROVIDER,
+      model: e.LLM_MODEL,
+      anthropicApiKey: e.ANTHROPIC_API_KEY,
+      xaiApiKey: e.XAI_API_KEY,
+      openaiBaseUrl: e.OPENAI_BASE_URL,
+      openaiApiKey: e.OPENAI_API_KEY,
+      cliPath: e.LLM_CLI_PATH,
+      chunkMinutes: e.SUMMARY_CHUNK_MINUTES,
+    },
+    autoSummarize: e.AUTO_SUMMARIZE,
+  };
+}
+
+export type SummaryConfig = ReturnType<typeof buildSummaryConfig>;
+
+/**
+ * A function returning the summary settings as `file` says now. Cheap when the file hasn't changed
+ * (one stat). Keys in `realEnv` come from process.env instead, as dotenv does at startup. If the new
+ * values don't validate, or the file can't be read, the last good ones stay in use and it's logged
+ * once. Exported for tests; the bot uses summaryConfig().
+ */
+export function summaryReader(file: string, realEnv: ReadonlySet<string>, initial: SummaryConfig): () => SummaryConfig {
+  const stampOf = () => {
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return "missing";
+    }
+  };
+  let state = { stamp: stampOf(), value: initial };
+  return () => {
+    const stamp = stampOf();
+    if (stamp === state.stamp) return state.value;
+    let fromFile: Record<string, string>;
+    try {
+      fromFile = parseEnv(fs.readFileSync(file));
+    } catch (err) {
+      console.warn(`[config] couldn't re-read .env (${err instanceof Error ? err.message : String(err)}); keeping the summary settings in use`);
+      state = { stamp, value: state.value };
+      return state.value;
+    }
+    const merged = Object.fromEntries(SUMMARY_KEYS.map((k) => [k, realEnv.has(k) ? process.env[k] : fromFile[k]]));
+    const parsed = SummaryEnvSchema.safeParse(merged);
+    if (!parsed.success) {
+      const keys = [...new Set(parsed.error.issues.map((i) => String(i.path[0])))].join(", ");
+      console.warn(`[config] .env has invalid summary settings (${keys}); keeping the ones in use`);
+      state = { stamp, value: state.value };
+      return state.value;
+    }
+    const value = buildSummaryConfig(parsed.data);
+    const before = state.value.llm;
+    if (before.provider !== value.llm.provider || before.model !== value.llm.model) {
+      console.log(`[config] summaries now use ${value.llm.provider}${value.llm.model ? ` / ${value.llm.model}` : ""} (from .env)`);
+    }
+    state = { stamp, value };
+    return value;
+  };
+}
+
+/** The summary settings as .env says now: config.llm and config.autoSummarize read through this. */
+export const summaryConfig = summaryReader(ENV_FILE, realEnvKeys, buildSummaryConfig(env));
 
 const origins = env.FOUNDRY_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean);
 /** The URL a browser on this machine uses to reach the bot's API. */
@@ -116,17 +211,14 @@ export const config = {
     announce: env.FOUNDRY_ANNOUNCE,
   },
   workerUrl: env.WORKER_URL.replace(/\/$/, ""),
-  llm: {
-    provider: env.LLM_PROVIDER,
-    model: env.LLM_MODEL,
-    anthropicApiKey: env.ANTHROPIC_API_KEY,
-    xaiApiKey: env.XAI_API_KEY,
-    openaiBaseUrl: env.OPENAI_BASE_URL,
-    openaiApiKey: env.OPENAI_API_KEY,
-    chunkMinutes: env.SUMMARY_CHUNK_MINUTES,
+  /** The summarizer. Re-read from .env when it changes, so a new provider or model needs no restart. */
+  get llm() {
+    return summaryConfig().llm;
   },
-  /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. */
-  autoSummarize: env.AUTO_SUMMARIZE,
+  /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. Live, like llm. */
+  get autoSummarize() {
+    return summaryConfig().autoSummarize;
+  },
   /** Transcribe each clip as it is recorded, then delete the WAV once its text is saved. */
   deleteAudioAfterTranscribe: env.DELETE_AUDIO_AFTER_TRANSCRIBE,
   audioRetentionDays: env.AUDIO_RETENTION_DAYS,

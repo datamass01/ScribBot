@@ -638,6 +638,7 @@
     {
       "key": "LLM_PROVIDER",
       "group": "Summaries",
+      "live": true,
       "label": "Provider",
       "type": "enum",
       "default": "anthropic",
@@ -645,18 +646,55 @@
         "bot",
         "console"
       ],
+      "kindPicker": {
+        "label": "Summaries via",
+        "help": "API: an API key, or a local server such as Ollama. CLI: a coding-agent CLI on this computer, signed in with your own Claude, ChatGPT, Google or Grok account; no API key.",
+        "kinds": [
+          {
+            "value": "api",
+            "label": "API"
+          },
+          {
+            "value": "cli",
+            "label": "CLI (signed-in account)"
+          }
+        ]
+      },
       "options": [
         {
           "value": "anthropic",
-          "label": "Anthropic Claude"
+          "label": "Anthropic Claude",
+          "kind": "api"
         },
         {
           "value": "xai",
-          "label": "xAI Grok"
+          "label": "xAI Grok",
+          "kind": "api"
         },
         {
           "value": "openai-compatible",
-          "label": "OpenAI-compatible (OpenAI, Ollama, LM Studio, OpenRouter…)"
+          "label": "OpenAI-compatible (OpenAI, Ollama, LM Studio, OpenRouter…)",
+          "kind": "api"
+        },
+        {
+          "value": "claude-code",
+          "label": "Claude Code (Claude sign-in)",
+          "kind": "cli"
+        },
+        {
+          "value": "codex",
+          "label": "OpenAI Codex (ChatGPT sign-in)",
+          "kind": "cli"
+        },
+        {
+          "value": "antigravity",
+          "label": "Google Antigravity (Gemini, Google sign-in)",
+          "kind": "cli"
+        },
+        {
+          "value": "grok-cli",
+          "label": "xAI Grok CLI (Grok sign-in)",
+          "kind": "cli"
         }
       ],
       "help": "Who writes the summaries. Only transcript text and campaign notes are sent."
@@ -664,6 +702,7 @@
     {
       "key": "LLM_MODEL",
       "group": "Summaries",
+      "live": true,
       "label": "Model",
       "type": "string",
       "default": "",
@@ -671,12 +710,13 @@
         "bot",
         "console"
       ],
-      "blankMeans": "the provider's default (claude-opus-5-5, grok-4)",
-      "help": "Required for OpenAI-compatible providers."
+      "blankMeans": "the provider's default",
+      "help": "Required for OpenAI-compatible providers. 'Which models?' below lists the ids the selected provider accepts."
     },
     {
       "key": "ANTHROPIC_API_KEY",
       "group": "Summaries",
+      "live": true,
       "label": "Anthropic API key",
       "type": "secret",
       "default": "",
@@ -695,6 +735,7 @@
     {
       "key": "XAI_API_KEY",
       "group": "Summaries",
+      "live": true,
       "label": "xAI API key",
       "type": "secret",
       "default": "",
@@ -713,6 +754,7 @@
     {
       "key": "OPENAI_BASE_URL",
       "group": "Summaries",
+      "live": true,
       "label": "Base URL",
       "type": "url",
       "default": "",
@@ -732,6 +774,7 @@
     {
       "key": "OPENAI_API_KEY",
       "group": "Summaries",
+      "live": true,
       "label": "API key",
       "type": "secret",
       "default": "",
@@ -748,8 +791,32 @@
       "help": "Not needed for most local servers."
     },
     {
+      "key": "LLM_CLI_PATH",
+      "group": "Summaries",
+      "live": true,
+      "label": "CLI path",
+      "type": "path",
+      "default": "",
+      "readBy": [
+        "bot",
+        "console"
+      ],
+      "blankMeans": "codex, agy, claude or grok on PATH",
+      "showIf": {
+        "key": "LLM_PROVIDER",
+        "values": [
+          "codex",
+          "antigravity",
+          "claude-code",
+          "grok-cli"
+        ]
+      },
+      "help": "Sign in with the CLI first (`codex login`, `grok login`, or start `agy` or `claude` once). It runs once per summary pass, so summaries are slower than through an API."
+    },
+    {
       "key": "SUMMARY_CHUNK_MINUTES",
       "group": "Summaries",
+      "live": true,
       "label": "Minutes per chunk",
       "type": "number",
       "default": "25",
@@ -764,6 +831,7 @@
     {
       "key": "AUTO_SUMMARIZE",
       "group": "Summaries",
+      "live": true,
       "label": "Summarize automatically",
       "type": "bool",
       "default": "false",
