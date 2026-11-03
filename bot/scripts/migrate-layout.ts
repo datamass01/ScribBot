@@ -1,6 +1,7 @@
 /**
- * Move sessions from the old flat data/sessions/<id>/ folders to campaign folders
- * (data/campaigns/<world>/sessions/<NNN>/). Shows the plan; --apply does it, after a backup.
+ * Move sessions from the old flat data/sessions/<id>/ folders to campaign folders, and rename game
+ * folders still named by number (sessions/012/) to the game's id (data/campaigns/<world>/sessions/<id>/).
+ * Shows the plan; --apply does it, after a backup.
  *
  *   npm run migrate-layout             # what would happen
  *   npm run migrate-layout -- --apply  # do it (stop the bot first, or use the Console's button)
@@ -14,18 +15,20 @@ const store = new Store();
 const plan = planLayout(store);
 
 if (!plan.games.length) {
-  console.log("[layout] every session already uses the campaign layout; nothing to do.");
+  console.log("[layout] every session already uses the current folder layout; nothing to do.");
   process.exit(0);
 }
 for (const c of plan.campaigns) console.log(`[layout] campaign ${c.folder}${c.isNew ? " (new)" : ""}${c.worldId ? `, Foundry world ${c.worldId}` : ""}`);
 for (const g of plan.games) {
-  const where = g.from ? `${g.from} → ${g.inTrash ? `${g.from} (stays in the trash, restructured)` : g.to}` : `(no folder) → ${g.to}`;
+  const where =
+    g.kind === "rename" && g.inTrash ? `in the trash; its folder will be restored as ${g.to}`
+    : g.from ? `${g.from} → ${g.inTrash ? `${g.from} (stays in the trash, restructured)` : g.to}` : `(no folder) → ${g.to}`;
   console.log(`[layout] session ${g.oldNumber}${g.number !== g.oldNumber ? ` → ${g.number}` : ""}: ${where}`);
   for (const m of g.merged) console.log(`[layout]   + merged session ${m.number} → recordings/${m.id}`);
   for (const n of g.notes) console.log(`[layout]   note: ${n}`);
 }
 for (const w of plan.warnings) console.warn(`[layout] warning: ${w}`);
-console.log(`[layout] backup first: ${plan.backupDir} (about ${Math.round(plan.backupBytes / 1024 / 1024)} MB)`);
+console.log(`[layout] backup first: ${plan.backupDir} (${plan.backupBytes ? `about ${Math.round(plan.backupBytes / 1024 / 1024)} MB` : "the database; renamed folders keep their files"})`);
 
 if (!apply) {
   console.log("[layout] dry run: nothing changed. Run with -- --apply to do it.");

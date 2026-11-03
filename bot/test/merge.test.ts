@@ -70,7 +70,7 @@ beforeEach(() => {
 describe("composeSession", () => {
   it("files a recording under its game and builds the game's files from it", () => {
     const a = makeSession("2026-10-31T18:00:00.000Z");
-    expect(a.p.dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", String(a.row.number).padStart(3, "0")));
+    expect(a.p.dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", a.row.id));
     expect(a.p.recording).toBe(path.join(a.p.dir, "recordings", a.row.id));
     expect(readJson<Transcript>(a.p.transcriptJson).lines).toEqual(a.tr.lines);
     expect(fs.readFileSync(a.p.transcriptMd, "utf8")).toMatch(/^# Session transcript, 2026-10-31/);
@@ -199,7 +199,7 @@ describe("moveToCampaign", () => {
     const moved = layout.moveToCampaign(store, a.row.id, tomb.id);
     expect(moved.number).toBe(1);
     const p = sessionPaths(a.row.id);
-    expect(p.dir).toBe(path.join(dataDir, "campaigns", "tomb", "sessions", "001"));
+    expect(p.dir).toBe(path.join(dataDir, "campaigns", "tomb", "sessions", a.row.id));
     expect(sessionPaths(b.row.id).recording).toBe(path.join(p.dir, "recordings", b.row.id));
     expect(fs.existsSync(sessionPaths(b.row.id).recordingTranscript)).toBe(true);
     expect(readJson<Transcript>(p.transcriptJson).lines).toHaveLength(a.tr.lines.length * 2 + 1);

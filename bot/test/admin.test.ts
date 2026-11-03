@@ -142,8 +142,9 @@ describe("Console admin API", () => {
     expect((await call("DELETE", `/admin/trash/${s.id}`)).status).toBe(200);
     expect(fs.existsSync(trash)).toBe(false);
     expect(store.getSession(s.id)).toMatchObject({ purged_at: expect.any(String) });
-    // The number is never handed out again.
-    expect(newSession().number).toBeGreaterThan(s.number);
+    // A trashed number is free again: the next session follows the highest one not in the trash.
+    const highest = Math.max(0, ...store.listSessions(1000).map((x) => x.number));
+    expect(newSession().number).toBe(highest + 1);
   });
 
   it("won't delete a session that is recording or still in the live folder list twice", async () => {

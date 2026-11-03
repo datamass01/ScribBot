@@ -132,7 +132,7 @@ def run_checks(repo: Path, values: dict[str, Any], status: dict[str, Any], node:
 
     llm = status.get("llm") or {}
     if llm and not llm.get("model"):
-        # The bot reports no model only when the provider has no default (openai-compatible).
+        # The bot reports no model only when the provider has no default (openai-compatible, azure-openai, bedrock).
         checks.append(_check("llm", "Summaries (LLM) set up", "err",
                              f"Model is empty, and the {llm.get('provider')} provider needs one. Summaries will fail.",
                              "Set the Model in the Summaries section below, or pick another provider."))

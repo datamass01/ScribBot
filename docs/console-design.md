@@ -76,8 +76,8 @@ The bot's HTTP API is read-only today, apart from Foundry's uploads. The Console
 | `POST /admin/sessions/:id/story/import` | Send the story write-up to the journal | `announceStory()` (alias of the existing route) |
 | `POST /admin/sessions/:id/merge` `{into}` | Merge a continuation session | `mergeSessions()` |
 | `PATCH /admin/sessions/:id` `{title?, notes?}` | Label a session | new columns |
-| `DELETE /admin/sessions/:id` | Move to trash (§4.3) | new |
-| `POST /admin/sessions/:id/restore`, `DELETE /admin/trash/:id` | Undo a delete, or empty the trash for that session | new |
+| `DELETE /admin/sessions/:id` | Move to the trash (§4.3) | new |
+| `POST /admin/sessions/:id/restore`, `DELETE /admin/trash/:id` | Restore from the trash (renumbering on a clash), or delete that session permanently | new |
 | `GET/PUT/DELETE /admin/mappings…` | Map, unmap, GM flag | `store.*Mapping`, `roster.link` |
 | `POST /admin/maintenance/purge-audio` | Run audio retention now | `purgeExpiredAudio()` |
 | `POST /admin/foundry/test` | Join Foundry once, report the result | `npm run foundry` logic |
@@ -132,11 +132,11 @@ The bot's own `dashboard.html` stays as it is. It needs no Console, which is use
 
 ### 4.3 Deleting a session
 
-Deleting is the one destructive action, so it's a soft delete:
+**Trash** replaces deleting, so nothing is lost in one step:
 
-1. The dialog asks you to type the session number. It also warns if a summary or story was posted to Foundry, since Foundry journals aren't touched.
-2. The bot refuses while the session is recording or processing. Otherwise it moves `data/sessions/<id>/` to `data/trash/<id>/` and sets `deleted_at`. The row stays, so per-guild session numbers are never reused, and merges still resolve.
-3. The Trash filter lists deleted sessions with **Restore** and **Delete permanently**. Trash is emptied automatically after `TRASH_RETENTION_DAYS` (default 30, 0 = never).
+1. The dialog says how long the session will be kept in the trash (`TRASH_RETENTION_DAYS`, read from `.env`). It also warns if a summary or story was posted to Foundry, since Foundry journals aren't touched. Its **Don't show this again** box saves `TRASH_CONFIRM=false`, and later trashes go ahead without the dialog; turn it back on under Configuration → Storage and retention, next to the days.
+2. The bot refuses while the session is recording or processing. Otherwise it moves `data/sessions/<id>/` to `data/trash/<id>/` and sets `deleted_at`. The row stays, so merges still resolve. Its number is free again: the next session is numbered after the highest one not in the trash.
+3. The Trash filter lists trashed sessions with **Restore** and **Delete permanently**. If a restored session's number was taken meanwhile, the later of the two by start time moves up one, and the sessions straight after it shift up too (two 16s: the newer becomes 17, an existing 17 becomes 18). Restoring is refused while any session it would renumber is recording or processing. Trash is emptied automatically after `TRASH_RETENTION_DAYS` (default 14, 0 = never; Configuration → Storage and retention).
 
 ### 4.4 Configuration
 

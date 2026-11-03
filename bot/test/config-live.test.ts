@@ -10,8 +10,8 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 afterEach(() => vi.restoreAllMocks());
 
 const initial: SummaryConfig = {
-  llm: { provider: "anthropic", model: undefined, anthropicApiKey: undefined, xaiApiKey: undefined, openaiBaseUrl: undefined,
-    openaiApiKey: undefined, cliPath: undefined, chunkMinutes: 25 },
+  // Every other key is unset (undefined).
+  llm: { provider: "anthropic", chunkMinutes: 25 } as SummaryConfig["llm"],
   autoSummarize: false,
 };
 

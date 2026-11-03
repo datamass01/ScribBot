@@ -119,7 +119,7 @@ describe("Foundry API", () => {
     const { sessionPaths } = await import("../src/paths.js");
     // Saved with the recording, and the game's chatlog.json rebuilt from its recordings.
     expect(fs.existsSync(sessionPaths(s.id).recordingChatlog)).toBe(true);
-    expect(sessionPaths(s.id).recordingChatlog).toContain(path.join("sessions", "001", "recordings", s.id));
+    expect(sessionPaths(s.id).recordingChatlog).toContain(path.join("sessions", s.id, "recordings", s.id));
     // Older modules send no game system; it is stored as null.
     expect(JSON.parse(fs.readFileSync(sessionPaths(s.id).chatlog, "utf8")).system).toBeNull();
 

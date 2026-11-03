@@ -32,6 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS = {
     "anthropic": "claude-opus-5-5",
     "xai": "grok-4",
+    "gemini": "gemini-3.8-flash",
+    "vertex-ai": "gemini-3.8-flash",
     "codex": "codex default",
     "antigravity": "gemini-3.8-flash",
     "claude-code": "Claude Code default",
@@ -145,6 +147,14 @@ class Config:
             creds = "api key" if get("ANTHROPIC_API_KEY") else "auth token" if get("ANTHROPIC_AUTH_TOKEN") else None
         elif provider == "xai":
             creds = "api key" if get("XAI_API_KEY") else None
+        elif provider == "gemini":
+            creds = "api key" if get("GEMINI_API_KEY") else None
+        elif provider == "vertex-ai":
+            creds = "google cloud project" if get("GOOGLE_CLOUD_PROJECT") else "api key" if get("GEMINI_API_KEY") else None
+        elif provider == "azure-openai":
+            creds = "api key" if get("AZURE_OPENAI_ENDPOINT") and get("AZURE_OPENAI_API_KEY") else None
+        elif provider == "bedrock":
+            creds = "bedrock api key" if get("AWS_BEARER_TOKEN_BEDROCK") else "aws credential chain"
         elif provider in CLI_COMMANDS:
             # The CLI's own sign-in; only that it can be found is checked here, like the bot's /status.
             creds = f"{provider} cli login" if shutil.which(get("LLM_CLI_PATH") or CLI_COMMANDS[provider]) else None
@@ -868,8 +878,8 @@ class Monitor:
                     f"(e.g. names from the hotword list instead of speech). See docs/assessment/01-performance-and-cpu-offload.md (R1).")
 
         llm = status.get("llm") or {}
-        if llm.get("provider") == "openai-compatible" and not llm.get("model"):
-            add("llm-model", "warn", "Summaries will fail: LLM_PROVIDER is openai-compatible but LLM_MODEL is empty in .env.")
+        if llm.get("provider") and not llm.get("model"):
+            add("llm-model", "warn", f"Summaries will fail: LLM_PROVIDER is {llm['provider']} but LLM_MODEL is empty in .env.")
 
         for a in out:
             if a["key"] not in self._raised:

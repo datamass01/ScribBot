@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { config } from "../config.js";
-import type { SessionRow, Store } from "../db.js";
+import { gameFolderOf, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { mergedInto } from "../merge.js";
 import { sessionPaths, sessionRecordings } from "../paths.js";
@@ -138,6 +138,8 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       ...campaignName(s.campaign_id),
       /** Still in the old flat data/sessions/<id> folder (the layout migration hasn't run). */
       legacyLayout: !s.dir,
+      /** In a campaign folder still named by number (sessions/012); the layout migration renames it to its id. */
+      numberedFolder: Boolean(s.dir && !s.merged_into_id && gameFolderOf(s.dir) !== s.id),
       recordings: sessionRecordings(s.id).length,
       number: s.number,
       title: s.title,
@@ -340,8 +342,8 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/sessions/:id/restore",
     handle((req: IdReq) => {
       const s = find(req.params.id);
-      restoreSession(store, s);
-      return { ok: true, session: summary(find(s.id)) };
+      const r = restoreSession(store, s, (id) => sessions.isRecording(id));
+      return { ok: true, session: summary(find(s.id)), number: r.number, renumbered: r.renumbered, message: r.message };
     }),
   );
   app.delete(
@@ -422,7 +424,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       const plan = planLayout(store);
       return {
         pending: plan.games.length,
-        plan: plan.games.map((g) => ({ number: g.oldNumber, newNumber: g.number, campaign: g.campaign, from: g.from, to: g.to, inTrash: g.inTrash,
+        plan: plan.games.map((g) => ({ kind: g.kind, id: g.id, number: g.oldNumber, newNumber: g.number, campaign: g.campaign, from: g.from, to: g.to, inTrash: g.inTrash,
           merged: g.merged.map((m) => m.number), notes: g.notes })),
         campaigns: plan.campaigns,
         warnings: plan.warnings,

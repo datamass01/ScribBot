@@ -600,7 +600,7 @@ def glossary_names(text: str) -> list[str]:
 
 
 def recording_dirs(data_root: Path) -> list[Path]:
-    """Every recording folder: campaigns/<world>/sessions/<NNN>/recordings/<id>/ (docs/design.md 6.1),
+    """Every recording folder: campaigns/<world>/sessions/<game id>/recordings/<id>/ (docs/design.md 6.1),
     and old flat sessions/<id>/ folders not moved to the campaign layout yet."""
     out: list[Path] = []
     flat = data_root / "sessions"

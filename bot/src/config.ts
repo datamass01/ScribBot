@@ -47,12 +47,39 @@ const EnvSchema = z.object({
 
   WORKER_URL: z.string().default("http://127.0.0.1:7421"),
 
-  LLM_PROVIDER: z.enum(["anthropic", "xai", "openai-compatible", "codex", "antigravity", "claude-code", "grok-cli"]).default("anthropic"),
+  LLM_PROVIDER: z
+    .enum([
+      "anthropic", "xai", "openai-compatible", "gemini", "vertex-ai", "azure-openai", "bedrock",
+      "codex", "antigravity", "claude-code", "grok-cli",
+    ])
+    .default("anthropic"),
   LLM_MODEL: optionalString,
   ANTHROPIC_API_KEY: optionalString,
+  ANTHROPIC_BASE_URL: optionalString,
   XAI_API_KEY: optionalString,
+  XAI_BASE_URL: optionalString,
   OPENAI_BASE_URL: optionalString,
   OPENAI_API_KEY: optionalString,
+  // Google Gemini API and Vertex AI, under the names Google's SDK reads.
+  GEMINI_API_KEY: optionalString,
+  GOOGLE_GEMINI_BASE_URL: optionalString,
+  GOOGLE_CLOUD_PROJECT: optionalString,
+  GOOGLE_CLOUD_LOCATION: optionalString,
+  GOOGLE_APPLICATION_CREDENTIALS: optionalString,
+  GOOGLE_VERTEX_BASE_URL: optionalString,
+  // Azure OpenAI, under the names the openai SDK's AzureOpenAI reads. LLM_MODEL is the deployment.
+  AZURE_OPENAI_ENDPOINT: optionalString,
+  AZURE_OPENAI_API_KEY: optionalString,
+  OPENAI_API_VERSION: optionalString,
+  // Amazon Bedrock, under the AWS SDK's names. Blank: the AWS default credential chain.
+  AWS_REGION: optionalString,
+  AWS_PROFILE: optionalString,
+  AWS_BEARER_TOKEN_BEDROCK: optionalString,
+  AWS_ENDPOINT_URL_BEDROCK_RUNTIME: optionalString,
+  // API providers only, passed through as written (bot/src/summarize/api-options.ts): extra HTTP
+  // headers, and extra request-body fields as a JSON object. Checked when a summary starts.
+  LLM_HEADERS: optionalString,
+  LLM_REQUEST_OPTIONS: optionalString,
   // codex / antigravity / claude-code / grok-cli: the CLI to run when it isn't on PATH as
   // `codex` / `agy` / `claude` / `grok`.
   LLM_CLI_PATH: optionalString,
@@ -77,8 +104,8 @@ const EnvSchema = z.object({
   BACKLOG_WARN_MINUTES: z.coerce.number().min(0).default(10),
   // Daily bot log files in DATA_DIR/logs, kept this many days (0 = no log files).
   LOG_RETENTION_DAYS: z.coerce.number().min(0).default(14),
-  // Sessions deleted from the Console wait in DATA_DIR/trash this many days (0 = until emptied by hand).
-  TRASH_RETENTION_DAYS: z.coerce.number().min(0).default(30),
+  // Sessions trashed from the Console wait in DATA_DIR/trash this many days (0 = until emptied by hand).
+  TRASH_RETENTION_DAYS: z.coerce.number().min(0).default(14),
 });
 
 /** The env schema, exported for the settings catalog test (bot/src/settings-catalog.ts). */
@@ -98,9 +125,26 @@ export const SUMMARY_KEYS = [
   "LLM_PROVIDER",
   "LLM_MODEL",
   "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
   "XAI_API_KEY",
+  "XAI_BASE_URL",
   "OPENAI_BASE_URL",
   "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_GEMINI_BASE_URL",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_VERTEX_BASE_URL",
+  "AZURE_OPENAI_ENDPOINT",
+  "AZURE_OPENAI_API_KEY",
+  "OPENAI_API_VERSION",
+  "AWS_REGION",
+  "AWS_PROFILE",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+  "LLM_HEADERS",
+  "LLM_REQUEST_OPTIONS",
   "LLM_CLI_PATH",
   "SUMMARY_CHUNK_MINUTES",
   "AUTO_SUMMARIZE",
@@ -114,9 +158,26 @@ function buildSummaryConfig(e: z.infer<typeof SummaryEnvSchema>) {
       provider: e.LLM_PROVIDER,
       model: e.LLM_MODEL,
       anthropicApiKey: e.ANTHROPIC_API_KEY,
+      anthropicBaseUrl: e.ANTHROPIC_BASE_URL,
       xaiApiKey: e.XAI_API_KEY,
+      xaiBaseUrl: e.XAI_BASE_URL,
       openaiBaseUrl: e.OPENAI_BASE_URL,
       openaiApiKey: e.OPENAI_API_KEY,
+      geminiApiKey: e.GEMINI_API_KEY,
+      geminiBaseUrl: e.GOOGLE_GEMINI_BASE_URL,
+      googleCloudProject: e.GOOGLE_CLOUD_PROJECT,
+      googleCloudLocation: e.GOOGLE_CLOUD_LOCATION,
+      googleCredentials: e.GOOGLE_APPLICATION_CREDENTIALS,
+      vertexBaseUrl: e.GOOGLE_VERTEX_BASE_URL,
+      azureEndpoint: e.AZURE_OPENAI_ENDPOINT,
+      azureApiKey: e.AZURE_OPENAI_API_KEY,
+      azureApiVersion: e.OPENAI_API_VERSION,
+      awsRegion: e.AWS_REGION,
+      awsProfile: e.AWS_PROFILE,
+      awsBedrockToken: e.AWS_BEARER_TOKEN_BEDROCK,
+      bedrockEndpoint: e.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
+      headers: e.LLM_HEADERS,
+      requestOptions: e.LLM_REQUEST_OPTIONS,
       cliPath: e.LLM_CLI_PATH,
       chunkMinutes: e.SUMMARY_CHUNK_MINUTES,
     },

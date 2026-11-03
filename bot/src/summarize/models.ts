@@ -108,10 +108,36 @@ const FIXED: Record<string, { models: ModelInfo[]; notes: string[] }> = {
     models: [{ id: "grok-4", isDefault: true }],
     notes: ["Blank: grok-4. Any model id from xAI's model list works."],
   },
+  gemini: {
+    models: [{ id: "gemini-3.8-flash", isDefault: true }],
+    notes: [
+      "Blank: gemini-3.8-flash. Any model id from Google AI Studio's model list works (ai.google.dev, 'Models').",
+      "Thinking can be set in Extra request options, e.g. {\"thinkingConfig\": {\"thinkingLevel\": \"high\"}}.",
+    ],
+  },
+  "vertex-ai": {
+    models: [{ id: "gemini-3.8-flash", isDefault: true }],
+    notes: [
+      "Blank: gemini-3.8-flash. Any Gemini model id from Vertex AI's Model Garden that is available in your location; partner models (Claude, Llama) on Vertex AI use their own APIs and aren't supported here.",
+    ],
+  },
+  "azure-openai": {
+    models: [],
+    notes: [
+      "Required: your deployment name (Azure AI Foundry, 'Deployments'), not the model name. The deployment's model must support structured output (gpt-4o 2024-08-06 or later).",
+    ],
+  },
+  bedrock: {
+    models: [],
+    notes: [
+      "Required: a model id or inference profile id enabled in your region, e.g. an id from `aws bedrock list-foundation-models` or a cross-region profile from `aws bedrock list-inference-profiles` (they start with us., eu., apac. or global.). An ARN works too.",
+      "Models without native structured output are asked through a forced tool call instead.",
+    ],
+  },
   "openai-compatible": {
     models: [],
     notes: [
-      "Required: the model name your server knows, e.g. what `ollama list` shows for Ollama, or the model id for OpenAI or OpenRouter.",
+      "Required: the model name your server knows, e.g. what `ollama list` shows for Ollama, or the model id for OpenAI, Mistral, DeepSeek, Groq or OpenRouter.",
     ],
   },
 };

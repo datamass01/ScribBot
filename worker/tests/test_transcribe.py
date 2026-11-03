@@ -539,7 +539,7 @@ def test_preload_loads_the_model_on_the_transcription_thread(tmp_path):
 
 
 def test_unfinished_clips_in_campaign_recording_folders(session: Path, tmp_path: Path):
-    """Recordings live in campaigns/<world>/sessions/<NNN>/recordings/<id>/ (docs/design.md 6.1);
+    """Recordings live in campaigns/<world>/sessions/<game id>/recordings/<id>/ (docs/design.md 6.1);
     the game's own folder above them is never treated as a recording."""
     import os
     import shutil

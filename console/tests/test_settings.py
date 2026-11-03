@@ -43,6 +43,13 @@ def test_secrets_never_reach_the_page(tmp_path):
     ("AUTO_SUMMARIZE", "maybe", "true or false"),
     ("WORKER_URL", "localhost:7421", "http"),
     ("FOUNDRY_ORIGINS", "http://ok.example, nope", "nope"),
+    ("ANTHROPIC_BASE_URL", "api.example.com", "http"),
+    ("LLM_HEADERS", "x-api-key sk-secret", "entry 1"),
+    ("LLM_HEADERS", "Bad Name: v", "valid header name"),
+    ("LLM_HEADERS", '{"x-api-key": sk-secret}', "valid JSON"),
+    ("LLM_HEADERS", '{"A": {"b": 1}}', "must be text"),
+    ("LLM_REQUEST_OPTIONS", "temperature=0.3", "valid JSON"),
+    ("LLM_REQUEST_OPTIONS", "[1, 2]", "JSON object"),
     ("DISCORD_TOKEN", "a\nb", "single line"),
 ])
 def test_bad_values_are_refused_and_nothing_is_written(tmp_path, key, value, problem):
@@ -51,6 +58,24 @@ def test_bad_values_are_refused_and_nothing_is_written(tmp_path, key, value, pro
         s.save({key: value, "API_HOST": "127.0.0.1"}, None)
     assert problem in err.value.problems[key]
     assert (tmp_path / ".env").read_text("utf-8") == "API_PORT=7420\n"
+
+
+def test_header_problems_never_quote_the_value(tmp_path):
+    for value in ("x-api-key sk-secret", '{"x-api-key": sk-secret}'):
+        with pytest.raises(SettingsError) as err:
+            make(tmp_path).save({"LLM_HEADERS": value}, None)
+        assert "sk-secret" not in str(err.value)
+
+
+def test_freeform_api_settings_are_written_as_given(tmp_path):
+    s = make(tmp_path, "")
+    headers = "HTTP-Referer: https://example.org; X-Title: ScribBot"
+    options = '{"temperature": 0.3, "provider": {"order": ["anthropic"]}}'
+    s.save({"LLM_HEADERS": headers, "LLM_REQUEST_OPTIONS": options, "XAI_BASE_URL": "https://eu.api.x.ai/v1"}, None)
+    text = (tmp_path / ".env").read_text("utf-8")
+    assert f"LLM_HEADERS={headers}" in text
+    assert f"LLM_REQUEST_OPTIONS={options}" in text
+    assert "XAI_BASE_URL=https://eu.api.x.ai/v1" in text
 
 
 def test_unknown_keys_are_refused(tmp_path):

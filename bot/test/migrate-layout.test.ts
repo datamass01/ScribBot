@@ -93,7 +93,7 @@ describe("layout migration", () => {
     expect(fs.existsSync(path.join(r.backupDir, "scribbot.db"))).toBe(true);
     expect(fs.readdirSync(path.join(dataDir, "sessions"))).toEqual(["fixture-tts"]);
 
-    const game = path.join(dataDir, "campaigns", "erat", "sessions", "012");
+    const game = path.join(dataDir, "campaigns", "erat", "sessions", "a-game");
     expect(sessionPaths("a-game").dir).toBe(game);
     // Session 12's recording holds its own files from before the merge; the copied clip is gone.
     const rec = path.join(game, "recordings", "a-game");
@@ -112,13 +112,13 @@ describe("layout migration", () => {
     const tr = readJson<Transcript>(path.join(game, "transcript.json"));
     expect(tr.lines.map((l) => l.text)).toEqual(["We go in.", expect.stringMatching(/recording resumed .*session 13 merged in/), "Where were we?"]);
 
-    expect(sessionPaths("a-solo").dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", "014"));
+    expect(sessionPaths("a-solo").dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", "a-solo"));
     expect(readJson<Transcript>(sessionPaths("a-solo").transcriptJson).lines).toHaveLength(1);
     // In the trash: restructured in place, and restoring puts it in its campaign folder.
     expect(fs.existsSync(path.join(dataDir, "trash", "a-trash", "recordings", "a-trash", "timeline.json"))).toBe(true);
     expect(fs.existsSync(path.join(dataDir, "trash", "a-trash", "summary.md"))).toBe(true);
-    expect(sessionPaths("a-trash").dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", "009"));
-    expect(store.getSession("a-empty")!.dir).toBe("campaigns/erat/sessions/001/recordings/a-empty");
+    expect(sessionPaths("a-trash").dir).toBe(path.join(dataDir, "campaigns", "erat", "sessions", "a-trash"));
+    expect(store.getSession("a-empty")!.dir).toBe("campaigns/erat/sessions/a-empty/recordings/a-empty");
   });
 
   it("finds the story from either recording and has nothing left to do", async () => {
@@ -127,6 +127,6 @@ describe("layout migration", () => {
     expect(plan(store).games).toEqual([]);
     // New recordings continue the campaign's numbering.
     const next = store.createSession({ id: "new", guildId: "g", channelId: "c", textChannelId: null, startedAt: "2026-11-08T01:00:00.000Z" });
-    expect(next).toMatchObject({ number: 15, dir: "campaigns/erat/sessions/015/recordings/new" });
+    expect(next).toMatchObject({ number: 15, dir: "campaigns/erat/sessions/new/recordings/new" });
   });
 });

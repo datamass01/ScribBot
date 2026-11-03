@@ -22,7 +22,7 @@ ScribBot records tabletop RPG sessions on Discord, transcribes them locally with
 | `campaign/` | `glossary.md` (names fed to STT and the LLM) and `context.md` (story so far). Both are git-ignored and local only; change the committed `*.example.md` templates instead |
 | `docs/design.md` | Design document; diagrams are standalone SVGs in `docs/diagrams/` |
 | `.claude/skills/summarize-session/` | Story write-up skill (stdlib Python + prompt, any LLM); `template.md` fixes the sections, `verify.py` checks the result. Writes to the session's `story/` folder |
-| `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/`. Sessions live in `data/campaigns/<world>/sessions/<NNN>/` with each Discord recording in `recordings/<id>/` (`docs/design.md` §6.1); `data/sessions/<id>/` is the old flat layout |
+| `data/` | Runtime output (git-ignored), except the synthetic fixture `data/sessions/fixture-tts/`. Sessions live in `data/campaigns/<world>/sessions/<session id>/` (named by the first recording's id, never by number) with each Discord recording in `recordings/<id>/` (`docs/design.md` §6.1); `data/sessions/<id>/` is the old flat layout |
 
 Configuration is a single `.env` at the repo root (template: `.env.example`), validated by Zod in `bot/src/config.ts` and read by `worker/scribworker/config.py`.
 

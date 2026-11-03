@@ -1,4 +1,4 @@
-// Sessions: create, stop, resume, re-run, merge, label and delete sessions, post them to Foundry,
+// Sessions: create, stop, resume, re-run, merge, label and trash sessions, post them to Foundry,
 // and manage who plays which character. Every action calls the bot's /admin API through the
 // Console, which runs the same code as the matching /scrib command.
 import { $, api, attempt, bytes, confirmDialog, dur, esc, openDialog, pill, showText, toast, when } from "./util.js";
@@ -126,7 +126,7 @@ function actionsFor(s) {
     ...(campaigns.length > 1 ? [{ act: "move-campaign", label: "Move to another campaign…", hint: "Renumbers it there; its folder moves with it.",
       why: off || busy || merged || (s.legacyLayout ? "Update the folder layout first." : null) }] : []),
     { act: "open", label: "Details, title and notes" },
-    { act: "delete", label: "Delete…", danger: true, why: off || busy },
+    { act: "trash", label: "Trash…", hint: "Move it to the trash, where it can be restored or deleted for good.", danger: true, why: off || busy },
   ];
 }
 
@@ -168,9 +168,14 @@ function render() {
     : "";
   // A merged recording moves with its game, so it isn't counted on its own.
   const legacy = list.filter((s) => s.legacyLayout && s.mergedInto == null).length;
-  const layout = legacy && !readOnly
-    ? `<div class="notice warn" style="margin-bottom:10px">${legacy} session${legacy === 1 ? " uses" : "s use"} the old folder layout (<code>data\\sessions\\&lt;id&gt;</code>).
-        Moving them into campaign folders (<code>data\\campaigns\\&lt;world&gt;\\sessions\\012</code>) is needed to merge them; everything is backed up first.
+  const numbered = list.filter((s) => s.numberedFolder).length;
+  const why = legacy
+    ? `${legacy} session${legacy === 1 ? " uses" : "s use"} the old folder layout (<code>data\\sessions\\&lt;id&gt;</code>).
+        Moving them into campaign folders (<code>data\\campaigns\\&lt;world&gt;\\sessions\\&lt;session id&gt;</code>) is needed to merge them; everything is backed up first.`
+    : `${numbered} session folder${numbered === 1 ? " is" : "s are"} still named by number (<code>sessions\\012</code>).
+        Renaming ${numbered === 1 ? "it" : "them"} to the session's id lets sessions be renumbered without moving folders; the database is backed up first.`;
+  const layout = (legacy || numbered) && !readOnly
+    ? `<div class="notice warn" style="margin-bottom:10px">${why}
         <button data-act="migrate" style="margin-left:6px">Update folder layout…</button></div>` : "";
   $("s-banner").innerHTML = banner + layout;
   renderCampaignHeader();
@@ -245,8 +250,8 @@ async function onClick(e) {
     case "post-summary": return s && post(s, "summary");
     case "post-story": return s && post(s, "story");
     case "merge": return s && merge(s);
-    case "delete": return s && remove(s);
-    case "restore": return s && run(s, "restore", {}, `Session ${s.number} restored.`);
+    case "trash": return s && trash(s);
+    case "restore": return s && run(s, "restore", {}, (r) => r?.message || `Session ${s.number} restored.`);
     case "purge": return s && purge(s);
     case "save-labels": return s && saveLabels(s);
     case "preview": return s && preview(s, btn.dataset.name);
@@ -311,17 +316,47 @@ async function merge(s) {
   if (res && res !== true) showText("Merged", res.message.replace(/\*\*/g, ""));
 }
 
-async function remove(s) {
-  const inFoundry = ["summary", "story"].filter((k) => s[`${k}SentAt`] || s[`${k}JournalAt`]);
-  const sent = inFoundry.length
-    ? `<p class="notice warn">Its ${inFoundry.join(" and ")} went to Foundry; ${inFoundry.length > 1 ? "those journal entries stay" : "that journal entry stays"} there.</p>` : "";
-  const r = await openDialog(`<form><h3>Delete session ${s.number}?</h3>
-    <p>Its folder moves to <code>data\\trash</code>. You can restore it from the Trash filter until it's emptied
-      (automatically after TRASH_RETENTION_DAYS, or by “Delete permanently”).</p>${sent}
-    <label class="field"><span>Type ${s.number} to confirm</span><input name="confirm" required pattern="${s.number}" autocomplete="off" inputmode="numeric"></label>
-    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary danger" value="ok">Delete</button></div></form>`);
-  if (!r) return;
-  const ok = await attempt(() => api("DELETE", `/api/admin/sessions/${encodeURIComponent(s.id)}`), `Session ${s.number} moved to the trash.`);
+/** The trash settings from .env (Configuration → Storage and retention): how long it keeps a session, and whether to say so first. */
+async function trashSettings() {
+  try {
+    const cfg = await api("GET", "/api/config");
+    const value = (key) => {
+      const v = cfg.values?.[key]?.value;
+      return v === undefined || v === "" ? cfg.settings.find((x) => x.key === key)?.default ?? "" : v;
+    };
+    const days = Number(value("TRASH_RETENTION_DAYS"));
+    return { days: Number.isFinite(days) ? days : 14, confirm: value("TRASH_CONFIRM") !== "false", version: cfg.version };
+  } catch {
+    return { days: null, confirm: true, version: null }; // couldn't read .env: still ask
+  }
+}
+
+/** "for 14 days, then deleted permanently" (or until deleted by hand when the trash never empties itself). */
+const keptFor = (days) =>
+  days === null ? "until the trash is emptied (see Configuration → Storage and retention)"
+  : days > 0 ? `for ${days} day${days === 1 ? "" : "s"}, then deleted permanently`
+  : "until you delete it permanently (the trash never empties itself)";
+
+async function trash(s) {
+  const settings = await trashSettings();
+  let hidden = false;
+  if (settings.confirm) {
+    const inFoundry = ["summary", "story"].filter((k) => s[`${k}SentAt`] || s[`${k}JournalAt`]);
+    const sent = inFoundry.length
+      ? `<p class="notice warn">Its ${inFoundry.join(" and ")} went to Foundry; ${inFoundry.length > 1 ? "those journal entries stay" : "that journal entry stays"} there.</p>` : "";
+    const r = await openDialog(`<form><h3>Move session ${s.number} to the trash</h3>
+      <p>Session ${s.number} will be kept in the trash <b>${esc(keptFor(settings.days))}</b>.
+        Until then you can restore it from the Trash filter.</p>${sent}
+      <p class="muted small">The number of days is set under Configuration → Storage and retention.</p>
+      <label class="check"><input type="checkbox" name="hide"> Don't show this again</label>
+      <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary danger" value="ok">Move to trash</button></div></form>`);
+    if (!r) return;
+    // Saved to .env (TRASH_CONFIRM=false); turned back on under Configuration → Storage and retention.
+    if (r.data.hide) hidden = await attempt(() => api("POST", "/api/config", { changes: { TRASH_CONFIRM: "false" }, version: settings.version }));
+  }
+  const kept = settings.days > 0 ? ` It's kept for ${settings.days} day${settings.days === 1 ? "" : "s"}.` : "";
+  const again = hidden ? " That message won't be shown again; turn it back on under Configuration → Storage and retention." : "";
+  const ok = await attempt(() => api("DELETE", `/api/admin/sessions/${encodeURIComponent(s.id)}`), `Session ${s.number} moved to the trash.${kept}${again}`);
   if (ok && selected === s.id) { selected = null; $("s-detail").hidden = true; }
   fetchedAt = 0;
   refresh();
@@ -329,7 +364,7 @@ async function remove(s) {
 
 async function purge(s) {
   const ok = await confirmDialog(`Delete session ${s.number} permanently?`,
-    "<p>Its folder in the trash is removed. This can't be undone. The session number is never reused.</p>", { ok: "Delete permanently", danger: true });
+    "<p>Its folder in the trash is removed. This can't be undone.</p>", { ok: "Delete permanently", danger: true });
   if (!ok) return;
   await attempt(() => api("DELETE", `/api/admin/trash/${encodeURIComponent(s.id)}`), `Session ${s.number} deleted permanently.`);
   fetchedAt = 0;
@@ -603,25 +638,28 @@ async function migrateLayout() {
   } catch (err) {
     return toast(err.message, "err");
   }
-  if (!plan.pending) { toast("Every session already uses the campaign folders.", "ok"); fetchedAt = 0; return refresh(); }
+  if (!plan.pending) { toast("Every session already uses the current folder layout.", "ok"); fetchedAt = 0; return refresh(); }
   const mb = Math.max(1, Math.round(plan.backupBytes / 1024 / 1024));
   const rowsHtml = plan.plan.map((g) => `<tr><td>${g.number}${g.newNumber !== g.number ? ` → ${g.newNumber}` : ""}</td>
-      <td><code>${esc(g.campaign)}\\sessions\\${String(g.newNumber).padStart(3, "0")}</code>${g.inTrash ? " <span class=\"muted\">(in the trash)</span>" : ""}</td>
+      <td><code>${esc(g.campaign)}\\sessions\\${esc(g.id)}</code>${g.inTrash ? " <span class=\"muted\">(in the trash)</span>" : ""}${g.kind === "rename" ? " <span class=\"muted\">(renamed)</span>" : ""}</td>
       <td>${g.merged.length ? `+ session ${g.merged.join(", ")}` : ""}${g.notes.map((n) => `<div class="muted small">${esc(n)}</div>`).join("")}</td></tr>`).join("");
   const r = await openDialog(`<form><h3>Update folder layout</h3>
-    <p>Each session moves from <code>data\\sessions\\&lt;id&gt;</code> into its campaign, named after the Foundry world:
-      <code>data\\campaigns\\&lt;world&gt;\\sessions\\012\\</code>. Summaries, transcripts and stories sit in that folder;
-      each Discord recording goes in its <code>recordings\\</code> sub-folder, and merged recordings move in with the game they continue.
-      Ids, Foundry journals and Discord stay as they are.</p>
-    <p class="notice ok small" style="margin:0">Everything is copied to <code>${esc(plan.backupDir)}</code> first (about ${mb} MB).</p>
+    <p>Each session's folder is <code>data\\campaigns\\&lt;world&gt;\\sessions\\&lt;session id&gt;\\</code>: in its campaign (named after
+      the Foundry world) and named after its first recording's id, so renumbering never moves it. Sessions still in
+      <code>data\\sessions\\&lt;id&gt;</code> move there; folders still named by number (<code>sessions\\012</code>) are renamed.
+      Summaries, transcripts and stories sit in that folder; each Discord recording goes in its <code>recordings\\</code> sub-folder,
+      and merged recordings move in with the game they continue. Numbers, ids, Foundry journals and Discord stay as they are.</p>
+    <p class="notice ok small" style="margin:0">${plan.backupBytes
+      ? `Everything is copied to <code>${esc(plan.backupDir)}</code> first (about ${mb} MB).`
+      : `The database is copied to <code>${esc(plan.backupDir)}</code> first; renamed folders keep their files as they are.`}</p>
     ${plan.warnings.map((w) => `<p class="notice warn small" style="margin:0">${esc(w)}</p>`).join("")}
     ${plan.busy ? `<p class="notice err small" style="margin:0">Not now: ${esc(plan.busy)}</p>` : ""}
-    <div class="table-wrap" style="max-height:40vh;overflow:auto"><table><thead><tr><th>#</th><th>New folder</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
+    <div class="table-wrap" style="max-height:40vh;overflow:auto"><table><thead><tr><th>#</th><th>Folder</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="actions"><button value="cancel" formnovalidate>Cancel</button>
-      <button class="primary" value="ok" ${plan.busy ? "disabled" : ""}>Back up and move ${plan.pending} session${plan.pending === 1 ? "" : "s"}</button></div></form>`, { wide: true });
+      <button class="primary" value="ok" ${plan.busy ? "disabled" : ""}>Back up and update ${plan.pending} session${plan.pending === 1 ? "" : "s"}</button></div></form>`, { wide: true });
   if (!r) return;
-  toast("Backing up and moving…");
-  await attempt(() => api("POST", "/api/admin/layout/migrate", {}), (x) => `Moved ${x.moved} session(s). Backup: ${x.backupDir}`);
+  toast("Backing up and updating…");
+  await attempt(() => api("POST", "/api/admin/layout/migrate", {}), (x) => `Updated ${x.moved} session(s). Backup: ${x.backupDir}`);
   fetchedAt = 0;
   refresh();
 }

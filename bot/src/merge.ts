@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SessionRow, Store } from "./db.js";
-import { recordingRel, sessionFolderName } from "./db.js";
+import { gameFolderOf, recordingRel, sessionFolderName } from "./db.js";
 import { renameWithRetry } from "./fsutil.js";
 import { composeSession, isLegacy, moveFolder, removeIfEmpty, sessionTimeline } from "./layout.js";
 import { sessionPaths, sessionRecordings } from "./paths.js";
@@ -107,13 +107,15 @@ export function mergeSessions(
   const warnings: string[] = [];
 
   // ---------- move B's recordings into A, recording the move in the database as each lands ----------
+  // A's folder as it is on disk (its id; a numbered name until the layout migration renames it).
+  const aFolder = gameFolderOf(a.dir) ?? a.id;
   const moved = sessionRecordings(b.id);
   for (const rid of moved) {
     const from = sessionPaths(rid).recording;
     const to = path.join(pa.dir, "recordings", rid);
     if (fs.existsSync(from)) moveFolder(from, to);
     store.db.transaction(() => {
-      store.setSessionPlace(rid, { dir: recordingRel(campaign.folder, a.number, rid), campaignId: campaign.id });
+      store.setSessionPlace(rid, { dir: recordingRel(campaign.folder, aFolder, rid), campaignId: campaign.id });
       store.setMergedInto(rid, a.id);
     })();
   }

@@ -15,7 +15,48 @@ from .envfile import EnvFile, EnvValueError, format_value
 CATALOG_FILE = Path(__file__).resolve().parents[2] / "shared" / "schemas" / "settings.json"
 _URL = re.compile(r"^https?://[^\s/]+(/\S*)?$")
 _TRUE = {"1", "true", "yes", "on"}
+# RFC 9110 token, as bot/src/summarize/api-options.ts checks it.
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _FALSE = {"0", "false", "no", "off"}
+
+
+def _headers_problem(value: str) -> str | None:
+    """LLM_HEADERS as the bot reads it: "Name: value" pairs split on ';', or a JSON object of strings.
+    Messages name the entry, never its value (a header may hold a key)."""
+    text = value.strip()
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return "starts with { but isn't valid JSON"
+        if not isinstance(obj, dict):
+            return "must be a JSON object"
+        pairs = list(obj.items())
+        for name, v in pairs:
+            if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+                return f"the value of {name} must be text"
+    else:
+        pairs = []
+        for i, part in enumerate((p.strip() for p in text.split(";")), 1):
+            if not part:
+                continue
+            name, colon, v = part.partition(":")
+            if not colon or not name.strip():
+                return f'entry {i} isn\'t "Name: value"'
+            pairs.append((name.strip(), v.strip()))
+    for name, _ in pairs:
+        if not _HEADER_NAME.match(name):
+            return f'"{name}" isn\'t a valid header name'
+    return None
+
+
+def _options_problem(value: str) -> str | None:
+    """LLM_REQUEST_OPTIONS: a JSON object of extra request-body fields."""
+    try:
+        obj = json.loads(value)
+    except ValueError as err:
+        return f"isn't valid JSON ({err.msg} at character {err.pos + 1})"
+    return None if isinstance(obj, dict) else "must be a JSON object, e.g. {\"temperature\": 0.3}"
 
 
 def load_catalog(path: Path = CATALOG_FILE) -> dict[str, Any]:
@@ -64,6 +105,10 @@ def check_value(setting: dict[str, Any], value: str) -> str | None:
     elif kind == "url":
         if not _URL.match(value):
             return "must be an http:// or https:// address"
+    elif setting["key"] == "LLM_HEADERS":
+        return _headers_problem(value)
+    elif setting["key"] == "LLM_REQUEST_OPTIONS":
+        return _options_problem(value)
     elif kind == "string" and setting["key"] == "FOUNDRY_ORIGINS":
         bad = [o for o in (x.strip() for x in value.split(",")) if o and not _URL.match(o)]
         if bad:
