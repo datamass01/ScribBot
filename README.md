@@ -30,6 +30,15 @@ Quotes are checked against the transcript. Any quote the model cannot match to w
 
 ## Setup
 
+**Quick install.** One script sets up steps 3 and 4 (the worker's venv and the bot's packages) and creates `.env` from the template if you don't have one. It's safe to run again.
+```sh
+.\install.ps1          # Windows (PowerShell 5.1 or 7)
+./install.sh           # macOS / Linux
+```
+It starts with a checklist of what passed and what's missing. You install the prerequisites yourself: **Node.js 22.12+**, **Python 3.10+** (with `venv`; on Debian/Ubuntu that's the separate `python3-venv` package) and **build tools** (Linux: `make`; macOS: the Xcode Command Line Tools; Windows: the Visual Studio C++ build tools). The bot's SQLite package ships prebuilt binaries, but npm still runs `node-gyp` for it, and `node-gyp` needs those tools. For anything missing, the installer prints the command for your system (winget, Homebrew, apt, dnf, pacman, zypper) and waits while you install it, then checks again. It then lists what it will set up, asks before installing, and asks separately about the optional downloads (the speech model, faster-whisper when `.env` says `STT_ENGINE=whisper`, and a browser when `FOUNDRY_HEADLESS` is on).
+
+Options: `-Yes` / `--yes` (don't ask, take the defaults; also the behavior when input isn't a terminal), `-Preflight` / `--preflight` (only print the checklist; exit 1 if a prerequisite is missing), `-Whisper` / `--whisper` (faster-whisper for `STT_ENGINE=whisper`), `-Cuda` / `--cuda` (the same, with the NVIDIA libraries), `-Dev` / `--dev` (test dependencies), `-Check` / `--check` (load the speech model once), `-Chromium` / `--chromium` (Playwright's Chromium for the Foundry bridge). Then do steps 1–2 and start it (below). On macOS/Linux every `.ps1` script has a `.sh` twin (`start.sh`, `start-worker.sh`, `start-console.sh`) with the same options spelled `--register`, `--no-restart`, `--check`, `--no-browser`, `--port <n>`, `--no-log-file`; in the manual steps, use `.venv/bin/python` in place of `.venv\Scripts\python`.
+
 ### 1. Discord application
 1. Go to <https://discord.com/developers/applications>, create **New Application** → **Bot**, and copy the token.
 2. Invite the bot from OAuth2 → URL Generator: scopes `bot` and `applications.commands`; permissions **View Channels**, **Send Messages**, **Attach Files**, **Embed Links**, **Connect**. (It joins muted, so it doesn't need **Speak**.)
@@ -82,7 +91,7 @@ npm run register     # registers /scrib with Discord (once, and after command ch
 npm start
 ```
 
-Once steps 1–4 are done, `.\start.ps1` at the repo root starts both: the worker in its own window (waiting until `/health` answers), then the bot. Add `-Register` to re-register the slash commands first. To run only the worker in the current window (to watch its log), use `.\start-worker.ps1` (`-Check` loads Whistle once first). If PowerShell blocks scripts, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`. In Windows PowerShell 5.1, chain commands with `;` rather than `&&` (for example `cd bot; npm run register`).
+Once steps 1–4 are done, `.\start.ps1` at the repo root starts both: the worker in its own window (waiting until `/health` answers), then the bot. Add `-Register` to re-register the slash commands first. To run only the worker in the current window (to watch its log), use `.\start-worker.ps1` (`-Check` loads Whistle once first). If PowerShell blocks scripts, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`. On macOS/Linux, `./start.sh` does the same in one terminal: the worker runs in the background with its lines prefixed `[worker]`, and Ctrl+C (or SIGTERM) stops both; `./start-worker.sh` runs the worker alone. In Windows PowerShell 5.1, chain commands with `;` rather than `&&` (for example `cd bot; npm run register`).
 
 Both scripts **supervise** what they start: if the bot or worker exits with an error (a crash), it is restarted after 5 seconds, up to 5 times in 10 minutes. Ctrl+C (a clean exit) stops it for good; `-NoRestart` turns the restarts off. For a service that survives logging off, wrap the same commands in NSSM, WinSW or a Task Scheduler task with restart-on-failure.
 
@@ -115,7 +124,7 @@ The bot sets the module's URL and token in its own browser, waits for the chat l
 
 ## The Console
 
-`.\start-console.ps1` opens the ScribBot Console at <http://127.0.0.1:7422/> (`CONSOLE_PORT`): one local page to set up and run ScribBot from your desktop. It doesn't replace anything: every `/scrib` command, the Foundry module's dialogs and the bot's own dashboard keep working, and closing the Console (or the browser) stops nothing. The bot and the worker never depend on it.
+`.\start-console.ps1` (macOS/Linux: `./start-console.sh`) opens the ScribBot Console at <http://127.0.0.1:7422/> (`CONSOLE_PORT`): one local page to set up and run ScribBot from your desktop. It doesn't replace anything: every `/scrib` command, the Foundry module's dialogs and the bot's own dashboard keep working, and closing the Console (or the browser) stops nothing. The bot and the worker never depend on it.
 
 | Tab | What it does |
 |---|---|
