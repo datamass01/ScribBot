@@ -23,6 +23,14 @@ export function mergedInto(session: Pick<SessionRow, "error">): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** Why a session can't be used by the pipeline, merges or imports, or null. */
+export function unusableReason(session: SessionRow): string | null {
+  if (session.deleted_at) return `Session ${session.number} is in the trash. Restore it first.`;
+  const into = mergedInto(session);
+  if (into != null) return `Session ${session.number} was merged into session ${into}; use that one instead.`;
+  return null;
+}
+
 export interface MergeResult {
   target: SessionRow;
   source: SessionRow;

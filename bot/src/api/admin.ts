@@ -5,7 +5,7 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { gameFolderOf, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
-import { mergedInto } from "../merge.js";
+import { mergedInto, unusableReason } from "../merge.js";
 import { sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
 import { announceStory, findStoryFile, storyPath } from "../story.js";
@@ -15,8 +15,8 @@ import type { SummaryFile } from "../summarize/schema.js";
 import { moveToCampaign, sessionTimeline } from "../layout.js";
 import { applyLayout, planLayout } from "../migrate-layout.js";
 import { workerHealth } from "../worker-client.js";
-import { deleteSession, purgeSession, restoreSession, trashFolder, unusableReason } from "../trash.js";
-import { llmConfigProblem } from "./status.js";
+import { deleteSession, purgeSession, restoreSession, trashFolder } from "../trash.js";
+import { llmConfigProblem } from "../summarize/readiness.js";
 
 /**
  * The Console's API (docs/console-design.md §3.2). Each route wraps what a slash command already

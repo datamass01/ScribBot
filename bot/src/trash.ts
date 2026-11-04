@@ -124,11 +124,3 @@ export function purgeExpiredTrash(store: Store, days: number, log: (msg: string)
     }
   }
 }
-
-/** Why a session can't be used by the pipeline, merges or imports, or null. */
-export function unusableReason(session: SessionRow): string | null {
-  if (session.deleted_at) return `Session ${session.number} is in the trash. Restore it first.`;
-  const into = mergedInto(session);
-  if (into != null) return `Session ${session.number} was merged into session ${into}; use that one instead.`;
-  return null;
-}

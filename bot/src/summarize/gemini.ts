@@ -1,9 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { withoutReserved } from "./api-options.js";
+import { API_DEFAULT_MODELS } from "./defaults.js";
 import { LLMError, type JsonRequest, type LLMProvider } from "./provider.js";
 
-export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
 
 export interface GeminiOptions {
   /** `vertex-ai`: Google Cloud (project, location, application default credentials); `gemini`: the Gemini API with a key. */
@@ -32,7 +32,7 @@ export class GeminiProvider implements LLMProvider {
 
   constructor(opts: GeminiOptions) {
     this.name = opts.vertex ? "vertex-ai" : "gemini";
-    this.model = opts.model ?? GEMINI_DEFAULT_MODEL;
+    this.model = opts.model ?? API_DEFAULT_MODELS[this.name === "vertex-ai" ? "vertex-ai" : "gemini"];
     const httpOptions = {
       timeout: 20 * 60_000,
       ...(opts.baseURL ? { baseUrl: opts.baseURL } : {}),

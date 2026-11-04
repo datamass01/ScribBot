@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { childEnv, isCliProvider, resolveCli, type CliAgentKind } from "./cli-agent.js";
+import { API_DEFAULT_MODELS } from "./defaults.js";
+import { childEnv, cliDefaultModel, isCliProvider, resolveCli, type CliAgentKind } from "./cli-agent.js";
 
 /**
  * Which model ids each summary provider accepts in LLM_MODEL, for the Console's "Which models?"
@@ -61,7 +62,7 @@ const CLI_SOURCES: Record<Exclude<CliAgentKind, "claude-code">, CliSource> = {
         .map((m) => ({ id: m[1]!, label: m[2]!.trim() }));
     },
     notes: [
-      "Blank: gemini-3.8-flash, with the reasoning level ScribBot asks for.",
+      `Blank: ${cliDefaultModel("antigravity")}, with the reasoning level ScribBot asks for.`,
       "An id ending in -low, -medium or -high fixes the reasoning level; ScribBot then doesn't set one.",
     ],
   },
@@ -97,28 +98,28 @@ const FIXED: Record<string, { models: ModelInfo[]; notes: string[] }> = {
   },
   anthropic: {
     models: [
-      { id: "claude-opus-5-5", label: "Claude Opus 5.5", isDefault: true },
+      { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
       { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
       { id: "claude-haiku-5-5", label: "Claude Haiku 5.5" },
       { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
-    ],
-    notes: ["Blank: claude-opus-5-5. Any model id from Anthropic's models list works."],
+    ].map((m) => ({ ...m, isDefault: m.id === API_DEFAULT_MODELS.anthropic })),
+    notes: [`Blank: ${API_DEFAULT_MODELS.anthropic}. Any model id from Anthropic's models list works.`],
   },
   xai: {
-    models: [{ id: "grok-4", isDefault: true }],
-    notes: ["Blank: grok-4. Any model id from xAI's model list works."],
+    models: [{ id: API_DEFAULT_MODELS.xai, isDefault: true }],
+    notes: [`Blank: ${API_DEFAULT_MODELS.xai}. Any model id from xAI's model list works.`],
   },
   gemini: {
-    models: [{ id: "gemini-3.8-flash", isDefault: true }],
+    models: [{ id: API_DEFAULT_MODELS.gemini, isDefault: true }],
     notes: [
-      "Blank: gemini-3.8-flash. Any model id from Google AI Studio's model list works (ai.google.dev, 'Models').",
+      `Blank: ${API_DEFAULT_MODELS.gemini}. Any model id from Google AI Studio's model list works (ai.google.dev, 'Models').`,
       "Thinking can be set in Extra request options, e.g. {\"thinkingConfig\": {\"thinkingLevel\": \"high\"}}.",
     ],
   },
   "vertex-ai": {
-    models: [{ id: "gemini-3.8-flash", isDefault: true }],
+    models: [{ id: API_DEFAULT_MODELS["vertex-ai"], isDefault: true }],
     notes: [
-      "Blank: gemini-3.8-flash. Any Gemini model id from Vertex AI's Model Garden that is available in your location; partner models (Claude, Llama) on Vertex AI use their own APIs and aren't supported here.",
+      `Blank: ${API_DEFAULT_MODELS["vertex-ai"]}. Any Gemini model id from Vertex AI's Model Garden that is available in your location; partner models (Claude, Llama) on Vertex AI use their own APIs and aren't supported here.`,
     ],
   },
   "azure-openai": {

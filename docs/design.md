@@ -104,13 +104,13 @@ ScribBot is three processes plus Foundry, and the optional Console:
 | `recorder.ts` | `SessionRecorder`: joins voice muted, subscribes to each speaker, writes one WAV per speech burst, journals each clip to `timeline.segments.jsonl` and snapshots `timeline.json`. Rejoins the channel by itself when the voice connection is lost. Never throws from a clip callback. |
 | `recovery.ts` | Startup plan for sessions the last process left mid-flight (resume, mark failed, or process), and the default session for `/scrib process`. |
 | `timeline.ts` | `readTimeline()`: the snapshot plus journal-only clips. |
-| `merge.ts` | Merges a continuation session into the one it continues (`/scrib merge`, `npm run merge`). |
+| `merge.ts` | Merges a continuation session into the one it continues (`/scrib merge`, `npm run merge`). `unusableReason()` says why a trashed or merged session can't be used. |
 | `links.ts` | Which Foundry "Discord ID" flags to write from `/scrib map` (`roster.link`). |
 | `fsutil.ts` | Atomic writes (`.tmp` + rename) with retries on Windows sharing errors. |
 | `logfile.ts` | Daily log files in `DATA_DIR/logs`. |
-| `pipeline.ts` | `processSession()` runs transcription, then summarization, and updates session status. `makeLiveTranscriber()` sends clips during play. `purgeExpiredAudio()` enforces retention. |
+| `pipeline.ts` | `processSession()` runs transcription, then summarization, and updates session status. `makeLiveTranscriber()` sends clips during play. `purgeExpiredAudio()` enforces retention. `processBlocker()` is the one statement of when a session can't be processed; the slash commands and the Console check it before starting. |
 | `worker-client.ts` | HTTP client for the worker: fire-and-forget clip jobs, and session jobs polled every second. Polls survive a worker restart: unreachable calls are retried for 5 minutes, and a job the worker no longer knows (404) is resubmitted. |
-| `summarize/` | Prompt building, chunking, provider adapters, quote verification and Markdown rendering. |
+| `summarize/` | Prompt building, chunking, provider adapters, quote verification and Markdown rendering. `defaults.ts` holds each provider's default model (also published to the Console through `settings.json`); `readiness.ts` says whether summaries can run (model, credential source, problems), for `/status` and before `/scrib summarize`. |
 | `participants.ts` | Resolves a Discord user to a Foundry character (see §7). |
 | `db.ts` | `Store`: SQLite access with versioned migrations. |
 | `events.ts` | In-process `EventEmitter` bus. Its events are forwarded to Foundry over the WebSocket. |

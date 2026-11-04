@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import type { z } from "zod";
 import { withoutReserved } from "./api-options.js";
+import { API_DEFAULT_MODELS } from "./defaults.js";
 import { LLMError, type JsonRequest, type LLMProvider } from "./provider.js";
 
 export interface AnthropicOptions {
@@ -25,7 +26,7 @@ export class AnthropicProvider implements LLMProvider {
   private extra: Record<string, unknown>;
 
   constructor(opts: AnthropicOptions = {}) {
-    this.model = opts.model ?? "claude-opus-5-5";
+    this.model = opts.model ?? API_DEFAULT_MODELS.anthropic;
     // With no key set, the SDK falls back to other credential sources (e.g. `ant auth login`).
     this.client = new Anthropic({
       ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),

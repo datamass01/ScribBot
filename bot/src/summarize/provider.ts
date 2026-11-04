@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { config } from "../config.js";
+import { API_DEFAULT_MODELS } from "./defaults.js";
 
 export interface JsonRequest<S extends z.ZodType> {
   system: string;
@@ -42,7 +43,7 @@ export async function createProvider(): Promise<LLMProvider> {
         name: "xai",
         baseURL: config.llm.xaiBaseUrl || "https://api.x.ai/v1",
         apiKey: config.llm.xaiApiKey || "not-needed",
-        model: model ?? "grok-4",
+        model: model ?? API_DEFAULT_MODELS.xai,
         ...extra,
       });
     }

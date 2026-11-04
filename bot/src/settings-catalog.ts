@@ -1,3 +1,5 @@
+import { defaultModel } from "./summarize/defaults.js";
+
 /**
  * Every .env variable, described for the Console's Configuration tab (docs/console-design.md §4.4).
  * `npm run schemas` writes it to shared/schemas/settings.json, which the Console reads; it never
@@ -18,8 +20,8 @@ export interface Setting {
   default: string;
   /** Shown next to a blank field, e.g. "blank = claude-opus-5-5". */
   blankMeans?: string;
-  /** For an enum: its choices. `kind` sorts them under `kindPicker`. */
-  options?: { value: string; label: string; kind?: string }[];
+  /** For an enum: its choices. `kind` sorts them under `kindPicker`; `defaultModel` (LLM_PROVIDER) is what a blank LLM_MODEL means, null when it's required. */
+  options?: { value: string; label: string; kind?: string; defaultModel?: string | null }[];
   /**
    * A dropdown the Console shows before this enum, choosing which kind of option it lists (e.g. API
    * or CLI providers). It isn't a setting of its own: the kind follows from the value, so nothing
@@ -188,7 +190,7 @@ export const SETTINGS: Setting[] = [
       { value: "codex", label: "OpenAI Codex (ChatGPT sign-in)", kind: "cli" },
       { value: "antigravity", label: "Google Antigravity (Gemini, Google sign-in)", kind: "cli" },
       { value: "grok-cli", label: "xAI Grok CLI (Grok sign-in)", kind: "cli" },
-    ],
+    ].map((o) => ({ ...o, defaultModel: defaultModel(o.value) })),
     help: "Who writes the summaries. Only transcript text and campaign notes are sent." },
   { key: "LLM_MODEL", group: "Summaries", live: true, label: "Model", type: "string", default: "", readBy: ["bot", "console"],
     blankMeans: "the provider's default",

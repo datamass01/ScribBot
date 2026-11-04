@@ -47,7 +47,7 @@ describe("Azure OpenAI from the settings", () => {
   });
 
   it("reports the source, never the key", async () => {
-    const { llmConfigProblem } = await import("../src/api/status.js");
+    const { llmConfigProblem } = await import("../src/summarize/readiness.js");
     expect(await llmConfigProblem()).toBeNull();
   });
 });

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { CLI_DEFAULT_MODELS } from "./defaults.js";
 import { LLMError, type JsonRequest, type LLMProvider } from "./provider.js";
 
 /**
@@ -75,7 +76,7 @@ interface Adapter {
 const ADAPTERS: Record<CliAgentKind, Adapter> = {
   codex: {
     bin: "codex",
-    defaultModel: "codex default",
+    defaultModel: CLI_DEFAULT_MODELS.codex,
     invocation(req, { model, schemaFile, dir, text }) {
       const out = path.join(dir, "last-message.json");
       const args = ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never"];
@@ -96,7 +97,7 @@ const ADAPTERS: Record<CliAgentKind, Adapter> = {
   },
   "claude-code": {
     bin: "claude",
-    defaultModel: "Claude Code default",
+    defaultModel: CLI_DEFAULT_MODELS["claude-code"],
     failureOnStdout: '"type":"result"',
     invocation(req, { model, schemaJson, text }) {
       // Not --bare: that ignores the Claude sign-in and accepts only an API key.
@@ -128,7 +129,7 @@ const ADAPTERS: Record<CliAgentKind, Adapter> = {
   },
   "grok-cli": {
     bin: "grok",
-    defaultModel: "Grok CLI default",
+    defaultModel: CLI_DEFAULT_MODELS["grok-cli"],
     failureOnStdout: '"type":"error"',
     invocation(req, { model, schemaJson, dir, text }) {
       // The prompt goes in a file: grok's single-turn mode doesn't read stdin.
@@ -160,7 +161,7 @@ const ADAPTERS: Record<CliAgentKind, Adapter> = {
   antigravity: {
     failureOnStdout: '"event":"result"',
     bin: "agy",
-    defaultModel: "gemini-3.8-flash",
+    defaultModel: CLI_DEFAULT_MODELS.antigravity,
     invocation(req, { model, schemaFile, text }) {
       const m = model ?? "gemini-3.8-flash";
       const args = ["-p=", "--input-format", "stream-json", "--output-format", "stream-json"];

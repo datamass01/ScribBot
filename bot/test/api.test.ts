@@ -20,7 +20,7 @@ process.env.ANTHROPIC_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "scrib-
 describe("resolveAnthropicCredentials", () => {
   const none = async () => null;
   it("follows the SDK's order and never returns the secret", async () => {
-    const { resolveAnthropicCredentials: resolve } = await import("../src/api/status.js");
+    const { resolveAnthropicCredentials: resolve } = await import("../src/summarize/readiness.js");
     expect(await resolve({ apiKey: "sk-ant-x", authToken: "tok" }, none)).toEqual({ credentials: "api key", error: null });
     expect(await resolve({ authToken: "tok" }, none)).toEqual({ credentials: "auth token", error: null });
     expect(await resolve({}, async () => ({ authentication: { type: "user_oauth" } }))).toEqual({
@@ -30,7 +30,7 @@ describe("resolveAnthropicCredentials", () => {
     expect(await resolve({}, none)).toEqual({ credentials: null, error: null });
   });
   it("reports a broken profile as missing credentials with the reason", async () => {
-    const { resolveAnthropicCredentials: resolve } = await import("../src/api/status.js");
+    const { resolveAnthropicCredentials: resolve } = await import("../src/summarize/readiness.js");
     const broken = async () => {
       throw new Error('profile "work" not found');
     };
@@ -163,7 +163,7 @@ describe("Foundry API", () => {
   it("warns when automatic summaries use the Anthropic provider without credentials", async () => {
     const status = await (await fetch(`${base}/status`, { headers: auth })).json();
     expect(status.llm).toMatchObject({ provider: "anthropic", credentials: null, autoSummarize: true });
-    expect(status.warnings.some((w: string) => w.includes("No credentials configured for LLM provider 'anthropic'"))).toBe(true);
+    expect(status.warnings.some((w: string) => w.includes("no credentials for LLM provider 'anthropic'"))).toBe(true);
     expect(status.warnings.some((w: string) => w.includes("ant auth login"))).toBe(true);
   });
 

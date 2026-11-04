@@ -664,57 +664,68 @@
         {
           "value": "anthropic",
           "label": "Anthropic Claude",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": "claude-opus-5-5"
         },
         {
           "value": "xai",
           "label": "xAI Grok",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": "grok-4"
         },
         {
           "value": "openai-compatible",
           "label": "OpenAI-compatible (OpenAI, Mistral, DeepSeek, Groq, OpenRouter, Ollama, LM Studio…)",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": null
         },
         {
           "value": "gemini",
           "label": "Google Gemini API",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": "gemini-3.8-flash"
         },
         {
           "value": "vertex-ai",
           "label": "Google Vertex AI (Gemini on Google Cloud)",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": "gemini-3.8-flash"
         },
         {
           "value": "azure-openai",
           "label": "Azure OpenAI",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": null
         },
         {
           "value": "bedrock",
           "label": "Amazon Bedrock (Claude, Nova, Llama, Mistral… on AWS)",
-          "kind": "api"
+          "kind": "api",
+          "defaultModel": null
         },
         {
           "value": "claude-code",
           "label": "Claude Code (Claude sign-in)",
-          "kind": "cli"
+          "kind": "cli",
+          "defaultModel": "Claude Code default"
         },
         {
           "value": "codex",
           "label": "OpenAI Codex (ChatGPT sign-in)",
-          "kind": "cli"
+          "kind": "cli",
+          "defaultModel": "codex default"
         },
         {
           "value": "antigravity",
           "label": "Google Antigravity (Gemini, Google sign-in)",
-          "kind": "cli"
+          "kind": "cli",
+          "defaultModel": "gemini-3.8-flash"
         },
         {
           "value": "grok-cli",
           "label": "xAI Grok CLI (Grok sign-in)",
-          "kind": "cli"
+          "kind": "cli",
+          "defaultModel": "Grok CLI default"
         }
       ],
       "help": "Who writes the summaries. Only transcript text and campaign notes are sent."

@@ -8,9 +8,7 @@ import { resolveParticipant } from "../participants.js";
 import { readTimeline } from "../timeline.js";
 import { workerHealth } from "../worker-client.js";
 import { PipelineTracker } from "./pipeline.js";
-import { cliDefaultModel, isCliProvider, resolveCli } from "../summarize/cli-agent.js";
-import { authHeader, parseHeaders, parseRequestOptions } from "../summarize/api-options.js";
-import { GEMINI_DEFAULT_MODEL } from "../summarize/gemini.js";
+import { llmProblem, llmStatus } from "../summarize/readiness.js";
 import type { HeadlessStatus } from "../foundry/client.js";
 
 export interface DiscordStatus {
@@ -53,140 +51,6 @@ export interface FoundryActivity {
 const startedAt = new Date().toISOString();
 /** Rate and trend need samples across /status calls. */
 const pipelineTracker = new PipelineTracker();
-
-const DEFAULT_MODELS: Record<string, string | null> = {
-  anthropic: "claude-opus-5-5",
-  xai: "grok-4",
-  "openai-compatible": null,
-  gemini: GEMINI_DEFAULT_MODEL,
-  "vertex-ai": GEMINI_DEFAULT_MODEL,
-  "azure-openai": null,
-  bedrock: null,
-  codex: cliDefaultModel("codex"),
-  antigravity: cliDefaultModel("antigravity"),
-  "claude-code": cliDefaultModel("claude-code"),
-  "grok-cli": cliDefaultModel("grok-cli"),
-};
-
-type ProfileLoader = () => Promise<{ authentication?: { type?: string } } | null>;
-
-const loadAnthropicProfile: ProfileLoader = async () => {
-  const { loadConfig } = await import("@anthropic-ai/sdk/core/credentials");
-  return loadConfig();
-};
-
-/**
- * Mirrors the Anthropic SDK's fallback order when no key is passed explicitly:
- * ANTHROPIC_API_KEY, then ANTHROPIC_AUTH_TOKEN, then an `ant auth login` profile.
- * Returns a label for the credential source (never the secret), or null when the SDK would find nothing.
- */
-export async function resolveAnthropicCredentials(
-  env: { apiKey?: string; authToken?: string },
-  loadProfile: ProfileLoader = loadAnthropicProfile,
-): Promise<{ credentials: string | null; error: string | null }> {
-  if (env.apiKey) return { credentials: "api key", error: null };
-  if (env.authToken) return { credentials: "auth token", error: null };
-  try {
-    const profile = await loadProfile();
-    if (profile) return { credentials: `ant profile (${profile.authentication?.type ?? "unknown"})`, error: null };
-  } catch (err) {
-    // e.g. ANTHROPIC_PROFILE names a profile that doesn't exist.
-    return { credentials: null, error: err instanceof Error ? err.message : String(err) };
-  }
-  return { credentials: null, error: null };
-}
-
-async function llmStatus() {
-  const { provider, model } = config.llm;
-  let credentials: string | null;
-  let credentialsError: string | null = null;
-  // LLM_HEADERS may carry the credentials instead (a gateway's own auth header). Name only, never the value.
-  let headerAuth: string | null = null;
-  let optionsError: string | null = null;
-  if (!isCliProvider(provider)) {
-    try {
-      const h = authHeader(parseHeaders(config.llm.headers));
-      headerAuth = h ? `${h} header` : null;
-      parseRequestOptions(config.llm.requestOptions);
-    } catch (err) {
-      optionsError = err instanceof Error ? err.message : String(err);
-    }
-  }
-  if (provider === "anthropic") {
-    ({ credentials, error: credentialsError } = await resolveAnthropicCredentials({
-      apiKey: config.llm.anthropicApiKey,
-      authToken: process.env.ANTHROPIC_AUTH_TOKEN || undefined,
-    }));
-    if (!credentials && headerAuth) ({ credentials, error: credentialsError } = { credentials: headerAuth, error: null });
-  } else if (provider === "xai") {
-    credentials = config.llm.xaiApiKey ? "api key" : headerAuth;
-  } else if (provider === "gemini") {
-    credentials = config.llm.geminiApiKey ? "api key" : headerAuth;
-  } else if (provider === "vertex-ai") {
-    if (config.llm.googleCloudProject) {
-      credentials = config.llm.googleCredentials ? "service account file" : "application default credentials";
-      credentialsError = config.llm.googleCredentials && !fs.existsSync(config.llm.googleCredentials)
-        ? `GOOGLE_APPLICATION_CREDENTIALS: ${config.llm.googleCredentials} not found` : null;
-      if (credentialsError) credentials = null;
-    } else {
-      credentials = config.llm.geminiApiKey ? "api key (express mode)" : null;
-    }
-  } else if (provider === "azure-openai") {
-    credentials = !config.llm.azureEndpoint ? null : config.llm.azureApiKey ? "api key" : headerAuth;
-    if (!config.llm.azureEndpoint) credentialsError = "AZURE_OPENAI_ENDPOINT is not set";
-  } else if (provider === "bedrock") {
-    // The AWS chain (environment, profile, SSO, instance role) is only resolved on a real call.
-    credentials = config.llm.awsBedrockToken
-      ? "bedrock api key"
-      : `aws credential chain${config.llm.awsProfile ? ` (profile ${config.llm.awsProfile})` : ""}`;
-  } else if (isCliProvider(provider)) {
-    // The CLI's own sign-in (a ChatGPT or Google account); only its presence can be checked here.
-    // Same lookup as a summary run: found, and startable without a shell.
-    const cli = resolveCli(provider, config.llm.cliPath);
-    credentials = cli.launch ? `${provider} cli login` : null;
-    credentialsError = cli.error ?? null;
-  } else {
-    credentials = config.llm.openaiBaseUrl ? `base url ${config.llm.openaiBaseUrl}` : null;
-  }
-  return {
-    provider,
-    model: model ?? DEFAULT_MODELS[provider] ?? null,
-    credentials,
-    credentialsError,
-    optionsError,
-    chunkMinutes: config.llm.chunkMinutes,
-    autoSummarize: config.autoSummarize,
-  };
-}
-
-/**
- * Why a summary would fail right now, or null (02 S14). Checked before `/scrib summarize`
- * starts, and shown on /status whether or not AUTO_SUMMARIZE is on.
- */
-export async function llmConfigProblem(): Promise<string | null> {
-  const llm = await llmStatus();
-  if (!llm.model) return `Summaries will fail: LLM_MODEL is empty, and the ${llm.provider} provider needs one. Set it in .env.`;
-  if (llm.optionsError) return `Summaries will fail: ${llm.optionsError}.`;
-  if (!llm.credentials) {
-    const why = llm.credentialsError ? ` (${llm.credentialsError})` : "";
-    return `Summaries will fail: no credentials for LLM provider '${llm.provider}'${why}. ${CREDENTIAL_HINTS[llm.provider] ?? ""}`.trim();
-  }
-  return null;
-}
-
-const CREDENTIAL_HINTS: Record<string, string> = {
-  anthropic: "Set ANTHROPIC_API_KEY in .env, run `ant auth login`, or put an auth header in LLM_HEADERS.",
-  xai: "Set XAI_API_KEY in .env, or put an auth header in LLM_HEADERS.",
-  "openai-compatible": "Set OPENAI_BASE_URL in .env.",
-  gemini: "Set GEMINI_API_KEY in .env, or put an auth header in LLM_HEADERS.",
-  "vertex-ai": "Set GOOGLE_CLOUD_PROJECT (and run `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS), or GEMINI_API_KEY for express mode.",
-  "azure-openai": "Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env, or an Entra ID Authorization header in LLM_HEADERS.",
-  bedrock: "Set AWS_BEARER_TOKEN_BEDROCK or AWS_PROFILE, or sign in with the AWS CLI.",
-  codex: "Install the Codex CLI and run `codex login`, or set LLM_CLI_PATH.",
-  antigravity: "Install the Antigravity CLI (agy) and sign in, or set LLM_CLI_PATH.",
-  "claude-code": "Install Claude Code and sign in (run `claude` once), or set LLM_CLI_PATH.",
-  "grok-cli": "Install the Grok CLI and run `grok login`, or set LLM_CLI_PATH.",
-};
 
 async function workerStatus() {
   const t0 = Date.now();
@@ -307,16 +171,10 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
         : "Transcription worker is unreachable.",
     );
   }
-  // An empty model is always a mistake (02 S14). Missing credentials only matter once summaries are
-  // wanted automatically; /scrib summarize checks them itself before starting.
-  if (!llm.model) {
-    warnings.push(`Summaries will fail: LLM_MODEL is empty, and the ${llm.provider} provider needs one. Set it in .env.`);
-  } else if (llm.autoSummarize && !llm.credentials) {
-    const why = llm.credentialsError ? ` (${llm.credentialsError})` : "";
-    warnings.push(
-      `No credentials configured for LLM provider '${llm.provider}'${why}. ${CREDENTIAL_HINTS[llm.provider] ?? ""} Summaries will fail until this is fixed.`.trim(),
-    );
-  }
+  // An empty model is always a mistake (02 S14). Anything else (credentials, LLM_HEADERS) only matters
+  // once summaries are wanted automatically; /scrib summarize checks it itself before starting.
+  const llmIssue = llmProblem(llm);
+  if (llmIssue && (!llm.model || llm.autoSummarize)) warnings.push(llmIssue);
   if (recordings.length && foundry.sockets === 0) {
     warnings.push("Recording, but no Foundry module is connected. The chat and combat log won't be captured.");
   }

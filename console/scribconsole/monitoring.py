@@ -22,23 +22,16 @@ import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .settings import load_catalog
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODELS = {
-    "anthropic": "claude-opus-5-5",
-    "xai": "grok-4",
-    "gemini": "gemini-3.8-flash",
-    "vertex-ai": "gemini-3.8-flash",
-    "codex": "codex default",
-    "antigravity": "gemini-3.8-flash",
-    "claude-code": "Claude Code default",
-    "grok-cli": "Grok CLI default",
-}
 CLI_COMMANDS = {"codex": "codex", "antigravity": "agy", "claude-code": "claude", "grok-cli": "grok"}  # same as bot/src/summarize/cli-agent.ts
 REQUEST_TIMEOUT_S = 3
 SESSION_LIMIT = 20  # same as the bot's /status
@@ -67,6 +60,18 @@ STOCK_HALLUCINATIONS = {
     "thank you", "thank you for watching", "thanks for watching", "the end", "you",
     "please subscribe", "subtitles by the amara.org community", "bye",
 }
+
+
+@lru_cache(maxsize=1)
+def _default_models() -> dict[str, str | None]:
+    llm = next(s for s in load_catalog()["settings"] if s["key"] == "LLM_PROVIDER")
+    return {o["value"]: o.get("defaultModel") for o in llm["options"]}
+
+
+def default_model(provider: str) -> str | None:
+    """What a blank LLM_MODEL means for `provider` (None: it needs one). Read from the bot's settings
+    catalog, which takes it from bot/src/summarize/defaults.ts, so the two can't disagree."""
+    return _default_models().get(provider)
 
 
 def log(msg: str) -> None:
@@ -167,7 +172,7 @@ class Config:
             worker_url=get("WORKER_URL", "http://127.0.0.1:7421").rstrip("/"),
             data_dir=data_dir,
             llm_provider=provider,
-            llm_model=get("LLM_MODEL") or DEFAULT_MODELS.get(provider),
+            llm_model=get("LLM_MODEL") or default_model(provider),
             llm_credentials=creds,
             chunk_minutes=_number(get("SUMMARY_CHUNK_MINUTES"), 25),
             auto_summarize=_bool(env.get("AUTO_SUMMARIZE"), False),
