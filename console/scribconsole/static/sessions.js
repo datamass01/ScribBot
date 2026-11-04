@@ -43,7 +43,7 @@ export function show(el, s) {
         <div id="s-banner"></div>
         <div class="table-wrap"><table>
           <thead><tr><th>#</th><th>Started</th><th>Title</th><th class="hide-narrow">Length</th><th>Status</th>
-            <th class="hide-narrow" title="Transcript · Chat log · Summary · Story">Files</th><th class="hide-narrow">Foundry</th><th></th></tr></thead>
+            <th class="hide-narrow" title="Transcript · Chat log · Summary">Files</th><th class="hide-narrow">Foundry</th><th></th></tr></thead>
           <tbody id="s-rows"><tr><td colspan="8" class="muted">Loading…</td></tr></tbody>
         </table></div>
       </section>
@@ -94,14 +94,6 @@ async function refresh() {
 }
 
 // ---------- what each session can do, and why not
-const llmProblem = () => {
-  const l = status?.llm;
-  if (!l || status?.monitor?.bot !== "online") return null;
-  if (l.credentialsError) return l.credentialsError;
-  if (!l.credentials) return "No LLM credentials (Configuration → Summaries).";
-  if (!l.model) return "No LLM model set (Configuration → Summaries).";
-  return null;
-};
 
 function actionsFor(s) {
   const off = readOnly ? "Start the bot to change sessions." : null;
@@ -118,20 +110,15 @@ function actionsFor(s) {
       why: off || busy || merged },
     { act: "retranscribe", label: "Re-transcribe", hint: "Redo speech-to-text from the audio.",
       why: off || busy || merged || (s.audioPurged ? "The audio was deleted after transcription." : null) },
-    { act: "summarize", label: "Summarize", hint: "Send the transcript to the LLM and write the summary.",
-      why: off || busy || merged || (!s.hasTranscript ? "No transcript yet." : llmProblem()) },
-    { act: "review-summary", label: needsReview(s, "summary") ? "Review summary for Foundry…" : "Review and edit summary…",
-      hint: "See it as Foundry will, correct it or ask the LLM to, then approve it.",
-      why: off || merged || (!s.hasSummary ? "No summary yet." : null) },
-    { act: "post-summary", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
-      why: off || merged || (!s.hasSummary ? "No summary yet." : needsReview(s, "summary") ? "Review and approve it first." : null) },
-    { act: "review-story", label: needsReview(s, "story") ? "Review story for Foundry…" : "Review and edit story…",
-      hint: "See the story write-up as Foundry will, correct it, then approve it.",
-      why: off || merged || (!s.hasStory ? "No story write-up yet." : null) },
-    { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
-      why: off || merged || (!s.hasStory ? "No story write-up yet." : needsReview(s, "story") ? "Review and approve it first." : null) },
-    { act: "discord", label: "Post to Discord…", hint: "Post the summary, story or transcript in a text channel. Nothing is posted to Discord otherwise.",
-      why: off || merged || (!s.hasSummary && !s.hasStory && !s.hasTranscript ? "Nothing to post yet." : null) },
+    // The summary shown here is the summarize-session skill's write-up (the story files on disk);
+    // the bot's older structured summary isn't offered here.
+    { act: "review-story", label: needsReview(s, "story") ? "Review summary for Foundry…" : "Review and edit summary…",
+      hint: "See the summary as Foundry will, correct it, then approve it.",
+      why: off || merged || (!s.hasStory ? "No summary yet." : null) },
+    { act: "post-story", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
+      why: off || merged || (!s.hasStory ? "No summary yet." : needsReview(s, "story") ? "Review and approve it first." : null) },
+    { act: "discord", label: "Post to Discord…", hint: "Post the summary or transcript in a text channel. Nothing is posted to Discord otherwise.",
+      why: off || merged || (!s.hasStory && !s.hasTranscript ? "Nothing to post yet." : null) },
     { act: "merge", label: "Merge into an earlier session…", hint: "For a game split in two by a restart.", why: off || busy || merged },
     ...(campaigns.length > 1 ? [{ act: "move-campaign", label: "Move to another campaign…", hint: "Renumbers it there; its folder moves with it.",
       why: off || busy || merged || (s.legacyLayout ? "Update the folder layout first." : null) }] : []),
@@ -140,11 +127,11 @@ function actionsFor(s) {
   ];
 }
 
-/** Review is on and this summary or story hasn't been approved as it is now. */
+/** Review is on and this summary hasn't been approved as it is now. */
 const needsReview = (s, kind) => Boolean(s.reviewRequired && s[`${kind}Review`] && s[`${kind}Review`].state !== "approved");
 
 /**
- * Where a session's summary or story stands in Foundry: confirmed by the bridge client (module
+ * Where a session's summary stands in Foundry: confirmed by the bridge client (module
  * 0.7.0+) since it was last sent, sent but not confirmed yet, or never sent.
  */
 const WAITING = "Foundry hasn't confirmed it yet: no bridge client or GM online, “Import summaries automatically” off, " +
@@ -153,11 +140,11 @@ function journal(s, kind) {
   const sent = s[`${kind}SentAt`], at = s[`${kind}JournalAt`], name = s[`${kind}JournalName`];
   if (needsReview(s, kind)) {
     const changed = s[`${kind}Review`].state === "changed";
-    return { state: "warn", short: `${kind}: review`, long: changed ? "changed since it was approved; approve it again" : "waiting for review",
+    return { state: "warn", short: "summary: review", long: changed ? "changed since it was approved; approve it again" : "waiting for review",
       title: `Foundry gets it once it's approved: open Review in the session's menu.${changed ? " It changed after it was approved." : ""}` };
   }
-  if (at && (!sent || at >= sent)) return { state: "ok", short: `${kind} ✓`, long: `in Foundry as “${name}” (${when(at)})`, title: `In Foundry as “${name}”, confirmed ${when(at)}` };
-  if (sent) return { state: "warn", short: `${kind} sent`, long: `sent ${when(sent)}, not confirmed yet`, title: `Sent ${when(sent)}. ${WAITING}` };
+  if (at && (!sent || at >= sent)) return { state: "ok", short: "summary ✓", long: `in Foundry as “${name}” (${when(at)})`, title: `In Foundry as “${name}”, confirmed ${when(at)}` };
+  if (sent) return { state: "warn", short: "summary sent", long: `sent ${when(sent)}, not confirmed yet`, title: `Sent ${when(sent)}. ${WAITING}` };
   return null;
 }
 
@@ -168,8 +155,7 @@ function primaryFor(s) {
   if (s.processing) return "";
   if (s.status === "failed" && s.mergedInto == null) return `<button data-act="process" data-id="${esc(s.id)}">Resume</button>`;
   if (s.mergedInto == null) {
-    const kind = needsReview(s, "summary") ? "summary" : needsReview(s, "story") ? "story" : null;
-    if (kind) return `<button class="primary" data-act="review-${kind}" data-id="${esc(s.id)}" title="See the ${kind} as Foundry will, correct it, and approve it">Review</button>`;
+    if (needsReview(s, "story")) return `<button class="primary" data-act="review-story" data-id="${esc(s.id)}" title="See the summary as Foundry will, correct it, and approve it">Review</button>`;
   }
   return "";
 }
@@ -178,7 +164,7 @@ function primaryFor(s) {
 function visible() {
   return list.filter((s) => {
     if (campaignFilter !== "all" && String(s.campaignId) !== campaignFilter) return false;
-    if (filter === "attention" && !(s.mergedInto == null && (s.status === "failed" || needsReview(s, "summary") || needsReview(s, "story")))) return false;
+    if (filter === "attention" && !(s.mergedInto == null && (s.status === "failed" || needsReview(s, "story")))) return false;
     if (!search) return true;
     return String(s.number) === search.replace(/^#/, "") || (s.title || "").toLowerCase().includes(search) || s.id.includes(search);
   });
@@ -210,7 +196,7 @@ function render() {
       : pill(STATUS_CLASS[s.status] ?? "info", s.status, s.error || "");
     const bar = s.progress != null ? `<div class="bar" title="${Math.round(s.progress * 100)}%"><i style="width:${s.progress * 100}%"></i></div>` : "";
     const f = (ok, letter, title) => `<span class="${ok ? "y" : "n"}" title="${title}${ok ? "" : " (missing)"}">${letter}</span>`;
-    const sent = ["summary", "story"].map((k) => journal(s, k)).filter(Boolean)
+    const sent = [journal(s, "story")].filter(Boolean)
       .map((j) => `<span class="${j.state}-text" title="${esc(j.title)}">${esc(j.short)}</span>`).join(" · ");
     const err = s.status === "failed" && s.error && s.mergedInto == null ? `<div class="error-text">${esc(s.error)}</div>` : "";
     return `<tr class="clickable ${selected === s.id ? "selected" : ""}" data-row="${esc(s.id)}">
@@ -218,7 +204,7 @@ function render() {
       <td>${s.title ? esc(s.title) : `<span class="muted">–</span>`}${s.recordings > 1 ? ` <span class="pill info" title="A game recorded in parts, merged into one">${s.recordings} recordings</span>` : ""}
         ${campaigns.length > 1 && campaignFilter === "all" && s.campaign ? `<div class="muted small">${esc(s.campaign)}</div>` : ""}${err}</td>
       <td class="hide-narrow">${length}</td><td>${stat}${bar}</td>
-      <td class="files hide-narrow">${f(s.hasTranscript, "T", "Transcript")}${f(s.hasChatlog, "C", "Chat log")}${f(s.hasSummary, "S", "Summary")}${f(s.hasStory, "St", "Story")}</td>
+      <td class="files hide-narrow">${f(s.hasTranscript, "T", "Transcript")}${f(s.hasChatlog, "C", "Chat log")}${f(s.hasStory, "S", "Story")}</td>
       <td class="hide-narrow small muted">${sent || "–"}</td>
       <td class="actions-cell">${primaryFor(s)} <button data-act="menu" data-id="${esc(s.id)}" aria-label="More actions for session ${s.number}">⋯</button></td></tr>`;
   }).join("");
@@ -268,11 +254,8 @@ async function onClick(e) {
     case "stop": return s && stop(s);
     case "process": return s && run(s, "process", {}, `Processing session ${s.number}…`);
     case "retranscribe": return s && retranscribe(s);
-    case "summarize": return s && run(s, "summarize", {}, `Summarizing session ${s.number}…`);
-    case "review-summary": return s && review(s, "summary");
     case "review-story": return s && review(s, "story");
     case "discord": return s && postToDiscord(s);
-    case "post-summary": return s && post(s, "summary");
     case "post-story": return s && post(s, "story");
     case "merge": return s && merge(s);
     case "trash": return s && trash(s);
@@ -349,8 +332,7 @@ async function postToDiscord(s, preselect) {
   if (!guild) return toast("The bot isn't in this session's Discord server (or isn't logged in).", "err");
   if (!guild.text.length) return toast("The bot can't post in any text channel of that server.", "err");
   const kinds = [
-    ["summary", "Summary", s.hasSummary, "the recap, top quotes and open threads, with the full summary attached as Markdown"],
-    ["story", "Story write-up", s.hasStory, "attached as Markdown"],
+    ["story", "Summary", s.hasStory, "attached as Markdown"],
     ["transcript", "Transcript", s.hasTranscript, "the whole session, attached as Markdown"],
   ].filter(([, , ok]) => ok);
   const pick = preselect && kinds.some(([k]) => k === preselect) ? preselect : kinds[0][0];
@@ -409,9 +391,8 @@ async function trash(s) {
   const settings = await trashSettings();
   let hidden = false;
   if (settings.confirm) {
-    const inFoundry = ["summary", "story"].filter((k) => s[`${k}SentAt`] || s[`${k}JournalAt`]);
-    const sent = inFoundry.length
-      ? `<p class="notice warn">Its ${inFoundry.join(" and ")} went to Foundry; ${inFoundry.length > 1 ? "those journal entries stay" : "that journal entry stays"} there.</p>` : "";
+    const sent = s.storySentAt || s.storyJournalAt
+      ? `<p class="notice warn">Its summary went to Foundry; that journal entry stays there.</p>` : "";
     const r = await openDialog(`<form><h3>Move session ${s.number} to the trash</h3>
       <p>Session ${s.number} will be kept in the trash <b>${esc(keptFor(settings.days))}</b>.
         Until then you can restore it from the Trash filter.</p>${sent}
@@ -519,7 +500,9 @@ function renderDetail() {
   const files = s.files
     ? (s.files.length ? `<table><tbody>${s.files.map((f) => `<tr><td><code>${esc(f.name)}</code></td><td style="text-align:right">${bytes(f.bytes)}</td></tr>`).join("")}</tbody></table>` : `<span class="muted">No files.</span>`)
     : `<span class="muted">${esc(s.offlineError || "")}</span>`;
-  const previews = (s.previews || []).map((n) => `<button data-act="preview" data-id="${esc(s.id)}" data-name="${esc(n)}">${esc(n)}</button>`).join(" ");
+  const PREVIEW_LABEL = { "transcript.md": "Transcript", "story.md": "Summary" }; // the bot's old summary.md isn't offered
+  const previews = (s.previews || []).filter((n) => PREVIEW_LABEL[n]).map((n) =>
+    `<button data-act="preview" data-id="${esc(s.id)}" data-name="${esc(n)}">${PREVIEW_LABEL[n]}</button>`).join(" ");
   const actions = actionsFor(s).filter((a) => a.act !== "open").map((a) =>
     `<button data-act="${a.act}" data-id="${esc(s.id)}" ${a.why ? "disabled" : ""} class="${a.danger ? "danger" : ""}" title="${esc(a.why || a.hint || "")}">${esc(a.label)}</button>`).join(" ");
   el.innerHTML = `
@@ -542,10 +525,8 @@ function renderDetail() {
           ["Status", esc(s.status)],
           ["Clips", s.clips ?? "–"],
           ["Audio", s.audioPurged ? "deleted" : "kept"],
-          ...["summary", "story"].map((k) => {
-            const j = journal(s, k);
-            return [`${k === "summary" ? "Summary" : "Story"} in Foundry`, j ? `<span class="${j.state}-text" title="${esc(j.title)}">${esc(j.long)}</span>` : "not sent"];
-          }),
+          ...[journal(s, "story")].map((j) =>
+            ["Summary in Foundry", j ? `<span class="${j.state}-text" title="${esc(j.title)}">${esc(j.long)}</span>` : "not sent"]),
           ["Folder", s.folder ? `<code>${esc(s.folder)}</code>` : "–"],
         ].map(([k, v]) => `<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--border);padding:4px 0"><span class="muted">${k}</span><span>${v}</span></div>`).join("")}</div>
       </div>
@@ -569,7 +550,7 @@ async function saveLabels(s) {
 async function preview(s, name) {
   try {
     const r = await api("GET", `/api/admin/sessions/${encodeURIComponent(s.id)}/preview/${encodeURIComponent(name)}`);
-    showText(`Session ${s.number}: ${name}`, r.text, r.truncated ? "Only the first 512 KB is shown." : "");
+    showText(`Session ${s.number}: ${name === "story.md" ? "summary" : name.replace(/\.md$/, "")}`, r.text, r.truncated ? "Only the first 512 KB is shown." : "");
   } catch (err) {
     toast(err.message, "err");
   }
@@ -624,7 +605,7 @@ async function migrateLayout() {
     <p>Each session's folder is <code>data\\campaigns\\&lt;world&gt;\\sessions\\&lt;session id&gt;\\</code>: in its campaign (named after
       the Foundry world) and named after its first recording's id, so renumbering never moves it. Sessions still in
       <code>data\\sessions\\&lt;id&gt;</code> move there; folders still named by number (<code>sessions\\012</code>) are renamed.
-      Summaries, transcripts and stories sit in that folder; each Discord recording goes in its <code>recordings\\</code> sub-folder,
+      Summaries and transcripts sit in that folder; each Discord recording goes in its <code>recordings\\</code> sub-folder,
       and merged recordings move in with the game they continue. Numbers, ids, Foundry journals and Discord stay as they are.</p>
     <p class="notice ok small" style="margin:0">${plan.backupBytes
       ? `Everything is copied to <code>${esc(plan.backupDir)}</code> first (about ${mb} MB).`

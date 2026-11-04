@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { config } from "../config.js";
 import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName, type SessionRow, type Store } from "../db.js";
 import { sessionPaths } from "../paths.js";
+import { findStoryFile } from "../story.js";
 import { isProcessing, processingProgress } from "../pipeline.js";
 import { mergedInto } from "../merge.js";
 import { resolveParticipant } from "../participants.js";
@@ -103,6 +104,7 @@ function sessionStatus(s: SessionRow, live: RecordingStatus | undefined) {
     hasTranscript: fs.existsSync(paths.transcriptJson),
     hasChatlog: fs.existsSync(paths.chatlog),
     hasSummary: fs.existsSync(paths.summary),
+    hasStory: findStoryFile(s.id) !== null,
   };
 }
 

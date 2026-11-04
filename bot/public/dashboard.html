@@ -417,7 +417,7 @@
         <td>${pill(STATUS_CLASS[x.status] ?? "info", x.status)}${bar}</td>
         <td>${x.clips ?? "–"}</td>
         <td>${x.speakers ?? "–"}</td>
-        <td class="files">${f(x.hasTranscript, "T", "Transcript")}${f(x.hasChatlog, "C", "Chat log")}${f(x.hasSummary, "S", "Summary")}</td>
+        <td class="files">${f(x.hasTranscript, "T", "Transcript")}${f(x.hasChatlog, "C", "Chat log")}${f(x.hasStory, "S", "Summary")}</td>
         <td>${notes}</td>
       </tr>`;
     }).join("");

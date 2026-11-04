@@ -1,5 +1,7 @@
-// Review before Foundry: a session's summary or story as Foundry's journal will show it, built with
-// the Foundry module's own journal.js, beside an editor. Corrections are saved to the bot; the LLM
+// Review before Foundry: a session's summary as Foundry's journal will show it, built with
+// the Foundry module's own journal.js, beside an editor. The summary shown is the
+// summarize-session skill's write-up (the bot calls it the story); the bot's older structured
+// summary isn't offered, though its editor below is kept for now. Corrections are saved to the bot; the LLM
 // can be asked to revise the summary with feedback; approving sends it to Foundry. Everything goes
 // through the bot's /admin review routes (bot/src/api/admin.ts), which check what was approved.
 import { buildJournalPages, buildStoryPages } from "/static/foundry/journal.js";
@@ -96,7 +98,7 @@ async function load({ keepDraft = false } = {}) {
   }
   if (state !== s) return;
   s.data = data;
-  if (!data[s.kind]) s.kind = data.summary ? "summary" : "story";
+  s.kind = "story";
   if (!keepDraft || !s.dirty) {
     s.draft = s.kind === "summary" ? clone(data.summary?.file.summary ?? null) : data.story?.file.markdown ?? "";
     s.dirty = false;
@@ -113,8 +115,7 @@ function render() {
   const d = s.data;
   const item = d[s.kind];
   const number = d.session.number;
-  const tabs = ["summary", "story"].filter((k) => d[k]).map((k) =>
-    `<button data-r="kind" data-kind="${k}" aria-pressed="${k === s.kind}">${k === "summary" ? "Summary" : "Story"} ${stateBadge(d[k])}</button>`).join("");
+  const tabs = d.story ? `<button data-r="kind" data-kind="story" aria-pressed="true">Summary ${stateBadge(d.story)}</button>` : "";
   s.el.innerHTML = `
     <div class="card-head">
       <button data-r="close" aria-label="Back to sessions">← Sessions</button>
@@ -153,10 +154,10 @@ function banner(d, item) {
   const out = [];
   if (d.busy) out.push(`<div class="notice info">The LLM is revising this summary. This page reloads it when it's done.</div>`);
   else if (d.session.error && /^Revising/.test(d.session.error)) out.push(`<div class="notice err">${esc(d.session.error)}</div>`);
-  if (!d.required) out.push(`<div class="notice">Review isn't required (<code>REVIEW_BEFORE_FOUNDRY=false</code>): ${what === "summary" ? "new summaries go to Foundry as soon as they're written" : "stories go to Foundry when someone posts them"}. You can still edit here and post.</div>`);
+  if (!d.required) out.push(`<div class="notice">Review isn't required (<code>REVIEW_BEFORE_FOUNDRY=false</code>): summaries go to Foundry when someone posts them. You can still edit here and post.</div>`);
   else if (item.approved) out.push(`<div class="notice ok">Approved ${esc(when(item.approvedAt))}. Foundry may import this version.</div>`);
   else if (item.changedSinceApproval) out.push(`<div class="notice warn">Changed since it was approved: Foundry won't get it until it's approved again.</div>`);
-  else out.push(`<div class="notice warn">Waiting for review: Foundry won't get this ${what} until it's approved.</div>`);
+  else out.push(`<div class="notice warn">Waiting for review: Foundry won't get this summary until it's approved.</div>`);
   if (what === "story" && item.file.problem) out.push(`<div class="notice err">${esc(item.file.problem)}</div>`);
   return out.join("");
 }
@@ -208,7 +209,7 @@ function quoteTag(q) {
 }
 
 function storyEditor() {
-  return `<p class="muted small" style="margin-top:0">The story write-up (<code>story/summary.story.md</code>) from the summarize-session skill. Each <code>## </code> heading becomes a journal page.</p>
+  return `<p class="muted small" style="margin-top:0">The summary (<code>story/summary.story.md</code>) written with the summarize-session skill. Each <code>## </code> heading becomes a journal page.</p>
     <textarea class="story-md" data-path="markdown" data-type="story" spellcheck="true">${esc(state.draft)}</textarea>`;
 }
 
@@ -245,7 +246,7 @@ function previewPages() {
     };
   }
   const story = d.story.file;
-  const title = s.draft.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? "Session story";
+  const title = s.draft.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? "Session summary";
   const assets = [...s.draft.matchAll(/!\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?\s*\)/g)].map((m) => m[1]);
   return {
     name: title,
