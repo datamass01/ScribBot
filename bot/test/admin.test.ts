@@ -291,7 +291,7 @@ describe("Console admin API", () => {
     expect(created.body.campaign).toMatchObject({ name: "Curse of Strahd", folder: "curse-of-strahd", worldId: null });
 
     const patch = await call("PATCH", `/admin/campaigns/${id}`, {
-      worldId: "strahd", foundryUrl: "https://foundry.example.com/", foundryUser: "Scribe", foundryPassword: "hunter2",
+      worldId: "strahd", foundryUrl: "https://foundry.example.com/game", foundryUser: "Scribe", foundryPassword: "hunter2",
     });
     expect(patch.status).toBe(200);
     expect((await call("PATCH", `/admin/campaigns/${id}`, { foundryUrl: "ftp://nope" })).status).toBe(400);

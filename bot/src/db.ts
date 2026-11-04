@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
+import { foundryBaseUrl } from "./foundry/url.js";
 import { setSessionLookup } from "./paths.js";
 
 export type SessionStatus =
@@ -389,7 +390,7 @@ export class Store {
       }
       const text = (v: string | null | undefined) => (v === undefined ? undefined : v?.trim() || null);
       const columns: [string, string | null | undefined][] = [
-        ["foundry_url", text(patch.foundryUrl)?.replace(/\/+$/, "") ?? text(patch.foundryUrl)],
+        ["foundry_url", patch.foundryUrl === undefined ? undefined : text(patch.foundryUrl) ? foundryBaseUrl(patch.foundryUrl!) : null],
         ["foundry_user", text(patch.foundryUser)],
         // A password is kept exactly as typed; "" or null clears it.
         ["foundry_password", patch.foundryPassword === undefined ? undefined : patch.foundryPassword || null],

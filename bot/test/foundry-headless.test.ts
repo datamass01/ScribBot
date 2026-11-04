@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type FoundryPage, HeadlessFoundry, type ImportResult, JoinError, joinAnnouncement, leaveAnnouncement } from "../src/foundry/client.js";
 import { announceHtml, classifyLanding, desktopUserAgent, pickUser } from "../src/foundry/playwright.js";
+import { foundryBaseUrl } from "../src/foundry/url.js";
 
 /** A fake browser session: records calls, and can be "kicked" like Foundry closing the page. */
 function fakeLauncher(opts: { fail?: JoinError[]; importResult?: ImportResult } = {}) {
@@ -256,6 +257,15 @@ describe("headless join helpers", () => {
     expect(classifyLanding("http://localhost:30000/setup")).toBe("setup");
     expect(classifyLanding("http://localhost:30000/auth")).toBe("setup");
     expect(classifyLanding("not a url")).toBe("other");
+  });
+
+  it("reduces a pasted Foundry address to its base", () => {
+    expect(foundryBaseUrl("https://foundry-erat.example.com/game")).toBe("https://foundry-erat.example.com");
+    expect(foundryBaseUrl(" http://localhost:30000/join?x=1#y ")).toBe("http://localhost:30000");
+    expect(foundryBaseUrl("http://localhost:30000/")).toBe("http://localhost:30000");
+    expect(foundryBaseUrl("http://host/foundry/game/")).toBe("http://host/foundry"); // routePrefix kept
+    expect(foundryBaseUrl("http://host/foundry")).toBe("http://host/foundry");
+    expect(foundryBaseUrl("http://host/gamers")).toBe("http://host/gamers");
   });
 
   it("picks the user by name and explains a missing or busy one", () => {

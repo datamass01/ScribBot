@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { UNASSIGNED_FOLDER, campaignName, type Store } from "../db.js";
 import { HeadlessFoundry, type FoundryTarget } from "./client.js";
 import { playwrightLauncher } from "./playwright.js";
+import { foundryBaseUrl } from "./url.js";
 
 /**
  * Where ScribBot joins Foundry: the Foundry server set for the campaign being played (the Campaign
@@ -14,8 +15,9 @@ export function foundryTarget(store: Store): FoundryTarget {
   const f = config.foundry;
   const c = store.defaultCampaign({ create: false });
   const own = c && c.folder !== UNASSIGNED_FOLDER ? c : null;
+  const url = own ? own.foundry_url : f.url;
   return {
-    url: own ? own.foundry_url : f.url,
+    url: url ? foundryBaseUrl(url) : url,
     user: own?.foundry_user || f.user,
     password: own?.foundry_password || f.password,
     campaignId: own?.id ?? null,
