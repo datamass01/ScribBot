@@ -3,7 +3,7 @@
 
 Reads only what the app already wrote (transcript.json or transcript.partial.jsonl,
 timeline.json, chatlog.json, summary.json, campaign/*.md, data/scribbot.db) and
-writes everything into <out>/ (default: the game's folder, data/campaigns/<world>/sessions/<NNN>/story/,
+writes everything into <out>/ (default: the game's folder, data/campaigns/<world>/sessions/<session id>/story/,
 or data/sessions/<first-id>/story/ for sessions not moved to the campaign layout yet):
 
   pack.md         the whole session: participants, campaign notes, Foundry facts,
@@ -51,7 +51,7 @@ import layout  # noqa: E402  (section order, limits and the story template, shar
 # ---------------------------------------------------------------- where sessions are
 
 # A session row is one Discord recording. Since the campaign layout (docs/design.md 6.1) its
-# folder is data/campaigns/<world>/sessions/<NNN>/recordings/<id>/ (sessions.dir), and a game is
+# folder is data/campaigns/<world>/sessions/<session id>/recordings/<id>/ (sessions.dir), and a game is
 # its recordings: the session itself and any merged into it. Older rows have no dir and live in
 # the flat data/sessions/<id>/, which is both the recording and the game.
 _DIRS: dict[str, str | None] = {}

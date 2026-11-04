@@ -22,14 +22,17 @@ import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .settings import load_catalog
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "xai": "grok-4"}
+CLI_COMMANDS = {"codex": "codex", "antigravity": "agy", "claude-code": "claude", "grok-cli": "grok"}  # same as bot/src/summarize/cli-agent.ts
 REQUEST_TIMEOUT_S = 3
 SESSION_LIMIT = 20  # same as the bot's /status
 LOW_DISK_BYTES = 1024**3
@@ -57,6 +60,18 @@ STOCK_HALLUCINATIONS = {
     "thank you", "thank you for watching", "thanks for watching", "the end", "you",
     "please subscribe", "subtitles by the amara.org community", "bye",
 }
+
+
+@lru_cache(maxsize=1)
+def _default_models() -> dict[str, str | None]:
+    llm = next(s for s in load_catalog()["settings"] if s["key"] == "LLM_PROVIDER")
+    return {o["value"]: o.get("defaultModel") for o in llm["options"]}
+
+
+def default_model(provider: str) -> str | None:
+    """What a blank LLM_MODEL means for `provider` (None: it needs one). Read from the bot's settings
+    catalog, which takes it from bot/src/summarize/defaults.ts, so the two can't disagree."""
+    return _default_models().get(provider)
 
 
 def log(msg: str) -> None:
@@ -137,6 +152,17 @@ class Config:
             creds = "api key" if get("ANTHROPIC_API_KEY") else "auth token" if get("ANTHROPIC_AUTH_TOKEN") else None
         elif provider == "xai":
             creds = "api key" if get("XAI_API_KEY") else None
+        elif provider == "gemini":
+            creds = "api key" if get("GEMINI_API_KEY") else None
+        elif provider == "vertex-ai":
+            creds = "google cloud project" if get("GOOGLE_CLOUD_PROJECT") else "api key" if get("GEMINI_API_KEY") else None
+        elif provider == "azure-openai":
+            creds = "api key" if get("AZURE_OPENAI_ENDPOINT") and get("AZURE_OPENAI_API_KEY") else None
+        elif provider == "bedrock":
+            creds = "bedrock api key" if get("AWS_BEARER_TOKEN_BEDROCK") else "aws credential chain"
+        elif provider in CLI_COMMANDS:
+            # The CLI's own sign-in; only that it can be found is checked here, like the bot's /status.
+            creds = f"{provider} cli login" if shutil.which(get("LLM_CLI_PATH") or CLI_COMMANDS[provider]) else None
         else:
             creds = "api key" if get("OPENAI_API_KEY") else ("none needed" if get("OPENAI_BASE_URL") else None)
         data_dir = _resolve(get("DATA_DIR", "./data"))
@@ -146,7 +172,7 @@ class Config:
             worker_url=get("WORKER_URL", "http://127.0.0.1:7421").rstrip("/"),
             data_dir=data_dir,
             llm_provider=provider,
-            llm_model=get("LLM_MODEL") or DEFAULT_MODELS.get(provider),
+            llm_model=get("LLM_MODEL") or default_model(provider),
             llm_credentials=creds,
             chunk_minutes=_number(get("SUMMARY_CHUNK_MINUTES"), 25),
             auto_summarize=_bool(env.get("AUTO_SUMMARIZE"), False),
@@ -505,6 +531,11 @@ class Monitor:
             pass  # sessions end at a transcript; a missing LLM setup isn't a problem
         elif not cfg.llm_credentials and cfg.llm_provider == "anthropic":
             warnings.append("No ANTHROPIC_API_KEY in .env. That's fine if you used `ant auth login`; the bot checks that when it runs.")
+        elif not cfg.llm_credentials and cfg.llm_provider in CLI_COMMANDS:
+            warnings.append(
+                f"The {CLI_COMMANDS[cfg.llm_provider]} command for LLM provider '{cfg.llm_provider}' wasn't found. "
+                "Install it and sign in, or set LLM_CLI_PATH."
+            )
         elif not cfg.llm_credentials:
             warnings.append(f"No credentials in .env for LLM provider '{cfg.llm_provider}'.")
         failed = [s for s in sessions if s["status"] == "failed"]
@@ -852,8 +883,8 @@ class Monitor:
                     f"(e.g. names from the hotword list instead of speech). See docs/assessment/01-performance-and-cpu-offload.md (R1).")
 
         llm = status.get("llm") or {}
-        if llm.get("provider") == "openai-compatible" and not llm.get("model"):
-            add("llm-model", "warn", "Summaries will fail: LLM_PROVIDER is openai-compatible but LLM_MODEL is empty in .env.")
+        if llm.get("provider") and not llm.get("model"):
+            add("llm-model", "warn", f"Summaries will fail: LLM_PROVIDER is {llm['provider']} but LLM_MODEL is empty in .env.")
 
         for a in out:
             if a["key"] not in self._raised:

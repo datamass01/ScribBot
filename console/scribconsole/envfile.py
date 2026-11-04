@@ -15,8 +15,10 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 _LINE = re.compile(r"^(?P<lead>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=(?P<rest>.*)$")
 
@@ -153,9 +155,11 @@ class EnvFile:
             raise EnvValueError(".env was changed by something else since this page loaded it. Reload and try again.")
         new = self.render(changes)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(new, encoding="utf-8", newline="")
+        _write_private(tmp, new)
         if self.path.exists():
-            shutil.copy2(self.path, self.path.with_name(self.path.name + ".bak"))
+            bak = self.path.with_name(self.path.name + ".bak")
+            shutil.copy2(self.path, bak)
+            restrict_to_owner(bak)
         os.replace(tmp, self.path)
 
     def create_from_example(self) -> None:
@@ -163,4 +167,63 @@ class EnvFile:
             raise EnvValueError(".env already exists.")
         if not self.example or not self.example.exists():
             raise EnvValueError(".env.example is missing.")
-        shutil.copyfile(self.example, self.path)
+        with open(self.example, encoding="utf-8", newline="") as f:  # byte for byte, BOM and line endings included
+            _write_private(self.path, f.read())
+
+
+# ---------------------------------------------------------------- permissions
+#
+# .env holds the Discord token, the API token, the Foundry password and API keys, so the files the
+# Console writes (.env, .env.tmp, .env.bak) are readable by their owner only: mode 0600 on macOS and
+# Linux, and on Windows an ACL with inheritance removed that grants the current user and SYSTEM.
+# A filesystem that can't hold permissions (FAT, some network shares) is logged, not an error.
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Writes `text` to `path`, readable by the owner only from the moment it exists (POSIX)."""
+    if os.name == "posix":
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    else:
+        path.write_text(text, encoding="utf-8", newline="")
+    restrict_to_owner(path)
+
+
+def restrict_to_owner(path: Path, run: Callable[..., Any] = subprocess.run) -> bool:
+    """Limits `path` to its owner. False (and a log line) if that couldn't be done."""
+    try:
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+            return True
+        sid = _current_user_sid(run)
+        if not sid:
+            raise OSError("couldn't find the current user's SID")
+        result = run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(F)", "*S-1-5-18:(F)"],
+            capture_output=True, text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            raise OSError((result.stdout or result.stderr or f"icacls exited {result.returncode}").strip())
+        return True
+    except (OSError, subprocess.SubprocessError) as err:
+        from .monitoring import log
+
+        log(f"couldn't limit {path.name} to your user account: {err}")
+        return False
+
+
+_sid_cache: list[str] = []
+
+
+def _current_user_sid(run: Callable[..., Any]) -> str | None:
+    """The SID of the user running the Console (Windows), from `whoami /user`."""
+    if not _sid_cache:
+        result = run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # "machine\\user","S-1-5-21-…"
+        match = re.search(r'"(S-1-[0-9-]+)"', result.stdout or "")
+        if result.returncode != 0 or not match:
+            return None
+        _sid_cache.append(match.group(1))
+    return _sid_cache[0]

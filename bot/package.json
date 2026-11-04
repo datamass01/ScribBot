@@ -23,9 +23,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.1.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1161.0",
     "@discordjs/voice": "^0.19.2",
     "@fastify/cors": "^11.3.1",
     "@fastify/websocket": "^11.3.4",
+    "@google/genai": "^2.32.0",
     "better-sqlite3": "^13.0.3",
     "discord.js": "^14.27.0",
     "dotenv": "^18.0.9",
@@ -36,6 +38,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@smithy/node-http-handler": "^4.14.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.23.15",

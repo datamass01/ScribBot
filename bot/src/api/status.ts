@@ -8,6 +8,7 @@ import { resolveParticipant } from "../participants.js";
 import { readTimeline } from "../timeline.js";
 import { workerHealth } from "../worker-client.js";
 import { PipelineTracker } from "./pipeline.js";
+import { llmProblem, llmStatus } from "../summarize/readiness.js";
 import type { HeadlessStatus } from "../foundry/client.js";
 
 export interface DiscordStatus {
@@ -50,84 +51,6 @@ export interface FoundryActivity {
 const startedAt = new Date().toISOString();
 /** Rate and trend need samples across /status calls. */
 const pipelineTracker = new PipelineTracker();
-
-const DEFAULT_MODELS: Record<string, string | null> = {
-  anthropic: "claude-opus-5-5",
-  xai: "grok-4",
-  "openai-compatible": null,
-};
-
-type ProfileLoader = () => Promise<{ authentication?: { type?: string } } | null>;
-
-const loadAnthropicProfile: ProfileLoader = async () => {
-  const { loadConfig } = await import("@anthropic-ai/sdk/core/credentials");
-  return loadConfig();
-};
-
-/**
- * Mirrors the Anthropic SDK's fallback order when no key is passed explicitly:
- * ANTHROPIC_API_KEY, then ANTHROPIC_AUTH_TOKEN, then an `ant auth login` profile.
- * Returns a label for the credential source (never the secret), or null when the SDK would find nothing.
- */
-export async function resolveAnthropicCredentials(
-  env: { apiKey?: string; authToken?: string },
-  loadProfile: ProfileLoader = loadAnthropicProfile,
-): Promise<{ credentials: string | null; error: string | null }> {
-  if (env.apiKey) return { credentials: "api key", error: null };
-  if (env.authToken) return { credentials: "auth token", error: null };
-  try {
-    const profile = await loadProfile();
-    if (profile) return { credentials: `ant profile (${profile.authentication?.type ?? "unknown"})`, error: null };
-  } catch (err) {
-    // e.g. ANTHROPIC_PROFILE names a profile that doesn't exist.
-    return { credentials: null, error: err instanceof Error ? err.message : String(err) };
-  }
-  return { credentials: null, error: null };
-}
-
-async function llmStatus() {
-  const { provider, model } = config.llm;
-  let credentials: string | null;
-  let credentialsError: string | null = null;
-  if (provider === "anthropic") {
-    ({ credentials, error: credentialsError } = await resolveAnthropicCredentials({
-      apiKey: config.llm.anthropicApiKey,
-      authToken: process.env.ANTHROPIC_AUTH_TOKEN || undefined,
-    }));
-  } else if (provider === "xai") {
-    credentials = config.llm.xaiApiKey ? "api key" : null;
-  } else {
-    credentials = config.llm.openaiBaseUrl ? `base url ${config.llm.openaiBaseUrl}` : null;
-  }
-  return {
-    provider,
-    model: model ?? DEFAULT_MODELS[provider] ?? null,
-    credentials,
-    credentialsError,
-    chunkMinutes: config.llm.chunkMinutes,
-    autoSummarize: config.autoSummarize,
-  };
-}
-
-/**
- * Why a summary would fail right now, or null (02 S14). Checked before `/scrib summarize`
- * starts, and shown on /status whether or not AUTO_SUMMARIZE is on.
- */
-export async function llmConfigProblem(): Promise<string | null> {
-  const llm = await llmStatus();
-  if (!llm.model) return `Summaries will fail: LLM_MODEL is empty, and the ${llm.provider} provider needs one. Set it in .env.`;
-  if (!llm.credentials) {
-    const why = llm.credentialsError ? ` (${llm.credentialsError})` : "";
-    return `Summaries will fail: no credentials for LLM provider '${llm.provider}'${why}. ${CREDENTIAL_HINTS[llm.provider] ?? ""}`.trim();
-  }
-  return null;
-}
-
-const CREDENTIAL_HINTS: Record<string, string> = {
-  anthropic: "Set ANTHROPIC_API_KEY in .env or run `ant auth login`.",
-  xai: "Set XAI_API_KEY in .env.",
-  "openai-compatible": "Set OPENAI_BASE_URL in .env.",
-};
 
 async function workerStatus() {
   const t0 = Date.now();
@@ -248,16 +171,10 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
         : "Transcription worker is unreachable.",
     );
   }
-  // An empty model is always a mistake (02 S14). Missing credentials only matter once summaries are
-  // wanted automatically; /scrib summarize checks them itself before starting.
-  if (!llm.model) {
-    warnings.push(`Summaries will fail: LLM_MODEL is empty, and the ${llm.provider} provider needs one. Set it in .env.`);
-  } else if (llm.autoSummarize && !llm.credentials) {
-    const why = llm.credentialsError ? ` (${llm.credentialsError})` : "";
-    warnings.push(
-      `No credentials configured for LLM provider '${llm.provider}'${why}. ${CREDENTIAL_HINTS[llm.provider] ?? ""} Summaries will fail until this is fixed.`.trim(),
-    );
-  }
+  // An empty model is always a mistake (02 S14). Anything else (credentials, LLM_HEADERS) only matters
+  // once summaries are wanted automatically; /scrib summarize checks it itself before starting.
+  const llmIssue = llmProblem(llm);
+  if (llmIssue && (!llm.model || llm.autoSummarize)) warnings.push(llmIssue);
   if (recordings.length && foundry.sockets === 0) {
     warnings.push("Recording, but no Foundry module is connected. The chat and combat log won't be captured.");
   }

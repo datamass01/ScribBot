@@ -15,7 +15,7 @@ import {
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { llmConfigProblem } from "./api/status.js";
+import { llmConfigProblem } from "./summarize/readiness.js";
 import { config } from "./config.js";
 import type { SessionRow, Store } from "./db.js";
 import { bus } from "./events.js";
@@ -23,8 +23,8 @@ import { resolveParticipant, speakerLabel } from "./participants.js";
 import { recordingNotice } from "./notice.js";
 import { foundryActorsFile, sessionPaths } from "./paths.js";
 import { linksToWrite, unlink, type RosterLink } from "./links.js";
-import { formatGap, mergeSessions, mergedInto } from "./merge.js";
-import { isProcessing, makeLiveTranscriber, processSession } from "./pipeline.js";
+import { formatGap, mergeSessions } from "./merge.js";
+import { isProcessing, makeLiveTranscriber, processBlocker, processSession } from "./pipeline.js";
 import { SessionRecorder, type RecorderOptions } from "./recorder.js";
 import { SHUTDOWN_NOTE, defaultSessionToProcess, lastActivityMs } from "./recovery.js";
 import { readTimeline } from "./timeline.js";
@@ -93,6 +93,12 @@ export const scribCommand = new SlashCommandBuilder()
       .addStringOption((o) => o.setName("a").setDescription("Session number to keep (the first part)").setRequired(true))
       .addStringOption((o) => o.setName("b").setDescription("Session number to merge in (the continuation)").setRequired(true)),
   );
+
+/** Whether the bot may join a voice channel: it needs View Channel and Connect there. */
+function botCanJoin(voice: VoiceBasedChannel, me: GuildMember | null) {
+  const perms = me ? voice.permissionsFor(me) : null;
+  return Boolean(perms?.has(PermissionFlagsBits.ViewChannel) && perms.has(PermissionFlagsBits.Connect));
+}
 
 interface ActiveRecording {
   recorder: SessionRecorder;
@@ -201,9 +207,7 @@ export class CommandHandler {
       await i.reply({ content: "Join a voice channel first, then run `/scrib start`.", flags: MessageFlags.Ephemeral });
       return;
     }
-    const me = i.guild.members.me!;
-    const perms = voice.permissionsFor(me);
-    if (!perms.has(PermissionFlagsBits.Connect) || !perms.has(PermissionFlagsBits.ViewChannel)) {
+    if (!botCanJoin(voice, i.guild.members.me)) {
       await i.reply({ content: `I need **View Channel** and **Connect** in ${voice}.`, flags: MessageFlags.Ephemeral });
       return;
     }
@@ -286,7 +290,7 @@ export class CommandHandler {
                 ? `✅ Session ${number()}: back in ${voice} after ${formatGap(e.gapMs / 1000)}. Recording continues; speech during the gap wasn't recorded.`
                 : `❌ Session ${number()}: couldn't rejoin ${voice} after ${e.attempts} tries. I'll keep trying every minute. ` +
                   "`/scrib stop` ends the session and keeps everything recorded so far.";
-          void this.send(textChannelId, text).catch((err) => console.error("[commands] notice failed:", err));
+          void this.tell(textChannelId, text);
         },
       },
     );
@@ -304,12 +308,12 @@ export class CommandHandler {
         this.store.setSessionStatus(s.id, "failed", error);
         bus.emitEvent({ type: "session.status", sessionId: s.id, status: "failed", error });
         console.log(`[commands] session ${s.number} not resumed: ${why}`);
-        await this.send(
+        await this.tell(
           s.text_channel_id,
           `⚠️ ScribBot restarted and couldn't resume recording session ${s.number} (${why}). ` +
             `Everything recorded before the restart is kept: run \`/scrib process session:${s.number}\` to transcribe it, ` +
             "or `/scrib start` to record the rest as a new session (`/scrib merge` can join the two afterwards).",
-        ).catch(() => {});
+        );
       };
       try {
         if (this.recordings.has(s.guild_id)) {
@@ -339,11 +343,11 @@ export class CommandHandler {
         bus.emitEvent({ type: "session.started", sessionId: s.id, number: s.number, startedAt: timeline.startedAt });
         const gap = formatGap((Date.now() - last) / 1000);
         console.log(`[commands] session ${s.number}: recording resumed in ${channel.name} (gap ${gap})`);
-        await this.send(
+        await this.tell(
           s.text_channel_id,
           `⚠️ ScribBot restarted; **recording of session ${s.number} resumed** in ${channel} (gap ${gap}). ` +
             "Speech during the gap wasn't recorded.",
-        ).catch(() => {});
+        );
       } catch (err) {
         await fail(err instanceof Error ? err.message : String(err));
       }
@@ -353,11 +357,11 @@ export class CommandHandler {
   /** Tell the table about sessions a restart interrupted that weren't resumed (02 S3, fix 3). */
   async announceInterrupted(sessions: SessionRow[]) {
     for (const s of sessions) {
-      await this.send(
+      await this.tell(
         s.text_channel_id,
         `⚠️ ScribBot restarted while session ${s.number} was ${s.status}. ` +
           `Nothing recorded is lost: run \`/scrib process session:${s.number}\` to finish it.`,
-      ).catch(() => {});
+      );
     }
   }
 
@@ -390,11 +394,11 @@ export class CommandHandler {
           this.store.setSessionStatus(session.id, "failed", SHUTDOWN_NOTE);
           console.log(`[scribbot] recording ${session.number} stopped and saved (${timeline.segments.length} clips)`);
           await Promise.race([
-            this.send(
+            this.tell(
               active.textChannelId,
               `⏹️ ScribBot is shutting down: **session ${session.number} recording stopped and saved** ` +
                 `(${timeline.segments.length} clips). It will be transcribed when the bot starts again.`,
-            ).catch(() => {}),
+            ),
             sleep(3000),
           ]);
         } catch (err) {
@@ -426,11 +430,11 @@ export class CommandHandler {
       if (this.backlogWarned.has(session.id)) continue;
       this.backlogWarned.add(session.id);
       console.warn(`[commands] worker backlog: ${health.queued} clips, ~${Math.round(minutes)} min`);
-      await this.send(
+      await this.tell(
         textChannelId,
         `🐢 Transcription is about ${Math.round(minutes)} min behind (${health.queued} clips queued). ` +
           "Nothing is lost: clips wait on disk, but the transcript will take longer after `/scrib stop`.",
-      ).catch(() => {});
+      );
     }
   }
 
@@ -496,10 +500,23 @@ export class CommandHandler {
     });
   }
 
+  /** Posts to a text channel; throws if Discord refuses. See `tell()` for notices that mustn't. */
   private async send(channelId: string | null, payload: string | Parameters<SendableChannels["send"]>[0]) {
     if (!channelId) return;
     const channel = await this.client.channels.fetch(channelId).catch(() => null);
     if (channel?.isSendable()) await channel.send(payload);
+  }
+
+  /**
+   * Best-effort notice to the table: a failed post is logged, never thrown, so it can't stop the
+   * recording or the shutdown it reports on.
+   */
+  private async tell(channelId: string | null, text: string) {
+    try {
+      await this.send(channelId, text);
+    } catch (err) {
+      console.warn(`[commands] couldn't post to channel ${channelId}: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   private async postSummary(channelId: string | null, f: SummaryFile) {
@@ -666,21 +683,17 @@ export class CommandHandler {
 
   /** Why `/scrib process` or `summarize` would be refused, thrown as an Error. Shared with the Console. */
   private async checkProcess(session: SessionRow, summaryOnly: boolean, retranscribe: boolean) {
-    const into = mergedInto(session);
-    if (into != null) throw new Error(`Session ${session.number} was merged into session ${into}; process that one instead.`);
-    if (session.deleted_at) throw new Error(`Session ${session.number} is in the trash. Restore it first.`);
-    if (session.status === "recording") throw new Error("That session is still recording.");
-    if (isProcessing(session.id)) throw new Error("That session is already being processed.");
-    const paths = sessionPaths(session.id);
-    if (summaryOnly && !fs.existsSync(paths.transcriptJson)) {
-      throw new Error("That session has no transcript yet; use `/scrib process` instead.");
-    }
+    const blocker = processBlocker(session, { retranscribe });
+    if (blocker) throw new Error(blocker);
+    if (session.status === "recording") throw new Error(`Session ${session.number} is still recording.`);
     if (summaryOnly) {
+      if (!fs.existsSync(sessionPaths(session.id).transcriptJson)) {
+        throw new Error("That session has no transcript yet; use `/scrib process` instead.");
+      }
       // Say why it would fail before anything starts (02 S14).
       const problem = await llmConfigProblem();
       if (problem) throw new Error(problem);
     }
-    if (retranscribe && session.audio_purged) throw new Error("Audio for that session was already deleted.");
   }
 
   private async story(i: ChatInputCommandInteraction<"cached">) {
@@ -743,15 +756,12 @@ export class CommandHandler {
       const me = g.members.me;
       const voice = g.channels.cache
         .filter((c): c is VoiceBasedChannel => c.isVoiceBased())
-        .map((c) => {
-          const perms = me ? c.permissionsFor(me) : null;
-          return {
-            id: c.id,
-            name: c.name,
-            canJoin: Boolean(perms?.has(PermissionFlagsBits.Connect) && perms.has(PermissionFlagsBits.ViewChannel)),
-            members: c.members.filter((m) => !m.user.bot).map((m) => ({ id: m.id, name: m.displayName })),
-          };
-        });
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          canJoin: botCanJoin(c, me),
+          members: c.members.filter((m) => !m.user.bot).map((m) => ({ id: m.id, name: m.displayName })),
+        }));
       const text = g.channels.cache
         .filter((c) => c.type === ChannelType.GuildText)
         .filter((c) => {
@@ -781,14 +791,13 @@ export class CommandHandler {
     if (!voice?.isVoiceBased()) throw new Error("That voice channel doesn't exist any more.");
     const text = guild.channels.cache.get(opts.textChannelId);
     if (!text?.isSendable()) throw new Error("Pick a text channel the bot can post in: the table must see the recording notice.");
-    const perms = guild.members.me ? voice.permissionsFor(guild.members.me) : null;
-    if (!perms?.has(PermissionFlagsBits.Connect) || !perms.has(PermissionFlagsBits.ViewChannel)) {
+    if (!botCanJoin(voice, guild.members.me)) {
       throw new Error(`The bot needs View Channel and Connect in ${voice.name}.`);
     }
     if (opts.campaignId != null && !this.store.getCampaign(opts.campaignId)) throw new Error("That campaign doesn't exist.");
     const { session, text: notice } = await this.beginRecording(guild.id, voice, text.id, opts.campaignId);
     console.log(`[commands] session ${session.number}: recording started from the Console in ${voice.name}`);
-    await this.send(text.id, notice).catch((err) => console.error("[commands] recording notice failed:", err));
+    await this.tell(text.id, notice);
     return session;
   }
 
@@ -799,7 +808,7 @@ export class CommandHandler {
     const [guildId, active] = entry;
     const text = await this.endRecording(guildId, active);
     console.log(`[commands] session ${active.session.number}: recording stopped from the Console`);
-    await this.send(active.textChannelId, text).catch((err) => console.error("[commands] stop notice failed:", err));
+    await this.tell(active.textChannelId, text);
     this.runPipeline(active.session.id, active.textChannelId);
     return active.session;
   }

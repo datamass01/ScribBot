@@ -28,7 +28,7 @@ export interface SessionRow {
   notes: string | null;
   /** Moved to DATA_DIR/trash (soft delete); null while the session is live. */
   deleted_at: string | null;
-  /** Its trash folder was removed for good. The row stays so session numbers are never reused. */
+  /** Its trash folder was removed for good. The row stays so merges still resolve. */
   purged_at: string | null;
   /** When the summary or story was last sent to Foundry (summary.ready / story.ready). */
   summary_sent_at: string | null;
@@ -40,7 +40,7 @@ export interface SessionRow {
   story_journal_name: string | null;
   /** The campaign (Foundry world) it belongs to; null until the layout migration (layout.ts). */
   campaign_id: number | null;
-  /** Its recording folder relative to DATA_DIR, e.g. campaigns/<world>/sessions/012/recordings/<id>; null: the old flat sessions/<id>. */
+  /** Its recording folder relative to DATA_DIR, e.g. campaigns/<world>/sessions/<game id>/recordings/<id>; null: the old flat sessions/<id>. */
   dir: string | null;
   /** The session it was merged into (its recording folder then lives in that session's recordings/). */
   merged_into_id: string | null;
@@ -64,7 +64,7 @@ export interface CampaignRow {
 /** The campaign for recordings made before any Foundry world was known. */
 export const UNASSIGNED_FOLDER = "_unassigned";
 
-/** "012": zero-padded so folders sort by number. */
+/** "012": a session number as a label (merged write-ups go in from-session-012/); folders are named by id. */
 export const sessionFolderName = (n: number) => String(n).padStart(3, "0");
 
 /** Windows-safe folder name for a world id (Foundry ids are already lowercase letters, digits and dashes). */
@@ -136,7 +136,7 @@ const MIGRATIONS: string[] = [
    ALTER TABLE sessions ADD COLUMN summary_journal_name TEXT;
    ALTER TABLE sessions ADD COLUMN story_journal_at TEXT;
    ALTER TABLE sessions ADD COLUMN story_journal_name TEXT;`,
-  // 4: campaigns (one per Foundry world) and the campaigns/<world>/sessions/<NNN>/recordings/<id> layout.
+  // 4: campaigns (one per Foundry world) and the campaign layout (game folders were named by number then; now by id).
   `CREATE TABLE campaigns (
      id INTEGER PRIMARY KEY,
      world_id TEXT UNIQUE,
@@ -184,13 +184,14 @@ export class Store {
 
   /**
    * A new recording, numbered within its campaign (default: the world Foundry last synced from)
-   * and filed as campaigns/<world>/sessions/<NNN>/recordings/<id>.
+   * and filed as campaigns/<world>/sessions/<id>/recordings/<id>. The folder is named by id, never
+   * by number, so renumbering only touches the database.
    */
   createSession(s: { id: string; guildId: string; channelId: string; textChannelId: string | null; startedAt: string; campaignId?: number }) {
     const campaign = this.getCampaign(s.campaignId ?? this.defaultCampaign().id);
     if (!campaign) throw new Error("No such campaign.");
     const n = this.nextNumber(campaign.id, s.guildId);
-    const dir = recordingRel(campaign.folder, n, s.id);
+    const dir = recordingRel(campaign.folder, s.id, s.id);
     this.db
       .prepare(
         `INSERT INTO sessions (id, guild_id, channel_id, text_channel_id, number, status, started_at, campaign_id, dir)
@@ -201,17 +202,30 @@ export class Store {
   }
 
   /**
-   * The next number in a campaign. Sessions not yet moved to the campaign layout count too
-   * (they were numbered per server), so a new session never repeats an old number.
+   * The next number in a campaign: one past the highest game that isn't in the trash. Sessions not
+   * yet moved to the campaign layout count too (they were numbered per server). A trashed session
+   * can therefore share its number with a newer one; restoring it renumbers (trash.ts).
    */
   nextNumber(campaignId: number, guildId: string) {
     const { n } = this.db
       .prepare(
         `SELECT COALESCE(MAX(number), 0) + 1 AS n FROM sessions
-         WHERE campaign_id = ? OR (campaign_id IS NULL AND guild_id = ?)`,
+         WHERE (campaign_id = ? OR (campaign_id IS NULL AND guild_id = ?)) AND deleted_at IS NULL AND merged_into_id IS NULL`,
       )
       .get(campaignId, guildId) as { n: number };
     return n;
+  }
+
+  /**
+   * The games (not in the trash, not merged into another) that share a session's numbering:
+   * its campaign plus the server's sessions from before the campaign layout, as nextNumber counts.
+   */
+  numberingPeers(s: Pick<SessionRow, "id" | "campaign_id" | "guild_id">) {
+    const scope = s.campaign_id == null ? "guild_id = ?" : "(campaign_id = ? OR (campaign_id IS NULL AND guild_id = ?))";
+    const args = s.campaign_id == null ? [s.guild_id] : [s.campaign_id, s.guild_id];
+    return this.db
+      .prepare(`SELECT * FROM sessions WHERE ${scope} AND deleted_at IS NULL AND merged_into_id IS NULL AND id != ? ORDER BY number`)
+      .all(...args, s.id) as SessionRow[];
   }
 
   /** A recording and any merged into it, oldest first: the recordings of one game. */
@@ -454,6 +468,12 @@ export class Store {
   }
 }
 
-/** campaigns/<folder>/sessions/<NNN>/recordings/<id>, relative to DATA_DIR. */
-export const recordingRel = (campaignFolder: string, number: number, id: string) =>
-  `campaigns/${campaignFolder}/sessions/${sessionFolderName(number)}/recordings/${id}`;
+/**
+ * campaigns/<folder>/sessions/<game id>/recordings/<id>, relative to DATA_DIR. The game's folder is
+ * named after its first recording's id (the session merges keep), so it never changes with its number.
+ */
+export const recordingRel = (campaignFolder: string, gameId: string, id: string) =>
+  `campaigns/${campaignFolder}/sessions/${gameId}/recordings/${id}`;
+
+/** The game folder's name in a campaign-layout `dir` (…/sessions/<name>/recordings/<id>), or null. */
+export const gameFolderOf = (dir: string | null) => /^campaigns\/[^/]+\/sessions\/([^/]+)\/recordings\/[^/]+$/.exec(dir ?? "")?.[1] ?? null;

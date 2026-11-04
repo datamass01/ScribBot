@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { sttKeywords } from "./campaign.js";
-import type { Store } from "./db.js";
+import type { SessionRow, Store } from "./db.js";
 import { bus } from "./events.js";
 import { composeSession } from "./layout.js";
 import { sessionPaths, sessionRecordings } from "./paths.js";
@@ -8,7 +8,7 @@ import { summarizeSession } from "./summarize/summarize.js";
 import type { SummaryFile } from "./summarize/schema.js";
 import { readTimeline } from "./timeline.js";
 import { config } from "./config.js";
-import { mergedInto } from "./merge.js";
+import { unusableReason } from "./merge.js";
 import { transcribe, transcribeClip } from "./worker-client.js";
 
 export interface PipelineHooks {
@@ -32,6 +32,21 @@ export function processingProgress(sessionId: string) {
 }
 
 /**
+ * Why `processSession` would refuse this session right now, or null. The one statement of these
+ * rules: the pipeline enforces them, and the commands check them first to answer before starting.
+ */
+export function processBlocker(session: SessionRow | undefined, opts: { retranscribe?: boolean } = {}): string | null {
+  if (!session) return "No such session.";
+  const unusable = unusableReason(session);
+  if (unusable) return unusable;
+  if (running.has(session.id)) return `Session ${session.number} is already being processed.`;
+  if (opts.retranscribe && session.audio_purged) {
+    return `Session ${session.number}'s audio was already deleted, so it can't be re-transcribed.`;
+  }
+  return null;
+}
+
+/**
  * Transcribe (unless transcript.json already exists) and summarize a finished
  * session. Every step writes its output to disk, so a failed run can be resumed.
  */
@@ -40,11 +55,9 @@ export async function processSession(
   sessionId: string,
   opts: PipelineHooks & { retranscribe?: boolean; skipSummary?: boolean } = {},
 ) {
-  if (running.has(sessionId)) throw new Error("This session is already being processed");
-  const merged = store.getSession(sessionId);
-  const into = merged ? mergedInto(merged) : null;
-  if (into != null) throw new Error(`This session was merged into session ${into}; process that one instead`);
-  if (merged?.deleted_at) throw new Error("This session is in the trash; restore it first");
+  const session = store.getSession(sessionId);
+  const blocker = processBlocker(session, opts);
+  if (blocker || !session) throw new Error(blocker ?? "No such session.");
   running.add(sessionId);
   const log = opts.log ?? console.log;
   const notify = async (text: string) => {
@@ -61,11 +74,6 @@ export async function processSession(
 
   try {
     const paths = sessionPaths(sessionId);
-    const session = store.getSession(sessionId)!;
-
-    if (opts.retranscribe && session.audio_purged) {
-      throw new Error("This session's audio was already deleted, so it can't be re-transcribed");
-    }
     // A game is one or more recordings (a merged continuation keeps its own folder); each is
     // transcribed by the worker in its own folder, then the game's files are built from them.
     const recordings = sessionRecordings(sessionId)

@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
-import { recordingRel, sessionFolderName, type SessionRow, type Store } from "./db.js";
+import { recordingRel, type SessionRow, type Store } from "./db.js";
 import { renameWithRetry, writeFileAtomic } from "./fsutil.js";
 import { MERGE_MARKER_ID, formatGap, renderTranscriptMarkdown } from "./merge.js";
 import { sessionPaths, sessionRecordings } from "./paths.js";
@@ -222,8 +222,9 @@ export function removeIfEmpty(dir: string, stop: string) {
 }
 
 /**
- * Moves a game (all its recordings) into another campaign, numbered there. Its folder becomes
- * campaigns/<campaign>/sessions/<NNN>. Throws, changing nothing, when the target folder exists.
+ * Moves a game (all its recordings) into another campaign, numbered there. Its folder keeps its
+ * name (the game's id): campaigns/<campaign>/sessions/<id>. Throws, changing nothing, when the
+ * target folder exists.
  */
 export function moveToCampaign(store: Store, id: string, campaignId: number) {
   const primary = primaryId(store, id);
@@ -234,15 +235,35 @@ export function moveToCampaign(store: Store, id: string, campaignId: number) {
   if (row.campaign_id === campaignId) return row;
   const number = store.nextNumber(campaignId, row.guild_id);
   const from = sessionPaths(primary).dir;
-  const to = path.join(config.dataDir, "campaigns", campaign.folder, "sessions", sessionFolderName(number));
+  const to = path.join(config.dataDir, "campaigns", campaign.folder, "sessions", primary);
   if (fs.existsSync(from)) moveFolder(from, to);
   store.db.transaction(() => {
     for (const rid of sessionRecordings(primary)) {
       const r = store.getSession(rid)!;
-      store.setSessionPlace(rid, { dir: recordingRel(campaign.folder, number, rid), campaignId, number: rid === primary ? number : r.number });
+      store.setSessionPlace(rid, { dir: recordingRel(campaign.folder, primary, rid), campaignId, number: rid === primary ? number : r.number });
     }
   })();
   removeIfEmpty(path.dirname(from), path.join(config.dataDir, "campaigns"));
   console.log(`[layout] session ${row.number} moved to campaign ${campaign.folder} as session ${number}`);
+  return store.getSession(primary)!;
+}
+
+/**
+ * Gives a game a new number. Only the database changes: folders are named by id, not number.
+ * Recordings merged into it get their "Merged into session N (…)" note updated.
+ */
+export function renumberGame(store: Store, id: string, number: number) {
+  const primary = primaryId(store, id);
+  const row = store.getSession(primary);
+  if (!row) throw new Error("No such session.");
+  if (row.number === number) return row;
+  const marker = `Merged into session ${row.number} (`;
+  store.db.transaction(() => {
+    store.db.prepare("UPDATE sessions SET number = ? WHERE id = ?").run(number, primary);
+    for (const r of store.recordingsOf(primary)) {
+      if (r.id !== primary && r.error?.startsWith(marker)) store.setSessionStatus(r.id, r.status, `Merged into session ${number} (${r.error.slice(marker.length)}`);
+    }
+  })();
+  console.log(`[layout] session ${row.number} renumbered to ${number}`);
   return store.getSession(primary)!;
 }

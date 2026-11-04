@@ -3,13 +3,17 @@ import path from "node:path";
 import { config } from "./config.js";
 import type { SessionRow, Store } from "./db.js";
 import { renameWithRetry } from "./fsutil.js";
+import { renumberGame } from "./layout.js";
 import { mergedInto } from "./merge.js";
 import { sessionPaths, sessionRecordings } from "./paths.js";
 import { isProcessing } from "./pipeline.js";
 
 /**
- * Soft delete for the Console (docs/console-design.md §4.3): a session's folder moves to
- * DATA_DIR/trash/<id> and the row keeps `deleted_at`, so session numbers are never reused.
+ * The Console's trash (docs/console-design.md §4.3): a session's folder moves to DATA_DIR/trash/<id>
+ * and the row keeps `deleted_at`. A trashed number is free again (Store.nextNumber), so restoring
+ * can meet a newer session with the same number: then the later of the two, by start time, moves
+ * up one, along with any sessions after it that would clash in turn. Folders are named by id, so
+ * renumbering is a database change only.
  * Every function throws an Error whose message can be shown to the user as is.
  */
 
@@ -39,18 +43,67 @@ export function deleteSession(store: Store, session: SessionRow, isRecording: (i
   console.log(`[trash] session ${session.number} (${session.id}) moved to the trash`);
 }
 
-export function restoreSession(store: Store, session: SessionRow) {
+export interface RestoreResult {
+  /** The restored session's number now. */
+  number: number;
+  /** Every game whose number changed, the restored one included, in the order they were moved. */
+  renumbered: { id: string; from: number; to: number }[];
+  message: string;
+}
+
+/**
+ * The numbers to change so `session` can come back: none if its number is free; otherwise the
+ * later-starting of it and the session holding its number takes number + 1, and the run of
+ * sessions straight after it each move up one, highest first.
+ */
+export function restorePlan(store: Store, session: SessionRow) {
+  const peers = store.numberingPeers(session);
+  const holder = peers.find((p) => p.number === session.number);
+  if (!holder) return [];
+  const later = holder.started_at > session.started_at ? holder : session;
+  const taken = new Set(peers.filter((p) => p.id !== later.id).map((p) => p.number));
+  const plan: { id: string; from: number; to: number }[] = [];
+  // Sessions after the clash, as long as each new number would collide with the next one.
+  for (let n = session.number + 1; taken.has(n); n++) {
+    const p = peers.find((x) => x.number === n && x.id !== later.id)!;
+    plan.push({ id: p.id, from: n, to: n + 1 });
+  }
+  plan.reverse();
+  plan.push({ id: later.id, from: session.number, to: session.number + 1 });
+  return plan;
+}
+
+export function restoreSession(store: Store, session: SessionRow, isRecording: (id: string) => boolean = () => false): RestoreResult {
   if (!session.deleted_at) throw new Error(`Session ${session.number} isn't in the trash.`);
   if (session.purged_at) throw new Error(`Session ${session.number} was deleted permanently.`);
   const from = trashFolder(session.id);
+  const plan = restorePlan(store, session);
+  for (const step of plan) {
+    if (step.id === session.id) continue;
+    if (isRecording(step.id) || store.getSession(step.id)?.status === "recording")
+      throw new Error(`Restoring session ${session.number} renumbers session ${step.from}, which is recording. Restore it after that recording stops.`);
+    if (isProcessing(step.id))
+      throw new Error(`Restoring session ${session.number} renumbers session ${step.from}, which is being processed. Wait for it to finish.`);
+  }
+  const finalNumber = plan.find((p) => p.id === session.id)?.to ?? session.number;
+  // Numbers only: every folder is named by id, so nothing on disk moves but the restored one.
+  store.db.transaction(() => {
+    for (const step of plan) renumberGame(store, step.id, step.to);
+  })();
   const to = sessionPaths(session.id).dir;
-  if (fs.existsSync(to)) throw new Error(`A folder for session ${session.number} already exists (${to}).`);
+  if (fs.existsSync(to)) throw new Error(`A folder for session ${finalNumber} already exists (${to}).`);
   if (fs.existsSync(from)) {
     fs.mkdirSync(path.dirname(to), { recursive: true });
     renameWithRetry(from, to);
   }
   for (const rid of sessionRecordings(session.id)) store.markDeleted(rid, false);
-  console.log(`[trash] session ${session.number} (${session.id}) restored`);
+  console.log(`[trash] session ${session.number} (${session.id}) restored${finalNumber !== session.number ? ` as session ${finalNumber}` : ""}`);
+  const others = plan.filter((p) => p.id !== session.id);
+  const parts = [finalNumber === session.number ? `Session ${session.number} restored.` : `Session ${session.number} restored as session ${finalNumber}.`];
+  if (others.length) {
+    parts.push(`Renumbered to make room: ${[...others].sort((a, b) => a.from - b.from).map((p) => `${p.from} → ${p.to}`).join(", ")}.`);
+  }
+  return { number: finalNumber, renumbered: plan, message: parts.join(" ") };
 }
 
 export function purgeSession(store: Store, session: SessionRow) {
@@ -70,12 +123,4 @@ export function purgeExpiredTrash(store: Store, days: number, log: (msg: string)
       log(`[trash] couldn't empty session ${s.number} from the trash: ${(err as Error).message}`);
     }
   }
-}
-
-/** Why a session can't be used by the pipeline, merges or imports, or null. */
-export function unusableReason(session: SessionRow): string | null {
-  if (session.deleted_at) return `Session ${session.number} is in the trash. Restore it first.`;
-  const into = mergedInto(session);
-  if (into != null) return `Session ${session.number} was merged into session ${into}; use that one instead.`;
-  return null;
 }

@@ -93,3 +93,57 @@ def test_create_from_the_template_only_once(tmp_path):
     assert f.values()["API_TOKEN"] == "change-me"
     with pytest.raises(EnvValueError):
         f.create_from_example()
+
+
+# ---------------------------------------------------------------- permissions
+
+
+def _readable_by_others(path) -> bool:
+    """POSIX: any group/other bit. Windows: an ACL entry for anyone but this user and SYSTEM."""
+    import os
+    import subprocess
+
+    if os.name == "posix":
+        return bool(path.stat().st_mode & 0o077)
+    sid = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True).stdout.split(",")[-1].strip().strip('"')
+    acl = subprocess.run(["icacls", str(path), "/save", str(path) + ".acl"], capture_output=True, text=True)
+    assert acl.returncode == 0, acl.stdout
+    sddl = (path.parent / (path.name + ".acl")).read_text(encoding="utf-16-le").splitlines()[1]
+    (path.parent / (path.name + ".acl")).unlink()
+    # Allowed SIDs in the DACL, e.g. (A;;FA;;;S-1-5-21-…)(A;;FA;;;SY); and no inherited entries (P = protected).
+    import re
+
+    trustees = set(re.findall(r"\(A;[^;]*;[^;]*;;;([^)]+)\)", sddl))
+    return "D:P" not in sddl or bool(trustees - {sid, "SY"})
+
+
+def test_saved_files_are_readable_by_their_owner_only(tmp_path):
+    env = EnvFile(tmp_path / ".env")
+    (tmp_path / ".env").write_text("DISCORD_TOKEN=old\n", encoding="utf-8")
+    env.save({"DISCORD_TOKEN": "new"})
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "DISCORD_TOKEN=new\n"
+    assert not _readable_by_others(tmp_path / ".env")
+    assert not _readable_by_others(tmp_path / ".env.bak")  # the backup holds the old secrets
+
+
+def test_a_new_env_from_the_template_is_private_and_identical(tmp_path):
+    example = tmp_path / ".env.example"
+    example.write_bytes(b"A=1\r\nB=2\r\n")
+    EnvFile(tmp_path / ".env", example).create_from_example()
+    assert (tmp_path / ".env").read_bytes() == b"A=1\r\nB=2\r\n"
+    assert not _readable_by_others(tmp_path / ".env")
+
+
+def test_saving_still_works_where_permissions_cannot_be_set(tmp_path, monkeypatch, capsys):
+    import os
+
+    from scribconsole import envfile
+
+    if os.name == "posix":
+        monkeypatch.setattr(envfile.os, "chmod", lambda *a: (_ for _ in ()).throw(OSError("not supported")))
+    else:
+        monkeypatch.setattr(envfile, "_current_user_sid", lambda run: None)
+    (tmp_path / ".env").write_text("A=1\n", encoding="utf-8")
+    EnvFile(tmp_path / ".env").save({"A": "2"})
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "A=2\n"
+    assert "couldn't limit" in capsys.readouterr().out

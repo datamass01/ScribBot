@@ -22,7 +22,7 @@ describe("status with automatic summaries off", () => {
     expect(status.llm).toMatchObject({ autoSummarize: false, credentials: null, model: null });
     expect(status.warnings.some((w) => /credentials/.test(w))).toBe(false);
     expect(status.warnings.filter((w) => /LLM_MODEL is empty/.test(w))).toHaveLength(1);
-    const { llmConfigProblem } = await import("../src/api/status.js");
+    const { llmConfigProblem } = await import("../src/summarize/readiness.js");
     expect(await llmConfigProblem()).toMatch(/LLM_MODEL is empty/);
   });
 });

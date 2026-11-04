@@ -56,7 +56,7 @@ Confirmed names show up in the pack's "People at the table" table ("Also called"
 
 ### Step 2: write and verify the story
 
-Output goes to the session's `story/` folder, `data/campaigns/<world>/sessions/<NNN>/story/` (git-ignored; `data/sessions/<id>/story/` for sessions not yet moved to the campaign layout). Given a session, `prepare.py` stitches all its recordings (a merged continuation too):
+Output goes to the session's `story/` folder, `data/campaigns/<world>/sessions/<session id>/story/` (git-ignored; `data/sessions/<id>/story/` for sessions not yet moved to the campaign layout). Given a session, `prepare.py` stitches all its recordings (a merged continuation too):
 
 | File | Use |
 |---|---|
@@ -74,7 +74,7 @@ Then write the story:
 3. Verify it:
 
 ```sh
-python .claude/skills/summarize-session/verify.py data/campaigns/erat/sessions/012/story/summary.story.md
+python .claude/skills/summarize-session/verify.py data/campaigns/erat/sessions/2026-11-01-6ae0bcc6/story/summary.story.md
 ```
 
 The command exits 0 with `PASS`. It lists the source line of every verified quote, so a reviewer can check them against the pack. Each `FAIL` names what to fix. `WARN` lines (a quote that reads like a described action, a quote from a mechanics line, an overlong paragraph) are worth fixing but don't fail the run.

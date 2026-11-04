@@ -1,3 +1,5 @@
+import { defaultModel } from "./summarize/defaults.js";
+
 /**
  * Every .env variable, described for the Console's Configuration tab (docs/console-design.md §4.4).
  * `npm run schemas` writes it to shared/schemas/settings.json, which the Console reads; it never
@@ -18,11 +20,23 @@ export interface Setting {
   default: string;
   /** Shown next to a blank field, e.g. "blank = claude-opus-5-5". */
   blankMeans?: string;
-  options?: { value: string; label: string }[];
+  /** For an enum: its choices. `kind` sorts them under `kindPicker`; `defaultModel` (LLM_PROVIDER) is what a blank LLM_MODEL means, null when it's required. */
+  options?: { value: string; label: string; kind?: string; defaultModel?: string | null }[];
+  /**
+   * A dropdown the Console shows before this enum, choosing which kind of option it lists (e.g. API
+   * or CLI providers). It isn't a setting of its own: the kind follows from the value, so nothing
+   * extra is written to .env.
+   */
+  kindPicker?: { label: string; help: string; kinds: { value: string; label: string }[] };
   min?: number;
   max?: number;
   /** Processes that read it at startup: a change needs them restarted. */
   readBy: Process[];
+  /**
+   * The bot re-reads it from .env for each summary (summaryConfig() in bot/src/config.ts), so a
+   * change takes effect on the next summary or test without restarting the bot.
+   */
+  live?: boolean;
   /** In the collapsed "Advanced" part of its group. */
   advanced?: boolean;
   /** Tuned for speed or accuracy; the form offers "Reset to default" and shows the default. */
@@ -155,28 +169,95 @@ export const SETTINGS: Setting[] = [
     readBy: WORKER, advanced: true, help: "Log a clip that has been transcribing longer than this (0 = never)." },
 
   // ---------------------------------------------------------------- Summaries
-  { key: "LLM_PROVIDER", group: "Summaries", label: "Provider", type: "enum", default: "anthropic", readBy: ["bot", "console"],
+  { key: "LLM_PROVIDER", group: "Summaries", live: true, label: "Provider", type: "enum", default: "anthropic", readBy: ["bot", "console"],
+    kindPicker: {
+      label: "Summaries via",
+      help: "API: an API key, or a local server such as Ollama. CLI: a coding-agent CLI on this computer, signed in with your own Claude, ChatGPT, Google or Grok account; no API key.",
+      kinds: [
+        { value: "api", label: "API" },
+        { value: "cli", label: "CLI (signed-in account)" },
+      ],
+    },
     options: [
-      { value: "anthropic", label: "Anthropic Claude" },
-      { value: "xai", label: "xAI Grok" },
-      { value: "openai-compatible", label: "OpenAI-compatible (OpenAI, Ollama, LM Studio, OpenRouter…)" },
-    ],
+      { value: "anthropic", label: "Anthropic Claude", kind: "api" },
+      { value: "xai", label: "xAI Grok", kind: "api" },
+      { value: "openai-compatible", label: "OpenAI-compatible (OpenAI, Mistral, DeepSeek, Groq, OpenRouter, Ollama, LM Studio…)", kind: "api" },
+      { value: "gemini", label: "Google Gemini API", kind: "api" },
+      { value: "vertex-ai", label: "Google Vertex AI (Gemini on Google Cloud)", kind: "api" },
+      { value: "azure-openai", label: "Azure OpenAI", kind: "api" },
+      { value: "bedrock", label: "Amazon Bedrock (Claude, Nova, Llama, Mistral… on AWS)", kind: "api" },
+      { value: "claude-code", label: "Claude Code (Claude sign-in)", kind: "cli" },
+      { value: "codex", label: "OpenAI Codex (ChatGPT sign-in)", kind: "cli" },
+      { value: "antigravity", label: "Google Antigravity (Gemini, Google sign-in)", kind: "cli" },
+      { value: "grok-cli", label: "xAI Grok CLI (Grok sign-in)", kind: "cli" },
+    ].map((o) => ({ ...o, defaultModel: defaultModel(o.value) })),
     help: "Who writes the summaries. Only transcript text and campaign notes are sent." },
-  { key: "LLM_MODEL", group: "Summaries", label: "Model", type: "string", default: "", readBy: ["bot", "console"],
-    blankMeans: "the provider's default (claude-opus-5-5, grok-4)", help: "Required for OpenAI-compatible providers." },
-  { key: "ANTHROPIC_API_KEY", group: "Summaries", label: "Anthropic API key", type: "secret", default: "", readBy: ["bot", "console"],
+  { key: "LLM_MODEL", group: "Summaries", live: true, label: "Model", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "the provider's default",
+    help: "Any model id the provider accepts. Required for OpenAI-compatible, Bedrock (a model id or inference profile) and Azure OpenAI (your deployment name). 'Which models?' below lists the ids the selected provider accepts." },
+  { key: "ANTHROPIC_API_KEY", group: "Summaries", live: true, label: "Anthropic API key", type: "secret", default: "", readBy: ["bot", "console"],
     showIf: { key: "LLM_PROVIDER", values: ["anthropic"] },
     help: "Leave blank to use an `ant auth login` profile instead." },
-  { key: "XAI_API_KEY", group: "Summaries", label: "xAI API key", type: "secret", default: "", readBy: ["bot", "console"],
+  { key: "ANTHROPIC_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+    blankMeans: "https://api.anthropic.com", showIf: { key: "LLM_PROVIDER", values: ["anthropic"] },
+    help: "Any endpoint speaking the Anthropic Messages API: a gateway, proxy or regional endpoint. The SDK adds /v1/messages." },
+  { key: "XAI_API_KEY", group: "Summaries", live: true, label: "xAI API key", type: "secret", default: "", readBy: ["bot", "console"],
     showIf: { key: "LLM_PROVIDER", values: ["xai"] }, help: "" },
-  { key: "OPENAI_BASE_URL", group: "Summaries", label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+  { key: "XAI_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+    blankMeans: "https://api.x.ai/v1", showIf: { key: "LLM_PROVIDER", values: ["xai"] },
+    help: "A regional xAI endpoint or a gateway in front of it (OpenAI Chat Completions format)." },
+  { key: "OPENAI_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
     blankMeans: "https://api.openai.com/v1", showIf: { key: "LLM_PROVIDER", values: ["openai-compatible"] },
-    help: "e.g. http://localhost:11434/v1 for Ollama." },
-  { key: "OPENAI_API_KEY", group: "Summaries", label: "API key", type: "secret", default: "", readBy: ["bot", "console"],
-    showIf: { key: "LLM_PROVIDER", values: ["openai-compatible"] }, help: "Not needed for most local servers." },
-  { key: "SUMMARY_CHUNK_MINUTES", group: "Summaries", label: "Minutes per chunk", type: "number", default: "25", min: 1, readBy: ["bot", "console"],
+    help: "Any server speaking OpenAI Chat Completions, up to the /v1 part: http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://openrouter.ai/api/v1, an Azure OpenAI or vLLM endpoint." },
+  { key: "OPENAI_API_KEY", group: "Summaries", live: true, label: "API key", type: "secret", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["openai-compatible"] }, help: "Sent as 'Authorization: Bearer <key>'. Not needed for most local servers." },
+  { key: "GEMINI_API_KEY", group: "Summaries", live: true, label: "Gemini API key", type: "secret", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["gemini", "vertex-ai"] },
+    help: "From Google AI Studio. For Vertex AI, only for express mode: leave it blank when a Google Cloud project is set." },
+  { key: "GOOGLE_GEMINI_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+    blankMeans: "https://generativelanguage.googleapis.com", showIf: { key: "LLM_PROVIDER", values: ["gemini"] },
+    help: "A gateway or proxy speaking the Gemini API." },
+  { key: "GOOGLE_CLOUD_PROJECT", group: "Summaries", live: true, label: "Google Cloud project", type: "string", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["vertex-ai"] }, help: "The project id with the Vertex AI API enabled." },
+  { key: "GOOGLE_CLOUD_LOCATION", group: "Summaries", live: true, label: "Location", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "global", showIf: { key: "LLM_PROVIDER", values: ["vertex-ai"] }, help: "A Vertex AI region such as us-central1 or europe-west4, or global." },
+  { key: "GOOGLE_APPLICATION_CREDENTIALS", group: "Summaries", live: true, label: "Service account key file", type: "path", default: "",
+    readBy: ["bot", "console"], blankMeans: "application default credentials", showIf: { key: "LLM_PROVIDER", values: ["vertex-ai"] },
+    help: "A service account's JSON key. Blank: the credentials from `gcloud auth application-default login`, or the machine's own on Google Cloud." },
+  { key: "GOOGLE_VERTEX_BASE_URL", group: "Summaries", live: true, label: "Base URL", type: "url", default: "", readBy: ["bot", "console"],
+    blankMeans: "the location's Vertex AI endpoint", showIf: { key: "LLM_PROVIDER", values: ["vertex-ai"] },
+    help: "A Private Service Connect endpoint or a gateway in front of Vertex AI." },
+  { key: "AZURE_OPENAI_ENDPOINT", group: "Summaries", live: true, label: "Endpoint", type: "url", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["azure-openai"] }, help: "Your resource's endpoint, e.g. https://my-resource.openai.azure.com. Set Model to the deployment name." },
+  { key: "AZURE_OPENAI_API_KEY", group: "Summaries", live: true, label: "Azure OpenAI key", type: "secret", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["azure-openai"] },
+    help: "Key 1 or 2 from the resource. For Microsoft Entra ID instead, leave it blank and put 'Authorization: Bearer <token>' in Extra headers." },
+  { key: "OPENAI_API_VERSION", group: "Summaries", live: true, label: "API version", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "2024-10-21", showIf: { key: "LLM_PROVIDER", values: ["azure-openai"] },
+    help: "The Azure OpenAI api-version. Structured output needs 2024-08-01-preview or later." },
+  { key: "AWS_REGION", group: "Summaries", live: true, label: "AWS region", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "the AWS profile's region", showIf: { key: "LLM_PROVIDER", values: ["bedrock"] }, help: "e.g. us-east-1, eu-central-1. The model must be enabled there." },
+  { key: "AWS_PROFILE", group: "Summaries", live: true, label: "AWS profile", type: "string", default: "", readBy: ["bot", "console"],
+    blankMeans: "the default credential chain", showIf: { key: "LLM_PROVIDER", values: ["bedrock"] },
+    help: "A profile from ~/.aws/config (access keys, SSO via `aws sso login`, or a role). Blank: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment, the default profile, or the machine's role." },
+  { key: "AWS_BEARER_TOKEN_BEDROCK", group: "Summaries", live: true, label: "Bedrock API key", type: "secret", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["bedrock"] }, help: "A Bedrock API key, used instead of AWS credentials when set." },
+  { key: "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", group: "Summaries", live: true, label: "Endpoint", type: "url", default: "", readBy: ["bot", "console"],
+    blankMeans: "the region's Bedrock Runtime endpoint", showIf: { key: "LLM_PROVIDER", values: ["bedrock"] },
+    help: "A VPC interface endpoint, a FIPS endpoint or a gateway." },
+  { key: "LLM_HEADERS", group: "Summaries", live: true, label: "Extra headers", type: "string", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["anthropic", "xai", "openai-compatible", "gemini", "vertex-ai", "azure-openai", "bedrock"] },
+    help: "Sent with every request, as 'Name: value' pairs separated by ';', or a JSON object. e.g. 'HTTP-Referer: https://example.org; X-Title: ScribBot' for OpenRouter, 'api-key: <key>' for Azure OpenAI, or a gateway's own auth header. A header named here replaces the one ScribBot would send." },
+  { key: "LLM_REQUEST_OPTIONS", group: "Summaries", live: true, label: "Extra request options", type: "string", default: "", readBy: ["bot", "console"],
+    showIf: { key: "LLM_PROVIDER", values: ["anthropic", "xai", "openai-compatible", "gemini", "vertex-ai", "azure-openai", "bedrock"] },
+    help: "A JSON object merged into every request, using the provider's own field names (Gemini: GenerateContentConfig fields such as thinkingConfig or safetySettings; Bedrock: Converse fields such as inferenceConfig, additionalModelRequestFields or guardrailConfig). e.g. {\"temperature\": 0.3}, {\"max_tokens\": 32000}, {\"max_completion_tokens\": 32000, \"reasoning_effort\": \"high\"} for OpenAI reasoning models, or {\"provider\": {\"order\": [\"anthropic\"]}} for OpenRouter. They override ScribBot's defaults; model, messages and the output format stay ScribBot's." },
+  { key: "LLM_CLI_PATH", group: "Summaries", live: true, label: "CLI path", type: "path", default: "", readBy: ["bot", "console"],
+    blankMeans: "codex, agy, claude or grok on PATH",
+    showIf: { key: "LLM_PROVIDER", values: ["codex", "antigravity", "claude-code", "grok-cli"] },
+    help: "Sign in with the CLI first (`codex login`, `grok login`, or start `agy` or `claude` once). It runs once per summary pass, so summaries are slower than through an API." },
+  { key: "SUMMARY_CHUNK_MINUTES", group: "Summaries", live: true, label: "Minutes per chunk", type: "number", default: "25", min: 1, readBy: ["bot", "console"],
     advanced: true, help: "Minutes of transcript per extraction pass." },
-  { key: "AUTO_SUMMARIZE", group: "Summaries", label: "Summarize automatically", type: "bool", default: "false", options: yesNo,
+  { key: "AUTO_SUMMARIZE", group: "Summaries", live: true, label: "Summarize automatically", type: "bool", default: "false", options: yesNo,
     readBy: ["bot", "console"],
     help: "Send every transcript to the LLM when it's done. Off: sessions end at a saved transcript until someone asks for a summary." },
 
@@ -191,8 +272,10 @@ export const SETTINGS: Setting[] = [
   { key: "AUDIO_RETENTION_DAYS", group: "Storage and retention", label: "Keep audio (days)", type: "number", default: "14", min: 0,
     readBy: ["bot", "console"], showIf: { key: "DELETE_AUDIO_AFTER_TRANSCRIBE", values: ["false"] },
     help: "When audio is kept: delete it this many days after a session is summarized (0 = forever)." },
-  { key: "TRASH_RETENTION_DAYS", group: "Storage and retention", label: "Empty the trash after (days)", type: "number", default: "30", min: 0,
-    readBy: BOT, help: "Sessions deleted from the Console wait in data/trash this long (0 = until emptied by hand)." },
+  { key: "TRASH_RETENTION_DAYS", group: "Storage and retention", label: "Empty the trash after (days)", type: "number", default: "14", min: 0,
+    readBy: BOT, help: "Sessions moved to the trash wait in data/trash this many days, then are deleted permanently (0 = until emptied by hand)." },
+  { key: "TRASH_CONFIRM", group: "Storage and retention", label: "Confirm before moving a session to the trash", type: "bool", default: "true", options: yesNo,
+    readBy: ["console"], help: "Show how long a session will be kept in the trash before it moves there. \"Don't show this again\" in that dialog sets this to No." },
 
   // ---------------------------------------------------------------- Network
   { key: "API_HOST", group: "Network", label: "Bot API address", type: "string", default: "127.0.0.1", readBy: ["bot", "console"], advanced: true,

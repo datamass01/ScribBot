@@ -1,11 +1,15 @@
-import { config as loadEnv } from "dotenv";
+import { config as loadEnv, parse as parseEnv } from "dotenv";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-loadEnv({ path: path.join(REPO_ROOT, ".env"), quiet: true });
+const ENV_FILE = path.join(REPO_ROOT, ".env");
+// Set in the real environment before .env was loaded: these win over .env, now and on every re-read.
+const realEnvKeys = new Set(Object.keys(process.env));
+loadEnv({ path: ENV_FILE, quiet: true });
 
 const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
 const optionalString = z.preprocess(emptyToUndefined, z.string().optional());
@@ -43,12 +47,42 @@ const EnvSchema = z.object({
 
   WORKER_URL: z.string().default("http://127.0.0.1:7421"),
 
-  LLM_PROVIDER: z.enum(["anthropic", "xai", "openai-compatible"]).default("anthropic"),
+  LLM_PROVIDER: z
+    .enum([
+      "anthropic", "xai", "openai-compatible", "gemini", "vertex-ai", "azure-openai", "bedrock",
+      "codex", "antigravity", "claude-code", "grok-cli",
+    ])
+    .default("anthropic"),
   LLM_MODEL: optionalString,
   ANTHROPIC_API_KEY: optionalString,
+  ANTHROPIC_BASE_URL: optionalString,
   XAI_API_KEY: optionalString,
+  XAI_BASE_URL: optionalString,
   OPENAI_BASE_URL: optionalString,
   OPENAI_API_KEY: optionalString,
+  // Google Gemini API and Vertex AI, under the names Google's SDK reads.
+  GEMINI_API_KEY: optionalString,
+  GOOGLE_GEMINI_BASE_URL: optionalString,
+  GOOGLE_CLOUD_PROJECT: optionalString,
+  GOOGLE_CLOUD_LOCATION: optionalString,
+  GOOGLE_APPLICATION_CREDENTIALS: optionalString,
+  GOOGLE_VERTEX_BASE_URL: optionalString,
+  // Azure OpenAI, under the names the openai SDK's AzureOpenAI reads. LLM_MODEL is the deployment.
+  AZURE_OPENAI_ENDPOINT: optionalString,
+  AZURE_OPENAI_API_KEY: optionalString,
+  OPENAI_API_VERSION: optionalString,
+  // Amazon Bedrock, under the AWS SDK's names. Blank: the AWS default credential chain.
+  AWS_REGION: optionalString,
+  AWS_PROFILE: optionalString,
+  AWS_BEARER_TOKEN_BEDROCK: optionalString,
+  AWS_ENDPOINT_URL_BEDROCK_RUNTIME: optionalString,
+  // API providers only, passed through as written (bot/src/summarize/api-options.ts): extra HTTP
+  // headers, and extra request-body fields as a JSON object. Checked when a summary starts.
+  LLM_HEADERS: optionalString,
+  LLM_REQUEST_OPTIONS: optionalString,
+  // codex / antigravity / claude-code / grok-cli: the CLI to run when it isn't on PATH as
+  // `codex` / `agy` / `claude` / `grok`.
+  LLM_CLI_PATH: optionalString,
   SUMMARY_CHUNK_MINUTES: z.coerce.number().positive().default(25),
   // Off by default: sessions stop at a saved transcript, and nothing is sent to an LLM until
   // someone runs /scrib summarize.
@@ -70,14 +104,136 @@ const EnvSchema = z.object({
   BACKLOG_WARN_MINUTES: z.coerce.number().min(0).default(10),
   // Daily bot log files in DATA_DIR/logs, kept this many days (0 = no log files).
   LOG_RETENTION_DAYS: z.coerce.number().min(0).default(14),
-  // Sessions deleted from the Console wait in DATA_DIR/trash this many days (0 = until emptied by hand).
-  TRASH_RETENTION_DAYS: z.coerce.number().min(0).default(30),
+  // Sessions trashed from the Console wait in DATA_DIR/trash this many days (0 = until emptied by hand).
+  TRASH_RETENTION_DAYS: z.coerce.number().min(0).default(14),
 });
 
 /** The env schema, exported for the settings catalog test (bot/src/settings-catalog.ts). */
 export { EnvSchema };
 
 const env = EnvSchema.parse(process.env);
+
+// ---------------------------------------------------------------- live summary settings
+//
+// Summaries build their provider fresh for every run (and the CLI providers start a new process per
+// request), so nothing needs a restart to pick up a new provider, model, key or CLI path. These keys
+// are re-read from .env whenever the file changes (its mtime and size), with the same precedence as at
+// startup: a variable set in the real environment wins. The settings catalog marks them `live`.
+
+/** The .env keys the bot re-reads for each summary instead of only at startup. */
+export const SUMMARY_KEYS = [
+  "LLM_PROVIDER",
+  "LLM_MODEL",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+  "XAI_API_KEY",
+  "XAI_BASE_URL",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_GEMINI_BASE_URL",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_VERTEX_BASE_URL",
+  "AZURE_OPENAI_ENDPOINT",
+  "AZURE_OPENAI_API_KEY",
+  "OPENAI_API_VERSION",
+  "AWS_REGION",
+  "AWS_PROFILE",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+  "LLM_HEADERS",
+  "LLM_REQUEST_OPTIONS",
+  "LLM_CLI_PATH",
+  "SUMMARY_CHUNK_MINUTES",
+  "AUTO_SUMMARIZE",
+] as const;
+
+const SummaryEnvSchema = EnvSchema.pick(Object.fromEntries(SUMMARY_KEYS.map((k) => [k, true])) as { [K in (typeof SUMMARY_KEYS)[number]]: true });
+
+function buildSummaryConfig(e: z.infer<typeof SummaryEnvSchema>) {
+  return {
+    llm: {
+      provider: e.LLM_PROVIDER,
+      model: e.LLM_MODEL,
+      anthropicApiKey: e.ANTHROPIC_API_KEY,
+      anthropicBaseUrl: e.ANTHROPIC_BASE_URL,
+      xaiApiKey: e.XAI_API_KEY,
+      xaiBaseUrl: e.XAI_BASE_URL,
+      openaiBaseUrl: e.OPENAI_BASE_URL,
+      openaiApiKey: e.OPENAI_API_KEY,
+      geminiApiKey: e.GEMINI_API_KEY,
+      geminiBaseUrl: e.GOOGLE_GEMINI_BASE_URL,
+      googleCloudProject: e.GOOGLE_CLOUD_PROJECT,
+      googleCloudLocation: e.GOOGLE_CLOUD_LOCATION,
+      googleCredentials: e.GOOGLE_APPLICATION_CREDENTIALS,
+      vertexBaseUrl: e.GOOGLE_VERTEX_BASE_URL,
+      azureEndpoint: e.AZURE_OPENAI_ENDPOINT,
+      azureApiKey: e.AZURE_OPENAI_API_KEY,
+      azureApiVersion: e.OPENAI_API_VERSION,
+      awsRegion: e.AWS_REGION,
+      awsProfile: e.AWS_PROFILE,
+      awsBedrockToken: e.AWS_BEARER_TOKEN_BEDROCK,
+      bedrockEndpoint: e.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
+      headers: e.LLM_HEADERS,
+      requestOptions: e.LLM_REQUEST_OPTIONS,
+      cliPath: e.LLM_CLI_PATH,
+      chunkMinutes: e.SUMMARY_CHUNK_MINUTES,
+    },
+    autoSummarize: e.AUTO_SUMMARIZE,
+  };
+}
+
+export type SummaryConfig = ReturnType<typeof buildSummaryConfig>;
+
+/**
+ * A function returning the summary settings as `file` says now. Cheap when the file hasn't changed
+ * (one stat). Keys in `realEnv` come from process.env instead, as dotenv does at startup. If the new
+ * values don't validate, or the file can't be read, the last good ones stay in use and it's logged
+ * once. Exported for tests; the bot uses summaryConfig().
+ */
+export function summaryReader(file: string, realEnv: ReadonlySet<string>, initial: SummaryConfig): () => SummaryConfig {
+  const stampOf = () => {
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return "missing";
+    }
+  };
+  let state = { stamp: stampOf(), value: initial };
+  return () => {
+    const stamp = stampOf();
+    if (stamp === state.stamp) return state.value;
+    let fromFile: Record<string, string>;
+    try {
+      fromFile = parseEnv(fs.readFileSync(file));
+    } catch (err) {
+      console.warn(`[config] couldn't re-read .env (${err instanceof Error ? err.message : String(err)}); keeping the summary settings in use`);
+      state = { stamp, value: state.value };
+      return state.value;
+    }
+    const merged = Object.fromEntries(SUMMARY_KEYS.map((k) => [k, realEnv.has(k) ? process.env[k] : fromFile[k]]));
+    const parsed = SummaryEnvSchema.safeParse(merged);
+    if (!parsed.success) {
+      const keys = [...new Set(parsed.error.issues.map((i) => String(i.path[0])))].join(", ");
+      console.warn(`[config] .env has invalid summary settings (${keys}); keeping the ones in use`);
+      state = { stamp, value: state.value };
+      return state.value;
+    }
+    const value = buildSummaryConfig(parsed.data);
+    const before = state.value.llm;
+    if (before.provider !== value.llm.provider || before.model !== value.llm.model) {
+      console.log(`[config] summaries now use ${value.llm.provider}${value.llm.model ? ` / ${value.llm.model}` : ""} (from .env)`);
+    }
+    state = { stamp, value };
+    return value;
+  };
+}
+
+/** The summary settings as .env says now: config.llm and config.autoSummarize read through this. */
+export const summaryConfig = summaryReader(ENV_FILE, realEnvKeys, buildSummaryConfig(env));
 
 const origins = env.FOUNDRY_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean);
 /** The URL a browser on this machine uses to reach the bot's API. */
@@ -116,17 +272,14 @@ export const config = {
     announce: env.FOUNDRY_ANNOUNCE,
   },
   workerUrl: env.WORKER_URL.replace(/\/$/, ""),
-  llm: {
-    provider: env.LLM_PROVIDER,
-    model: env.LLM_MODEL,
-    anthropicApiKey: env.ANTHROPIC_API_KEY,
-    xaiApiKey: env.XAI_API_KEY,
-    openaiBaseUrl: env.OPENAI_BASE_URL,
-    openaiApiKey: env.OPENAI_API_KEY,
-    chunkMinutes: env.SUMMARY_CHUNK_MINUTES,
+  /** The summarizer. Re-read from .env when it changes, so a new provider or model needs no restart. */
+  get llm() {
+    return summaryConfig().llm;
   },
-  /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. */
-  autoSummarize: env.AUTO_SUMMARIZE,
+  /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. Live, like llm. */
+  get autoSummarize() {
+    return summaryConfig().autoSummarize;
+  },
   /** Transcribe each clip as it is recorded, then delete the WAV once its text is saved. */
   deleteAudioAfterTranscribe: env.DELETE_AUDIO_AFTER_TRANSCRIBE,
   audioRetentionDays: env.AUDIO_RETENTION_DAYS,

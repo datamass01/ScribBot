@@ -1,18 +1,22 @@
 /**
- * One-time move from the old flat layout (DATA_DIR/sessions/<id>/) to campaign folders
- * (DATA_DIR/campaigns/<world>/sessions/<NNN>/recordings/<id>/, docs/design.md §6.1).
+ * One-time moves to the current layout, DATA_DIR/campaigns/<world>/sessions/<game id>/recordings/<id>/
+ * (docs/design.md §6.1):
+ *  - "flat": from the old flat DATA_DIR/sessions/<id>/ into a campaign folder;
+ *  - "rename": a game folder still named by number (campaigns/<world>/sessions/012/) renamed to its
+ *    id, so numbers can change without touching folders. Contents don't change.
  *
- * planLayout() only reads and says what would happen. applyLayout() first copies DATA_DIR/sessions,
- * DATA_DIR/trash and the database to DATA_DIR/backups/layout-<time>/, then moves one game at a
- * time, recording each move in the database as it lands, so an interruption leaves every session
- * findable. Used by `npm run migrate-layout` (bot stopped) and the Console (bot running, idle).
+ * planLayout() only reads and says what would happen. applyLayout() first copies the database (and,
+ * for "flat" moves, DATA_DIR/sessions and DATA_DIR/trash) to DATA_DIR/backups/layout-<time>/, then
+ * moves one game at a time, recording each move in the database as it lands, so an interruption
+ * leaves every session findable. Used by `npm run migrate-layout` (bot stopped) and the Console
+ * (bot running, idle).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
-import { UNASSIGNED_FOLDER, recordingRel, sessionFolderName, worldFolderName, type CampaignRow, type SessionRow, type Store } from "./db.js";
+import { UNASSIGNED_FOLDER, gameFolderOf, recordingRel, sessionFolderName, worldFolderName, type CampaignRow, type SessionRow, type Store } from "./db.js";
 import { renameWithRetry } from "./fsutil.js";
-import { composeSession, moveFolder } from "./layout.js";
+import { composeSession, moveFolder, removeIfEmpty } from "./layout.js";
 import { mergedInto } from "./merge.js";
 import { trashFolder } from "./trash.js";
 
@@ -23,11 +27,13 @@ const GAME_FILES = new Set(["summary.json", "summary.md", "notes.json", "story"]
 const PREMERGE = /^(timeline\.json|transcript\.json|transcript\.md|chatlog\.json)\.premerge-(\d+)$/;
 
 export interface PlannedGame {
+  /** "flat": out of data/sessions/<id>; "rename": a numbered game folder renamed to its id. */
+  kind: "flat" | "rename";
   id: string;
   oldNumber: number;
   number: number;
   campaign: string;
-  /** Where its folder is now (null: none on disk) and where it goes. */
+  /** Where its folder is now (null: none on disk, or in the trash for a rename) and where it goes. */
   from: string | null;
   to: string;
   inTrash: boolean;
@@ -148,12 +154,13 @@ export function planLayout(store: Store): LayoutPlan {
     if (from && fs.readdirSync(from).some((f) => PREMERGE.test(f))) notes.push("its own files from before the merge are restored from the *.premerge copies");
     if (!from) notes.push("no folder on disk (nothing was recorded, or it was removed); only the database is updated");
     games.push({
+      kind: "flat",
       id: s.id,
       oldNumber: s.number,
       number,
       campaign: camp.folder,
       from,
-      to: path.join(config.dataDir, "campaigns", camp.folder, "sessions", sessionFolderName(number)),
+      to: path.join(config.dataDir, "campaigns", camp.folder, "sessions", s.id),
       inTrash: Boolean(s.deleted_at),
       merged,
       notes,
@@ -165,7 +172,23 @@ export function planLayout(store: Store): LayoutPlan {
   }
   for (const [world, n] of named) if (world !== mostNamed && n) warnings.push(`Sessions from more than one Foundry world: ${[...named.keys()].join(", ")}. Each goes to its own campaign.`);
 
-  const backupBytes = folderBytes(config.sessionsDir) + folderBytes(config.trashDir);
+  // Games in the campaign layout whose folder is still named by number: renamed to the game's id.
+  for (const s of all) {
+    if (!s.dir || s.merged_into_id) continue;
+    const folder = gameFolderOf(s.dir);
+    if (!folder || folder === s.id) continue;
+    const campaign = s.dir.split("/")[1]!;
+    const from = path.join(config.dataDir, "campaigns", campaign, "sessions", folder);
+    const inTrash = Boolean(s.deleted_at);
+    const merged = store.recordingsOf(s.id).filter((r) => r.id !== s.id).map((r) => ({ id: r.id, number: r.number, from: null }));
+    const notes: string[] = [];
+    if (!inTrash && !exists(from)) notes.push("no folder on disk; only the database is updated");
+    games.push({ kind: "rename", id: s.id, oldNumber: s.number, number: s.number, campaign, from: !inTrash && exists(from) ? from : null,
+      to: path.join(config.dataDir, "campaigns", campaign, "sessions", s.id), inTrash, merged, notes });
+  }
+
+  const flat = games.some((g) => g.kind === "flat");
+  const backupBytes = flat ? folderBytes(config.sessionsDir) + folderBytes(config.trashDir) : 0;
   return { games, campaigns: [...campaigns.values()], backupDir, backupBytes, warnings: [...new Set(warnings)] };
 }
 
@@ -217,6 +240,8 @@ function restructureMerged(flat: string, root: string, id: string, number: numbe
 
 function backup(plan: LayoutPlan) {
   fs.mkdirSync(plan.backupDir, { recursive: true });
+  // A rename doesn't change any file, so only the old flat folders are copied.
+  if (!plan.games.some((g) => g.kind === "flat")) return plan.backupDir;
   for (const [src, name] of [[config.sessionsDir, "sessions"], [config.trashDir, "trash"]] as const) {
     if (exists(src)) fs.cpSync(src, path.join(plan.backupDir, name), { recursive: true });
   }
@@ -241,16 +266,25 @@ export function applyLayout(store: Store, plan: LayoutPlan = planLayout(store)):
   }
   let moved = 0;
   for (const g of plan.games) {
+    if (g.kind === "rename") {
+      try {
+        renameGameFolder(store, g);
+        moved++;
+      } catch (err) {
+        errors.push(`Session ${g.oldNumber} (${g.id}): ${(err as Error).message}`);
+      }
+      continue;
+    }
     const c = camp.get(g.campaign) ?? store.defaultCampaign();
     try {
       // In the trash the game's folder is trash/<id>, restructured in place, so restoring puts it back as a game.
       const root = g.inTrash ? trashFolder(g.id) : g.to;
       if (g.from) restructure(g.from, root, g.id);
-      store.setSessionPlace(g.id, { dir: recordingRel(c.folder, g.number, g.id), campaignId: c.id, number: g.number });
+      store.setSessionPlace(g.id, { dir: recordingRel(c.folder, g.id, g.id), campaignId: c.id, number: g.number });
       for (const m of g.merged) {
         if (m.from) restructureMerged(m.from, root, m.id, m.number);
         store.db.transaction(() => {
-          store.setSessionPlace(m.id, { dir: recordingRel(c.folder, g.number, m.id), campaignId: c.id });
+          store.setSessionPlace(m.id, { dir: recordingRel(c.folder, g.id, m.id), campaignId: c.id });
           store.setMergedInto(m.id, g.id);
         })();
       }
@@ -262,4 +296,16 @@ export function applyLayout(store: Store, plan: LayoutPlan = planLayout(store)):
   }
   console.log(`[layout] moved ${moved} session(s) to the campaign layout; backup in ${backupDir}`);
   return { moved, backupDir, errors };
+}
+
+/** campaigns/<world>/sessions/012 → campaigns/<world>/sessions/<id>, then its recordings' `dir`. */
+function renameGameFolder(store: Store, g: PlannedGame) {
+  const row = store.getSession(g.id);
+  if (!row?.dir) throw new Error("No longer in the campaign layout.");
+  const campaignId = row.campaign_id!;
+  if (g.from && exists(g.from)) moveFolder(g.from, g.to);
+  store.db.transaction(() => {
+    for (const r of store.recordingsOf(g.id)) store.setSessionPlace(r.id, { dir: recordingRel(g.campaign, g.id, r.id), campaignId: r.campaign_id ?? campaignId });
+  })();
+  if (g.from) removeIfEmpty(path.dirname(g.from), path.join(config.dataDir, "campaigns"));
 }

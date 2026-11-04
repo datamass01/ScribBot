@@ -142,8 +142,9 @@ describe("Console admin API", () => {
     expect((await call("DELETE", `/admin/trash/${s.id}`)).status).toBe(200);
     expect(fs.existsSync(trash)).toBe(false);
     expect(store.getSession(s.id)).toMatchObject({ purged_at: expect.any(String) });
-    // The number is never handed out again.
-    expect(newSession().number).toBeGreaterThan(s.number);
+    // A trashed number is free again: the next session follows the highest one not in the trash.
+    const highest = Math.max(0, ...store.listSessions(1000).map((x) => x.number));
+    expect(newSession().number).toBe(highest + 1);
   });
 
   it("won't delete a session that is recording or still in the live folder list twice", async () => {
@@ -251,6 +252,17 @@ describe("Console admin API", () => {
     expect((await call("POST", "/admin/restart", {})).body).toEqual({ ok: true, restarting: true });
     await new Promise((r) => setTimeout(r, 300));
     expect(restarts).toEqual(["restart requested from the Console"]);
+  });
+
+  it("lists the models a provider accepts, for the Console's model help", async () => {
+    const claude = await call("GET", "/admin/llm/models?provider=claude-code");
+    expect(claude.status).toBe(200);
+    expect(claude.body).toMatchObject({ provider: "claude-code", source: "fixed" });
+    expect(claude.body.models.map((m: { id: string }) => m.id)).toEqual(expect.arrayContaining(["opus", "sonnet", "claude-opus-5-5"]));
+    const local = await call("GET", "/admin/llm/models?provider=openai-compatible");
+    expect(local.body.models).toEqual([]);
+    expect(local.body.notes.join(" ")).toMatch(/ollama list/);
+    expect((await call("GET", "/admin/llm/models?provider=nope")).status).toBe(400);
   });
 
   it("says why an LLM test can't run without credentials", async () => {

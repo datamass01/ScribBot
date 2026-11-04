@@ -3,19 +3,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { config } from "../config.js";
-import type { SessionRow, Store } from "../db.js";
+import { gameFolderOf, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
-import { mergedInto } from "../merge.js";
+import { mergedInto, unusableReason } from "../merge.js";
 import { sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
 import { announceStory, findStoryFile, storyPath } from "../story.js";
 import { createProvider } from "../summarize/provider.js";
+import { listModels } from "../summarize/models.js";
 import type { SummaryFile } from "../summarize/schema.js";
 import { moveToCampaign, sessionTimeline } from "../layout.js";
 import { applyLayout, planLayout } from "../migrate-layout.js";
 import { workerHealth } from "../worker-client.js";
-import { deleteSession, purgeSession, restoreSession, trashFolder, unusableReason } from "../trash.js";
-import { llmConfigProblem } from "./status.js";
+import { deleteSession, purgeSession, restoreSession, trashFolder } from "../trash.js";
+import { llmConfigProblem } from "../summarize/readiness.js";
 
 /**
  * The Console's API (docs/console-design.md §3.2). Each route wraps what a slash command already
@@ -137,6 +138,8 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       ...campaignName(s.campaign_id),
       /** Still in the old flat data/sessions/<id> folder (the layout migration hasn't run). */
       legacyLayout: !s.dir,
+      /** In a campaign folder still named by number (sessions/012); the layout migration renames it to its id. */
+      numberedFolder: Boolean(s.dir && !s.merged_into_id && gameFolderOf(s.dir) !== s.id),
       recordings: sessionRecordings(s.id).length,
       number: s.number,
       title: s.title,
@@ -339,8 +342,8 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/sessions/:id/restore",
     handle((req: IdReq) => {
       const s = find(req.params.id);
-      restoreSession(store, s);
-      return { ok: true, session: summary(find(s.id)) };
+      const r = restoreSession(store, s, (id) => sessions.isRecording(id));
+      return { ok: true, session: summary(find(s.id)), number: r.number, renumbered: r.renumbered, message: r.message };
     }),
   );
   app.delete(
@@ -421,7 +424,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       const plan = planLayout(store);
       return {
         pending: plan.games.length,
-        plan: plan.games.map((g) => ({ number: g.oldNumber, newNumber: g.number, campaign: g.campaign, from: g.from, to: g.to, inTrash: g.inTrash,
+        plan: plan.games.map((g) => ({ kind: g.kind, id: g.id, number: g.oldNumber, newNumber: g.number, campaign: g.campaign, from: g.from, to: g.to, inTrash: g.inTrash,
           merged: g.merged.map((m) => m.number), notes: g.notes })),
         campaigns: plan.campaigns,
         warnings: plan.warnings,
@@ -509,6 +512,21 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       purgeExpiredAudio(store, config.audioRetentionDays);
       const after = store.listSessions(100_000).filter((s) => s.audio_purged).length;
       return { ok: true, purged: after - before };
+    }),
+  );
+
+  // The model ids a provider accepts, for the Console's "Which models?" box. `provider` is the one
+  // selected in the form (maybe unsaved); LLM_CLI_PATH applies only if it was saved for that provider.
+  app.get(
+    "/admin/llm/models",
+    handle(async (req: FastifyRequest<{ Querystring: { provider?: string; refresh?: string } }>) => {
+      const provider = req.query.provider || config.llm.provider;
+      const cliPath = provider === config.llm.provider ? config.llm.cliPath : undefined;
+      try {
+        return await listModels(provider, { cliPath, refresh: req.query.refresh === "1" });
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+      }
     }),
   );
 

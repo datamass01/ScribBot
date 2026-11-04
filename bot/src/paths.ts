@@ -4,8 +4,8 @@ import { config } from "./config.js";
 /**
  * Where a session's files are (docs/design.md §6.1).
  *
- *   DATA_DIR/campaigns/<world>/sessions/<NNN>/             the game: transcript, chat log, summary, story
- *   DATA_DIR/campaigns/<world>/sessions/<NNN>/recordings/<id>/   one Discord recording: timeline, audio,
+ *   DATA_DIR/campaigns/<world>/sessions/<game id>/          the game: transcript, chat log, summary, story
+ *   DATA_DIR/campaigns/<world>/sessions/<game id>/recordings/<id>/   one Discord recording: timeline, audio,
  *                                                            the worker's cache, its own transcript and chat log
  *
  * A session row in the database is one recording; a merged recording's folder moves into the
@@ -47,7 +47,7 @@ export function sessionRecordings(sessionId: string): string[] {
 
 export function sessionPaths(sessionId: string) {
   const recording = recordingDir(sessionId);
-  // In the campaign layout the game's folder is two levels up (…/<NNN>/recordings/<id>).
+  // In the campaign layout the game's folder is two levels up (…/<game id>/recordings/<id>).
   const dir = path.basename(path.dirname(recording)) === "recordings" ? path.dirname(path.dirname(recording)) : recording;
   return {
     /** The game's folder: the files people open. Same as `recording` in the old flat layout. */
