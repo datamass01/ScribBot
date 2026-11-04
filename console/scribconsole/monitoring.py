@@ -205,6 +205,13 @@ def _dur(sec: float) -> str:
     return f"{h}h {m:02d}m" if h else f"{m}m" if m else f"{sec}s"
 
 
+def _converted_between(a: tuple, b: tuple) -> int:
+    """Clips converted between two samples: the larger of what the session caches and the worker's live counters gained."""
+    by_session = sum(max(0, n - a[1][sid]) for sid, n in b[1].items() if sid in a[1])
+    by_worker = (b[3] + b[4] - a[3] - a[4]) if b[3] >= a[3] else 0  # < : worker restarted
+    return max(by_session, by_worker)
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
@@ -214,6 +221,25 @@ _WORD = re.compile(r"[\w']+")
 
 def _words(text: str) -> list[str]:
     return [w.lower() for w in _WORD.findall(text)]
+
+
+CAMPAIGN_OF_PATH = re.compile(r"(?:^|[\\/])campaigns[\\/]([^\\/]+)[\\/]sessions(?:[\\/]|$)")
+SAFE_FOLDER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def campaign_folder_of(folder: Path | str) -> str | None:
+    """The campaign folder of a session or recording folder, or None (old flat layout); the bot's campaignFolderOfPath()."""
+    m = CAMPAIGN_OF_PATH.search(str(folder))
+    return m.group(1) if m else None
+
+
+def notes_file(campaign_dir: Path, name: str, folder: str | None) -> Path:
+    """A campaign's own note (CAMPAIGN_DIR/<folder>/<name>, the Campaign tab), else the shared one; the bot's campaignNoteFile()."""
+    if folder and SAFE_FOLDER.fullmatch(folder):
+        own = campaign_dir / folder / name
+        if own.exists():
+            return own
+    return campaign_dir / name
 
 
 def glossary_names(text: str) -> list[str]:
@@ -378,7 +404,10 @@ class Monitor:
         self._status_lock = threading.Lock()
         self._cached: tuple[float, dict[str, Any]] | None = None
         # (time, {session id: clips converted}, queue depth, worker live done, worker live failed), newest last
-        self._samples: deque[tuple[float, dict[str, int], int | None, int, int]] = deque()
+        # (time, converted per session, queued, live done, live failed, working)
+        self._samples: deque[tuple[float, dict[str, int], int | None, int, int, bool]] = deque()
+        self._was_waiting = False
+        self._last_rate: float | None = None  # the last rate measured over enough working time, kept through silence
         self._file_memo: dict[Path, tuple[tuple[int, int], Any]] = {}
         self._clip_seen: dict[str, tuple[int, float]] = {}  # recording session → (clips, when that count changed)
         self._progress_seen: tuple[int, float] | None = None  # (total converted, when it last grew)
@@ -653,7 +682,9 @@ class Monitor:
             s for s in status.get("sessions") or []
             if s["id"] in recordings or s["status"] in ACTIVE_STATUSES or s.get("processing") or self._recent_failed(s)
         ]
-        hotwords = self.hotwords([p.get("character") for r in recordings.values() for p in r.get("speakers") or []])
+        live = next(iter(recordings), None)
+        hotwords = self.hotwords([p.get("character") for r in recordings.values() for p in r.get("speakers") or []],
+                                 campaign_folder_of(self.recording_folder(live)) if live else None)
         conversions = [self.conversion(s, recordings.get(s["id"]), bot_online, hotwords) for s in sessions]
         queue = self._measure(conversions, queued, worker)
         self._track_crash(bot_online, list(recordings.values()), status.get("now"))
@@ -679,9 +710,9 @@ class Monitor:
         except OSError:
             return False
 
-    def hotwords(self, party: list[str | None]) -> dict[str, Any]:
-        """Roughly the keyword list the bot sends the worker with each clip (campaign.ts sttKeywords)."""
-        glossary = self._read_memo(self.cfg.campaign_dir / "glossary.md", lambda p: glossary_names(p.read_text("utf-8")))
+    def hotwords(self, party: list[str | None], campaign: str | None = None) -> dict[str, Any]:
+        """Roughly the keyword list the bot sends the worker with each clip (campaign.ts sttKeywords), for a campaign folder."""
+        glossary = self._read_memo(notes_file(self.cfg.campaign_dir, "glossary.md", campaign), lambda p: glossary_names(p.read_text("utf-8")))
         actors = self._read_memo(
             self.cfg.data_dir / "foundry-actors.json",
             lambda p: list(dict.fromkeys(a["name"] for a in json.loads(p.read_text("utf-8")) if a.get("name")))[:MAX_ACTOR_NAMES],
@@ -750,27 +781,38 @@ class Monitor:
         counts = {c["sessionId"]: c["converted"] for c in conversions}
         live = worker.get("liveClips") or {}
         done, failed = int(live.get("done") or 0), int(live.get("failed") or 0)
-        self._samples.append((now, counts, queued, done, failed))
+        paused = bool(worker.get("paused"))
+        current = worker.get("current") if worker.get("reachable") else None
+        # Work that should be converting now. A failed session's clips wait for /scrib process instead.
+        waiting = bool(queued) or current is not None or any(c["phase"] != "failed" and c["pending"] > 0 for c in conversions)
+        self._samples.append((now, counts, queued, done, failed, waiting and not paused))
         while self._samples and now - self._samples[0][0] > RATE_WINDOW_S:
             self._samples.popleft()
-        first_t, first_counts, first_q, first_done, first_failed = self._samples[0]
+        first = self._samples[0]
+        first_t, first_q, first_failed = first[0], first[2], first[4]
         span = now - first_t
-        rate = trend = None
+        # The rate counts only working time: an interval with work waiting at either end, or with clips
+        # converted in it. Silence at the table (nothing to convert) would otherwise read as a slow worker.
+        samples = list(self._samples)
+        active = sum(b[0] - a[0] for a, b in zip(samples, samples[1:]) if a[5] or b[5] or _converted_between(a, b) > 0)
+        trend = None
         failed_recently = max(0, failed - first_failed) if failed >= first_failed else failed  # worker restarted
-        if span >= MIN_RATE_SPAN_S:
-            by_session = sum(max(0, n - first_counts[sid]) for sid, n in counts.items() if sid in first_counts)
-            by_worker = (done + failed - first_done - first_failed) if done >= first_done else 0
-            rate = round(max(by_session, by_worker) / span * 60, 1)
-            if queued is not None and first_q is not None:
-                trend = round((queued - first_q) / span * 60, 1)
+        if active >= MIN_RATE_SPAN_S:
+            self._last_rate = round(_converted_between(first, samples[-1]) / active * 60, 1)
+        rate = self._last_rate  # no working time in the window: the last measured rate still holds
+        if span >= MIN_RATE_SPAN_S and queued is not None and first_q is not None:
+            trend = round((queued - first_q) / span * 60, 1)
 
-        # Stuck: work waiting, nothing converted for a while.
+        # Stuck: work waiting, nothing converted for a while. Idle time counts from the last conversion,
+        # or from when work arrived after a quiet spell.
         total = sum(counts.values()) + done + failed
-        if self._progress_seen is None or total != self._progress_seen[0]:
+        if self._progress_seen is None or total != self._progress_seen[0] or (waiting and not self._was_waiting):
             self._progress_seen = (total, now)
+        self._was_waiting = waiting
         idle_for = now - self._progress_seen[1]
         pending = sum(c["pending"] for c in conversions)
-        paused = bool(worker.get("paused"))
+        # A clip started less than STALL_AFTER_S ago is progress in itself (the first one also loads the model).
+        clip_stuck = current is None or float(current.get("seconds") or 0) >= STALL_AFTER_S
         return {
             "paused": paused,
             "pausedReason": worker.get("pausedReason"),
@@ -782,9 +824,13 @@ class Monitor:
             "trendPerMin": trend,
             "etaSec": round(pending / rate * 60) if rate and pending else (0 if not pending else None),
             "windowSec": round(span),
+            "activeSec": round(active),
             "liveFailedRecently": failed_recently,
+            "busy": current is not None,
+            "busySec": round(float(current.get("seconds") or 0)) if current else None,
+            "waiting": waiting,
             "noProgressSec": round(idle_for),
-            "stalled": bool(queued) and not paused and idle_for >= STALL_AFTER_S,
+            "stalled": waiting and bool(worker.get("reachable")) and not paused and idle_for >= STALL_AFTER_S and clip_stuck,
         }
 
     def _track_crash(self, bot_online: bool, recordings: list[dict[str, Any]], now_iso: str | None) -> None:
@@ -852,9 +898,16 @@ class Monitor:
             add("paused", "warn", f"Transcription is paused{why} with {_plural(queue['depth'] or 0, 'clip')} queued. "
                 "Resume it: Invoke-RestMethod -Method Post http://127.0.0.1:7421/resume -ContentType application/json -Body '{}'")
         if queue["stalled"]:
-            add("stalled", "err", f"The transcription worker has {_plural(queue['depth'], 'clip')} queued but hasn't converted "
-                f"anything for {_dur(queue['noProgressSec'])}. Check its window for errors; restarting it drops the queue "
-                "(the audio stays, and /scrib process redoes it).")
+            since = _dur(queue["noProgressSec"])
+            if queue["depth"] or queue["busy"]:
+                on_clip = f" and has been on one clip for {_dur(queue['busySec'] or 0)}," if queue["busy"] else ""
+                add("stalled", "err", f"The transcription worker has {_plural(queue['depth'] or 0, 'clip')} queued{on_clip} but "
+                    f"hasn't finished a clip for {since}. Check its window for errors; restarting it drops the queue "
+                    "(the audio stays, and /scrib process redoes it).")
+            else:
+                add("stalled", "err", f"Nothing has reached the transcription worker for {since}, but "
+                    f"{_plural(queue['pendingClips'], 'clip')} still need converting. If no session is being processed, "
+                    "run /scrib process for it.")
         elif recordings and queue["trendPerMin"] is not None and queue["trendPerMin"] > BEHIND_TREND_PER_MIN and queue["windowSec"] >= 60:
             eta = f" At the current rate the transcript will be ready about {_dur(queue['etaSec'])} after /scrib stop." if queue["etaSec"] else ""
             add("behind", "warn", f"Transcription is falling behind: {_plural(queue['pendingClips'], 'clip')} waiting, "
@@ -867,7 +920,7 @@ class Monitor:
             if c["phase"] != "failed":
                 continue
             done = f"{c['converted']} of {_plural(c['clips'], 'clip')} converted"
-            if queue["depth"]:
+            if queue["depth"] or queue["busy"]:
                 add(f"failed-{c['sessionId']}", "warn",
                     f"Session {c['number']} is marked failed in Discord, but the worker is still converting its clips "
                     f"from disk ({done}). When the worker queue is empty, run /scrib process session:{c['number']}.")
@@ -930,6 +983,10 @@ class Monitor:
             after = ("Stopping the worker now drops the queue; it re-queues the clips from disk when it starts again."
                      if queue.get("recovered") is not None else "Stopping the worker now drops them.")
             reasons.append(f"{_plural(queued, 'clip')} still waiting in {who}{eta}.{held} {after}")
+        elif queue.get("busy"):
+            after = ("it re-queues the clips from disk when it starts again." if queue.get("recovered") is not None
+                     else "that clip is lost.")
+            reasons.append(f"The worker is converting a clip ({_dur(queue['busySec'] or 0)} so far). Stopping it now drops it; {after}")
         if reasons:
             return {"state": "wait", "title": "Wait: still transcribing", "reasons": reasons + notes}
         if not bot_online:

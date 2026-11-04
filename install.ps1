@@ -297,7 +297,7 @@ function Run-Checks {
     # Foundry browser: only needed when the bot joins Foundry headlessly
     $script:needBrowser = $false
     $headless = (Get-EnvValue "FOUNDRY_HEADLESS").ToLower()
-    if (-not $headless) { $headless = "off" }
+    if (-not $headless) { $headless = "session" }  # the bot's default (bot/src/config.ts)
     $browser = Get-EnvValue "FOUNDRY_BROWSER"
     if (-not $browser) { $browser = "msedge" }
     if ($Chromium) { $browser = "chromium" }

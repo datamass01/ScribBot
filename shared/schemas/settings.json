@@ -83,7 +83,7 @@
       "group": "Foundry",
       "label": "Headless Foundry client",
       "type": "enum",
-      "default": "off",
+      "default": "session",
       "readBy": [
         "bot"
       ],
@@ -120,7 +120,7 @@
           "always"
         ]
       },
-      "help": "Foundry's base URL for the headless client. It must also be in the Foundry addresses above."
+      "help": "Foundry's base URL for the headless client while no campaign is being played. A campaign's address is set in the Console's Campaign tab, and a campaign without one joins nothing. It must also be in the Foundry addresses above."
     },
     {
       "key": "FOUNDRY_USER",
@@ -138,7 +138,7 @@
           "always"
         ]
       },
-      "help": "The Foundry player the headless client logs in as. Set it as the module's Bridge user."
+      "help": "The Foundry player the headless client logs in as, unless the campaign being played sets its own (Campaign tab). Set it as the module's Bridge user."
     },
     {
       "key": "FOUNDRY_PASSWORD",
@@ -156,7 +156,7 @@
           "always"
         ]
       },
-      "help": "That user's password."
+      "help": "That user's password, unless the campaign being played sets its own (Campaign tab)."
     },
     {
       "key": "FOUNDRY_BROWSER",
@@ -1229,6 +1229,29 @@
       "help": "Send every transcript to the LLM when it's done. Off: sessions end at a saved transcript until someone asks for a summary."
     },
     {
+      "key": "REVIEW_BEFORE_FOUNDRY",
+      "group": "Summaries",
+      "live": true,
+      "label": "Review before posting to Foundry",
+      "type": "bool",
+      "default": "true",
+      "options": [
+        {
+          "value": "true",
+          "label": "Yes"
+        },
+        {
+          "value": "false",
+          "label": "No"
+        }
+      ],
+      "readBy": [
+        "bot",
+        "console"
+      ],
+      "help": "A summary or story goes to Foundry only after someone approves it: in the Console (Sessions → Review, with a Foundry-style preview, editing and LLM revisions) or with /scrib approve. Off: summaries go straight to Foundry as before."
+    },
+    {
       "key": "DATA_DIR",
       "group": "Storage and retention",
       "label": "Data folder",
@@ -1254,7 +1277,7 @@
         "console"
       ],
       "advanced": true,
-      "help": "glossary.md and context.md: names and lore for speech-to-text and the summarizer."
+      "help": "glossary.md and context.md: names and lore for speech-to-text and the summarizer. Each campaign's own are in <campaign folder>/ inside it (the Console's Campaign tab); the ones at the top are shared."
     },
     {
       "key": "DELETE_AUDIO_AFTER_TRANSCRIBE",

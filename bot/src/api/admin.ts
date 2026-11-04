@@ -3,15 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { config } from "../config.js";
-import { gameFolderOf, type SessionRow, type Store } from "../db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName as nameOf, gameFolderOf, type CampaignRow, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { mergedInto, unusableReason } from "../merge.js";
-import { sessionPaths, sessionRecordings } from "../paths.js";
+import { foundryActorsFile, sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
-import { announceStory, findStoryFile, storyPath } from "../story.js";
+import { findStoryFile, loadStory, storyPath } from "../story.js";
+import { announceStory, announceSummary, approve, reviewState, saveStoryEdit, saveSummaryEdit, StaleReviewError, type ReviewKind } from "../review.js";
 import { createProvider } from "../summarize/provider.js";
 import { listModels } from "../summarize/models.js";
-import type { SummaryFile } from "../summarize/schema.js";
+import { readSummaryFile } from "../summarize/summarize.js";
 import { moveToCampaign, sessionTimeline } from "../layout.js";
 import { applyLayout, planLayout } from "../migrate-layout.js";
 import { workerHealth } from "../worker-client.js";
@@ -32,10 +33,16 @@ export interface AdminSessions {
   startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string; campaignId?: number }): Promise<SessionRow>;
   stopFromConsole(sessionId: string): Promise<SessionRow>;
   processFromConsole(session: SessionRow, opts: { summaryOnly?: boolean; retranscribe?: boolean }): Promise<void>;
+  /** `/scrib revise`: the LLM corrects the summary as `feedback` says; runs in the background. */
+  reviseFromConsole(session: SessionRow, feedback: string): Promise<void>;
+  /** Post the session's summary, story or transcript to a Discord text channel (the session's own by default). */
+  postToDiscord(session: SessionRow, what: "summary" | "story" | "transcript", channelId?: string): Promise<{ channelId: string; channelName: string }>;
   mergeInto(a: SessionRow, b: SessionRow): string;
-  setMapping(guildId: string, discordId: string, value: string): string;
-  clearMapping(guildId: string, discordId: string): void;
-  setGm(guildId: string, discordId: string, isGm: boolean): void;
+  /** `campaignId` left out: the campaign being played (`playingCampaignId()`), as for the slash commands. */
+  setMapping(guildId: string, discordId: string, value: string, campaignId?: number): string;
+  clearMapping(guildId: string, discordId: string, campaignId?: number): void;
+  setGm(guildId: string, discordId: string, isGm: boolean, campaignId?: number): void;
+  playingCampaignId(): number;
   memberNames(guildId: string, ids: string[]): Promise<Record<string, string | null>>;
 }
 
@@ -43,6 +50,8 @@ export interface AdminDeps {
   sessions: AdminSessions;
   /** Clean shutdown, then exit with code 75 so start.ps1 starts the bot again. */
   restart?: (reason: string) => void;
+  /** The campaign being played, or a campaign's Foundry server, changed: the headless client re-targets. */
+  campaignChanged?: () => void;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -126,7 +135,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   const campaignName = (id: number | null) => {
     const c = id == null ? null : store.getCampaign(id);
-    return c ? { campaignId: c.id, campaign: c.alias || c.title || c.folder, campaignFolder: c.folder } : { campaignId: null, campaign: null, campaignFolder: null };
+    return c ? { campaignId: c.id, campaign: nameOf(c), campaignFolder: c.folder } : { campaignId: null, campaign: null, campaignFolder: null };
   };
 
   const summary = (s: SessionRow) => {
@@ -168,7 +177,17 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       hasChatlog: live && fs.existsSync(p.chatlog),
       hasSummary: live && fs.existsSync(p.summary),
       hasStory: live && findStoryFile(s.id) !== null,
+      // Review before Foundry (bot/src/review.ts): null when there's nothing to review.
+      reviewRequired: config.reviewBeforeFoundry,
+      summaryReview: live ? reviewView(s, "summary") : null,
+      storyReview: live ? reviewView(s, "story") : null,
     };
+  };
+
+  /** "approved", "changed" (approved once, edited or rewritten since) or "pending"; null: nothing to review. */
+  const reviewView = (s: SessionRow, kind: ReviewKind) => {
+    const r = reviewState(store, s, kind);
+    return r ? { state: r.approved ? "approved" : r.changedSinceApproval ? "changed" : "pending", approvedAt: r.approvedAt } : null;
   };
 
   const find = (id: string) => {
@@ -287,12 +306,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/sessions/:id/summary/import",
     handle((req: IdReq) => {
       const s = usable(find(req.params.id));
-      const file = sessionPaths(s.id).summary;
-      if (!fs.existsSync(file)) throw new HttpError(409, `Session ${s.number} has no summary yet. Summarize it first.`);
-      const { summary: sum } = JSON.parse(fs.readFileSync(file, "utf8")) as SummaryFile;
-      console.log(`[admin] asking Foundry to import the summary of session ${s.number}`);
-      bus.emitEvent({ type: "summary.ready", sessionId: s.id, number: s.number, title: sum.title, manual: true });
-      store.markSent(s.id, "summary");
+      const sum = announceSummary(store, s, { manual: true });
       return { ok: true, title: sum.title, foundryConnected: foundrySockets() > 0 };
     }),
   );
@@ -302,6 +316,121 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       const s = usable(find(req.params.id));
       const story = announceStory(store, s);
       return { ok: true, title: story.title, foundryConnected: foundrySockets() > 0 };
+    }),
+  );
+
+  // ---------- review before Foundry (bot/src/review.ts) ----------
+
+  /** Actors as the Foundry module links them in journal pages (`@UUID[Actor.id]{name}`): the session's copy, else the last roster sync. */
+  const foundryActors = (s: SessionRow) => {
+    const own = sessionPaths(s.id).actors;
+    try {
+      const raw = JSON.parse(fs.readFileSync(fs.existsSync(own) ? own : foundryActorsFile(), "utf8")) as { actors?: { id?: unknown; name?: unknown; img?: unknown }[] } | unknown[];
+      const list = Array.isArray(raw) ? raw : (raw.actors ?? []);
+      return (list as { id?: unknown; name?: unknown; img?: unknown }[])
+        .filter((a) => typeof a?.id === "string" && typeof a?.name === "string")
+        .map((a) => ({ id: a.id as string, name: a.name as string, img: typeof a.img === "string" && !a.img.startsWith("data:") ? a.img : null }));
+    } catch {
+      return [];
+    }
+  };
+
+  /** What the Console's review screen shows: the content as Foundry gets it, its review state, and the actors it links. */
+  const reviewPayload = (s: SessionRow) => {
+    const summaryState = reviewState(store, s, "summary");
+    const storyState = reviewState(store, s, "story");
+    let story: unknown = null;
+    if (storyState) {
+      try {
+        story = { ...loadStory(store, s), problem: null };
+      } catch (err) {
+        // Not ready (template notes left): still shown, so it can be finished here.
+        const found = findStoryFile(s.id);
+        story = found ? { markdown: fs.readFileSync(found.file, "utf8"), title: null, assets: [], problem: err instanceof Error ? err.message : String(err) } : null;
+      }
+    }
+    return {
+      ok: true,
+      session: summary(s),
+      required: config.reviewBeforeFoundry,
+      busy: isProcessing(s.id),
+      foundryConnected: foundrySockets() > 0,
+      summary: summaryState ? { ...summaryState, file: readSummaryFile(s.id) } : null,
+      story: storyState && story ? { ...storyState, file: story } : null,
+      actors: foundryActors(s),
+    };
+  };
+
+  const stale = <T>(fn: () => T) => {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof StaleReviewError) throw new HttpError(409, err.message);
+      throw err;
+    }
+  };
+
+  app.get("/admin/sessions/:id/review", handle((req: IdReq) => reviewPayload(usable(find(req.params.id)))));
+
+  const SummaryEdit = z.object({ summary: z.unknown(), hash: z.string().optional() });
+  app.put(
+    "/admin/sessions/:id/summary",
+    handle((req: IdReq) => {
+      const s = usable(find(req.params.id));
+      if (isProcessing(s.id)) throw new HttpError(409, `Session ${s.number} is being processed; save once it's done.`);
+      const body = SummaryEdit.parse(req.body);
+      stale(() => saveSummaryEdit(store, s, body.summary, body.hash));
+      return reviewPayload(find(s.id));
+    }),
+  );
+
+  const StoryEdit = z.object({ markdown: z.string().max(2_000_000), hash: z.string().optional() });
+  app.put(
+    "/admin/sessions/:id/story",
+    handle((req: IdReq) => {
+      const s = usable(find(req.params.id));
+      const body = StoryEdit.parse(req.body);
+      stale(() => saveStoryEdit(store, s, body.markdown, body.hash));
+      return reviewPayload(find(s.id));
+    }),
+  );
+
+  const Revise = z.object({ feedback: z.string().trim().min(1, "Say what to correct.").max(4000) });
+  app.post(
+    "/admin/sessions/:id/summary/revise",
+    handle(async (req: IdReq) => {
+      const s = usable(find(req.params.id));
+      await sessions.reviseFromConsole(s, Revise.parse(req.body).feedback);
+      return { ok: true, session: summary(find(s.id)) };
+    }),
+  );
+
+  // Approve what the reviewer saw (`hash`) and, unless `post: false`, send it to Foundry.
+  const Approve = z.object({ hash: z.string().min(1), post: z.boolean().optional() });
+  for (const kind of ["summary", "story"] as const) {
+    app.post(
+      `/admin/sessions/:id/${kind}/approve`,
+      handle((req: IdReq) => {
+        const s = usable(find(req.params.id));
+        if (isProcessing(s.id)) throw new HttpError(409, `Session ${s.number} is being processed; approve it once that's done.`);
+        const body = Approve.parse(req.body);
+        stale(() => approve(store, s, kind, body.hash));
+        if (body.post === false) return { ok: true, posted: false };
+        const title = kind === "summary" ? announceSummary(store, s, { manual: true }).title : announceStory(store, s).title;
+        return { ok: true, posted: true, title, foundryConnected: foundrySockets() > 0 };
+      }),
+    );
+  }
+
+  // Session content reaches Discord only this way: someone asks for it in the Console.
+  const DiscordBody = z.object({ what: z.enum(["summary", "story", "transcript"]), channelId: z.string().regex(/^\d{5,25}$/).optional() });
+  app.post(
+    "/admin/sessions/:id/discord",
+    handle(async (req: IdReq) => {
+      const s = usable(find(req.params.id));
+      const body = DiscordBody.parse(req.body);
+      const posted = await sessions.postToDiscord(s, body.what, body.channelId);
+      return { ok: true, ...posted };
     }),
   );
 
@@ -357,36 +486,125 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   // ---------- campaigns (one per Foundry world) and the folder layout ----------
 
+  // The Campaign tab: what each campaign is (name, world, Foundry server) and which one is being played.
+  // Passwords never leave the bot: only whether one is set.
+  const campaignView = (c: CampaignRow, def: CampaignRow | null, all: SessionRow[]) => ({
+    id: c.id,
+    worldId: c.world_id,
+    folder: c.folder,
+    title: c.title,
+    alias: c.alias,
+    name: nameOf(c),
+    lastSeenAt: c.last_seen_at,
+    createdAt: c.created_at,
+    isDefault: def?.id === c.id,
+    chosen: Boolean(c.selected_at) && def?.id === c.id,
+    unassigned: c.folder === UNASSIGNED_FOLDER,
+    sessions: all.filter((x) => x.campaign_id === c.id && !x.merged_into_id && !x.deleted_at).length,
+    /** Counting the trash and merged recordings: a campaign can be deleted only at 0. */
+    rows: store.campaignSessionCount(c.id),
+    folderPath: path.join(config.dataDir, "campaigns", c.folder),
+    foundry: { url: c.foundry_url, user: c.foundry_user, passwordSet: Boolean(c.foundry_password) },
+  });
+
   app.get(
     "/admin/campaigns",
     handle(() => {
       const all = store.listSessions(1_000_000, { deleted: "include" });
       const def = store.defaultCampaign({ create: false });
       return {
-        campaigns: store.listCampaigns().map((c) => ({
-          id: c.id,
-          worldId: c.world_id,
-          folder: c.folder,
-          title: c.title,
-          alias: c.alias,
-          name: c.alias || c.title || c.folder,
-          lastSeenAt: c.last_seen_at,
-          isDefault: def?.id === c.id,
-          sessions: all.filter((x) => x.campaign_id === c.id && !x.merged_into_id && !x.deleted_at).length,
-          folderPath: path.join(config.dataDir, "campaigns", c.folder),
-        })),
+        campaigns: store.listCampaigns().map((c) => campaignView(c, def, all)),
+        /** The campaign chosen in the Campaign tab (null: the world Foundry synced last decides). */
+        chosenId: store.selectedCampaign()?.id ?? null,
+        /** The world of the last roster sync: its Foundry users can be mapped in that world's campaign. */
+        rosterWorld: store.getMeta("roster_world"),
+        /**
+         * The .env fallbacks for a campaign's Foundry user and password (only whether one is set). No
+         * address: a campaign without its own joins nothing, so .env's isn't shown or sent.
+         */
+        foundryDefaults: { user: config.foundry.user, passwordSet: config.foundry.password !== "", headless: config.foundry.headless },
       };
     }),
   );
 
-  const Alias = z.object({ alias: z.string().max(100).nullable() });
+  const optionalText = (max: number) => z.string().max(max).nullable().optional();
+  const FoundryUrl = z
+    .string()
+    .max(500)
+    .nullable()
+    .optional()
+    .refine((v) => !v || /^https?:\/\/[^\s/]+/i.test(v.trim()), "The Foundry address must start with http:// or https://.");
+  const CampaignPatch = z.object({
+    alias: optionalText(100),
+    worldId: optionalText(200),
+    foundryUrl: FoundryUrl,
+    foundryUser: optionalText(100),
+    foundryPassword: optionalText(500),
+  });
+  const CampaignCreate = z.object({ name: z.string().min(1, "Give the campaign a name.").max(100), worldId: optionalText(200) });
+
+  app.post(
+    "/admin/campaigns",
+    handle((req) => {
+      const body = CampaignCreate.parse(req.body);
+      const c = store.createCampaign({ name: body.name, worldId: body.worldId ?? null });
+      console.log(`[admin] campaign "${nameOf(c)}" created (folder ${c.folder})`);
+      return { ok: true, campaign: campaignView(c, store.defaultCampaign({ create: false }), []) };
+    }),
+  );
+
   app.patch(
     "/admin/campaigns/:id",
-    handle((req: FastifyRequest<{ Params: { id: string } }>) => {
+    handle((req: IdReq) => {
       const c = store.getCampaign(Number(req.params.id));
       if (!c) throw new HttpError(404, "No such campaign.");
-      store.setCampaignAlias(c.id, Alias.parse(req.body).alias?.trim() || null);
+      const body = CampaignPatch.parse(req.body);
+      if (body.alias !== undefined) store.setCampaignAlias(c.id, body.alias?.trim() || null);
+      store.updateCampaign(c.id, body);
+      // Field names only: never the values (the password).
+      const changed = Object.keys(body).filter((k) => body[k as keyof typeof body] !== undefined);
+      if (changed.length) console.log(`[admin] campaign "${nameOf(store.getCampaign(c.id)!)}": ${changed.join(", ")} changed`);
+      if (body.worldId !== undefined || body.foundryUrl !== undefined || body.foundryUser !== undefined || body.foundryPassword !== undefined) {
+        deps.campaignChanged?.();
+      }
       return { ok: true };
+    }),
+  );
+
+  app.delete(
+    "/admin/campaigns/:id",
+    handle((req: IdReq) => {
+      const c = store.getCampaign(Number(req.params.id));
+      if (!c) throw new HttpError(404, "No such campaign.");
+      const wasPlaying = store.defaultCampaign({ create: false })?.id === c.id;
+      store.deleteCampaign(c.id);
+      console.log(`[admin] campaign "${nameOf(c)}" deleted`);
+      if (wasPlaying) deps.campaignChanged?.();
+      return { ok: true };
+    }),
+  );
+
+  const PlayingBody = z.object({ campaignId: z.number().int().nullable() });
+  app.post(
+    "/admin/campaigns/playing",
+    handle((req) => {
+      const { campaignId } = PlayingBody.parse(req.body);
+      if (campaignId !== null) {
+        const c = store.getCampaign(campaignId);
+        if (!c) throw new HttpError(404, "No such campaign.");
+        if (c.folder === UNASSIGNED_FOLDER) throw new HttpError(409, "Pick a real campaign: the unassigned one only holds recordings made before any was known.");
+      }
+      store.selectCampaign(campaignId);
+      const now = store.defaultCampaign({ create: false });
+      console.log(`[admin] campaign being played: ${campaignId === null ? "automatic" : `"${nameOf(store.getCampaign(campaignId)!)}"`}`);
+      deps.campaignChanged?.();
+      const live = store.listSessions(50).filter((x) => sessions.isRecording(x.id));
+      return {
+        ok: true,
+        playing: now ? { id: now.id, name: nameOf(now) } : null,
+        // A recording keeps the campaign it started in.
+        note: live.length ? "A recording in progress stays in the campaign it started in; the change applies to the next one." : null,
+      };
     }),
   );
 
@@ -448,14 +666,27 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   // ---------- speakers and characters ----------
 
+  /** ?campaign=<id> on the mapping routes; left out, the campaign being played. */
+  const campaignParam = (req: FastifyRequest) => {
+    const raw = (req.query as { campaign?: string } | undefined)?.campaign;
+    if (raw === undefined || raw === "") return sessions.playingCampaignId();
+    const id = Number(raw);
+    if (!Number.isInteger(id) || (id !== ALL_CAMPAIGNS && !store.getCampaign(id))) throw new HttpError(404, "No such campaign.");
+    return id;
+  };
+
   app.get(
     "/admin/mappings",
-    handle(async () => {
-      const all = store.getAllMappings();
+    handle(async (req) => {
+      const campaignId = campaignParam(req);
+      const all = store.getCampaignMappings(campaignId);
       const guilds = [...new Set(all.map((m) => m.guild_id))];
       const names: Record<string, string | null> = {};
       for (const g of guilds) Object.assign(names, await sessions.memberNames(g, all.filter((m) => m.guild_id === g).map((m) => m.discord_id)));
+      const world = campaignId === ALL_CAMPAIGNS ? null : (store.getCampaign(campaignId)?.world_id ?? null);
+      const rosterWorld = store.getMeta("roster_world");
       return {
+        campaignId,
         mappings: all.map((m) => ({
           guildId: m.guild_id,
           discordId: m.discord_id,
@@ -464,7 +695,12 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
           foundryUserId: m.foundry_user_id,
           actorId: m.actor_id,
           isGm: Boolean(m.is_gm),
+          /** Shared by every campaign (made before campaigns had their own mappings). */
+          shared: m.campaign_id === ALL_CAMPAIGNS && campaignId !== ALL_CAMPAIGNS,
         })),
+        rosterWorld,
+        /** The synced roster is this campaign's world (or either is unknown): its Foundry users can be picked. */
+        rosterMatches: !world || !rosterWorld || world === rosterWorld,
         roster: store.getRoster().map((r) => ({
           foundryUserId: r.foundry_user_id,
           userName: r.user_name,
@@ -483,13 +719,13 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/mappings/:guildId/:discordId",
     handle((req: MapReq) => {
       const discordId = snowflake.parse(req.params.discordId);
-      return { ok: true, mapped: sessions.setMapping(req.params.guildId, discordId, MapBody.parse(req.body).character) };
+      return { ok: true, mapped: sessions.setMapping(req.params.guildId, discordId, MapBody.parse(req.body).character, campaignParam(req)) };
     }),
   );
   app.delete(
     "/admin/mappings/:guildId/:discordId",
     handle((req: MapReq) => {
-      sessions.clearMapping(req.params.guildId, snowflake.parse(req.params.discordId));
+      sessions.clearMapping(req.params.guildId, snowflake.parse(req.params.discordId), campaignParam(req));
       return { ok: true };
     }),
   );
@@ -497,7 +733,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
   app.post(
     "/admin/mappings/:guildId/:discordId/gm",
     handle((req: MapReq) => {
-      sessions.setGm(req.params.guildId, snowflake.parse(req.params.discordId), GmBody.parse(req.body).isGm);
+      sessions.setGm(req.params.guildId, snowflake.parse(req.params.discordId), GmBody.parse(req.body).isGm, campaignParam(req));
       return { ok: true };
     }),
   );

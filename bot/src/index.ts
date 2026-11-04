@@ -51,7 +51,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 const commands = new CommandHandler(client, store);
 
 // Optional headless Foundry client that joins as the module's bridge user (FOUNDRY_HEADLESS).
-const foundry = createHeadlessFoundry();
+const foundry = createHeadlessFoundry(store);
 bus.onEvent((e) => foundry.onEvent(e));
 commands.awaitChatlog = (id) => foundry.awaitChatlog(id);
 
@@ -96,6 +96,8 @@ await startApi(store, () => commands.currentRecording(), {
   sessions: commands,
   // Exit code 75: start.ps1 starts the bot again at once (the Console's "Restart bot" after a settings change).
   restart: (reason) => void shutdown(reason, RESTART_EXIT_CODE),
+  // The Campaign tab changed the campaign being played or its Foundry server.
+  campaignChanged: () => foundry.retarget(),
 });
 await client.login(token);
 foundry.start();

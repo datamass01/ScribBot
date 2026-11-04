@@ -5,7 +5,7 @@ import type { MappingRow, RosterRow } from "../src/db.js";
 import { linksToWrite } from "../src/links.js";
 
 const mapping = (discordId: string, over: Partial<MappingRow> = {}): MappingRow => ({
-  guild_id: "g", discord_id: discordId, foundry_user_id: null, actor_id: null, character_name: null, is_gm: 0, ...over,
+  campaign_id: 0, guild_id: "g", discord_id: discordId, foundry_user_id: null, actor_id: null, character_name: null, is_gm: 0, ...over,
 });
 const user = (id: string, over: Partial<RosterRow> = {}): RosterRow => ({
   foundry_user_id: id, user_name: id, is_gm: 0, actor_id: null, actor_name: null, actor_img: null, discord_id: null, ...over,

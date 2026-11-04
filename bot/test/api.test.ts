@@ -11,6 +11,7 @@ process.env.WORKER_URL = "http://127.0.0.1:9"; // nothing listens here: the work
 // No Anthropic credentials anywhere: empty values stop dotenv filling them from a real .env,
 // and an empty config dir hides any `ant auth login` profile on this machine.
 process.env.LLM_PROVIDER = "anthropic";
+process.env.REVIEW_BEFORE_FOUNDRY = "false"; // these test sending as such; review.test.ts covers the review gate
 process.env.AUTO_SUMMARIZE = "true"; // the credential warnings only apply to automatic summaries (see status-manual.test.ts)
 process.env.ANTHROPIC_API_KEY = "";
 process.env.ANTHROPIC_AUTH_TOKEN = "";
@@ -87,7 +88,7 @@ describe("Foundry API", () => {
   it("asks Foundry to correct a stale Discord ID flag after a roster sync (05 C11)", async () => {
     const { bus } = await import("../src/events.js");
     const roster = store.getRoster();
-    store.upsertMapping({ guildId: "g", discordId: "222222", foundryUserId: "u1", characterName: "Thorin" });
+    store.upsertMapping({ campaignId: 0, guildId: "g", discordId: "222222", foundryUserId: "u1", characterName: "Thorin" });
     const events: unknown[] = [];
     const off = bus.onEvent((e) => events.push(e));
     const res = await fetch(`${base}/roster`, {
@@ -96,7 +97,7 @@ describe("Foundry API", () => {
       body: JSON.stringify({ world: "w", users: [{ id: "u1", name: "Alice", isGM: false, discordId: "111" }], actors: [] }),
     });
     off();
-    store.deleteMapping("g", "222222");
+    store.deleteMapping("g", "222222", 0);
     store.replaceRoster(roster);
     expect(await res.json()).toMatchObject({ links: 1 });
     expect(events).toContainEqual({ type: "roster.link", links: [{ foundryUserId: "u1", discordId: "222222" }] });

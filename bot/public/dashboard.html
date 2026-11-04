@@ -219,6 +219,7 @@
     const pending = h.pendingImports.length ? `<br><span class="muted">${h.pendingImports.length} summary(ies) waiting for a GM</span>` : "";
     if (h.state === "connected") return `joined ${esc(h.world ?? "")} ${esc(ago(h.since))} ${who}${pending}`;
     if (h.state === "joining") return `joining… ${who}${pending}`;
+    if (!h.url && h.state !== "connected") return `<span class="warn-text">no Foundry address for ${esc(h.campaign ?? "this campaign")}</span> ${who}${pending}`;
     if (h.state === "retrying") return `<span class="error-text">can't join: ${esc(h.error ?? "")}</span> ${who}${pending}`;
     return `idle${h.mode === "session" ? ' <span class="muted">(joins when recording starts)</span>' : ""} ${who}${pending}`;
   };
@@ -249,16 +250,19 @@
       ]) : `${rows([["URL", esc(w.url)]])}<p class="error-text">${esc(w.error)}</p>`);
 
     const l = s.llm;
-    // autoSummarize === false: sessions stop at a transcript, so a missing setup isn't an error.
+    // Ready: a summary could run now. AUTO_SUMMARIZE only decides when it runs (the Runs row), so a
+    // working setup in manual mode is ready too. With it off, sessions stop at a transcript, so a
+    // missing setup isn't an error.
     const manual = l.autoSummarize === false;
-    const ready = l.credentials && l.model;
+    const ready = Boolean(l.credentials && l.model && !l.optionsError);
     const llm = card("Summarizer",
-      manual ? pill("info", ready ? "manual only" : "manual · not set up") : ready ? pill("ok", "configured") : pill("err", "not configured"),
+      ready ? pill("ok", "ready") : manual ? pill("info", "not set up") : pill("err", "not configured"),
       rows([
         ["Runs", manual ? "only on <code>/scrib summarize</code>" : "after every session"],
         ["Provider", esc(l.provider)],
         ["Model", esc(l.model ?? "not set")],
         ["Credentials", l.credentials ? esc(l.credentials) : manual ? `<span class="muted">none</span>` : `<span class="error-text">missing</span>`],
+        ...(l.optionsError ? [["API options", `<span class="error-text">${esc(l.optionsError)}</span>`]] : []),
         ["Chunk size", `${l.chunkMinutes} min`],
       ]));
 
@@ -344,8 +348,12 @@
     const trend = q.trendPerMin == null ? measuring
       : q.trendPerMin > 0.5 ? `<span class="warn-text">+${q.trendPerMin}/min</span>`
       : q.trendPerMin < -0.5 ? `<span class="ok-text">${q.trendPerMin}/min</span>` : "steady";
-    const eta = !q.pendingClips ? "–" : q.etaSec != null ? dur(q.etaSec) : measuring;
-    const idle = q.depth ? (q.stalled ? `<span class="err-text">${dur(q.noProgressSec)}</span>` : dur(q.noProgressSec)) : "–";
+    // A measured rate of 0 isn't "measuring": the worker is either partway through a clip or not converting.
+    const eta = !q.pendingClips ? "–" : q.etaSec != null ? dur(q.etaSec) : q.ratePerMin == null ? measuring
+      : q.paused ? `<span class="warn-text">paused</span>`
+      : q.busy ? `<span class="muted p-small">converting…</span>`
+      : `<span class="${q.stalled ? "err-text" : "warn-text"}">not converting</span>`;
+    const idle = q.waiting ? (q.stalled ? `<span class="err-text">${dur(q.noProgressSec)}</span>` : dur(q.noProgressSec)) : "–";
     const ws = q.worker;
     const timing = ws && ws.clips
       ? stat(`${ws.avgSeconds}s`, "per clip (worker)", `Last ${dur(ws.windowSec)}: ${ws.clips} model calls, p95 ${ws.p95Seconds}s, ` +
@@ -353,14 +361,16 @@
           `real-time factor ${ws.realTimeFactor ?? "–"}`)
       : "";
     const head = `<div class="p-stats">
-      ${stat(q.paused ? `<span class="warn-text">paused</span>` : (q.depth ?? "–"), q.paused ? `${q.depth ?? 0} queued` : "queue depth",
-        q.paused ? `Paused${q.pausedReason ? `: ${q.pausedReason}` : ""}` : "Clips and jobs waiting in the transcription worker")}
+      ${stat(q.paused ? `<span class="warn-text">paused</span>` : (q.depth ?? "–"),
+        q.paused ? `${q.depth ?? 0} queued` : q.busy ? "queue depth · 1 converting" : "queue depth",
+        q.paused ? `Paused${q.pausedReason ? `: ${q.pausedReason}` : ""}`
+          : `Clips and jobs waiting in the transcription worker${q.busy ? `, plus the one it has been converting for ${dur(q.busySec ?? 0)}` : ""}`)}
       ${timing}
       ${stat(q.pendingClips, "not yet converted", "Recorded clips without text yet, across active sessions")}
-      ${stat(q.ratePerMin == null ? measuring : `${q.ratePerMin}/min`, "conversion rate", `Clips turned into text per minute, last ${dur(q.windowSec)}`)}
+      ${stat(q.ratePerMin == null ? measuring : `${q.ratePerMin}/min`, "conversion rate", `Clips turned into text per minute of working time, so silence at the table doesn't lower it (${dur(q.activeSec ?? 0)} of the last ${dur(q.windowSec)}; with none, the last measured rate)`)}
       ${stat(trend, "queue trend", "Positive: clips arrive faster than they are converted")}
       ${stat(eta, "time to catch up", "Clips not yet converted ÷ conversion rate (recording adds more)")}
-      ${stat(idle, "since last conversion", "How long since the worker last finished a clip while work is waiting")}
+      ${stat(idle, "since last conversion", "How long since a clip was last converted, while clips are queued, converting or not yet sent")}
     </div>`;
 
     const rowsHtml = p.conversions.map((c) => {

@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import { config } from "../config.js";
-import type { SessionRow, Store } from "../db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName, type SessionRow, type Store } from "../db.js";
 import { sessionPaths } from "../paths.js";
 import { isProcessing, processingProgress } from "../pipeline.js";
 import { mergedInto } from "../merge.js";
 import { resolveParticipant } from "../participants.js";
 import { readTimeline } from "../timeline.js";
 import { workerHealth } from "../worker-client.js";
+import { allowedOrigins } from "./origins.js";
 import { PipelineTracker } from "./pipeline.js";
 import { llmProblem, llmStatus } from "../summarize/readiness.js";
 import type { HeadlessStatus } from "../foundry/client.js";
@@ -112,11 +113,14 @@ function sessionStatus(s: SessionRow, live: RecordingStatus | undefined) {
 function speakerMapping(store: Store, rows: SessionRow[], recordings: RecordingStatus[]) {
   let sessionNumber: number | null = null;
   let guildId: string | null = null;
+  let campaignId: number = ALL_CAMPAIGNS;
   let people: { discordId: string; displayName: string }[] = [];
   const r = recordings[0];
   if (r) {
     sessionNumber = r.number;
-    guildId = rows.find((s) => s.id === r.sessionId)?.guild_id ?? null;
+    const row = rows.find((s) => s.id === r.sessionId);
+    guildId = row?.guild_id ?? null;
+    campaignId = row?.campaign_id ?? ALL_CAMPAIGNS;
     people = r.speakers;
   } else {
     for (const s of rows) {
@@ -128,11 +132,12 @@ function speakerMapping(store: Store, rows: SessionRow[], recordings: RecordingS
       if (people.length) {
         sessionNumber = s.number;
         guildId = s.guild_id;
+        campaignId = s.campaign_id ?? ALL_CAMPAIGNS;
         break;
       }
     }
   }
-  const mappings = guildId ? store.getMappings(guildId) : [];
+  const mappings = guildId ? store.getMappings(guildId, campaignId) : [];
   const roster = store.getRoster();
   const resolved = people.map((p) => resolveParticipant(p.discordId, p.displayName, mappings, roster));
   const unmapped = resolved.filter((p) => !p.isGm && !p.character).map((p) => p.displayName);
@@ -196,12 +201,24 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
     if (headless.state === "retrying" && headless.error) {
       warnings.push(`ScribBot couldn't join Foundry as ${headless.user}: ${headless.error}`);
     }
-    const origin = safeOrigin(headless.url);
-    if (origin && !config.api.origins.includes(origin)) {
+    if (!headless.url) {
+      warnings.push(
+        `${headless.campaign ?? "The campaign being played"} has no Foundry address, so ScribBot doesn't join Foundry for it. Set one in the Console's Campaign tab.`,
+      );
+    }
+    const origin = headless.url ? safeOrigin(headless.url) : null;
+    if (origin && !allowedOrigins(store).has(origin)) {
       warnings.push(`FOUNDRY_ORIGINS doesn't include ${origin}, so the headless Foundry client can't reach the bot's API.`);
     }
-    if (config.foundry.password === "") {
-      warnings.push(`FOUNDRY_PASSWORD is empty. Give the ${headless.user} Foundry user a password and set it in .env.`);
+    if (headless.url && !headless.passwordSet) {
+      const where = headless.campaign ? `in the Campaign tab (${headless.campaign}) or FOUNDRY_PASSWORD in .env` : "in .env (FOUNDRY_PASSWORD) or the Campaign tab";
+      warnings.push(`No Foundry password is set. Give the ${headless.user} Foundry user a password and set it ${where}.`);
+    }
+    if (headless.state === "connected" && headless.expectedWorld && headless.world && headless.world !== headless.expectedWorld) {
+      warnings.push(
+        `${headless.campaign ?? "The campaign being played"} expects Foundry world ${headless.expectedWorld}, but ${headless.url} is running ${headless.world}. ` +
+          "Journals of this campaign wait until its world is joined.",
+      );
     }
     if (headless.pendingImports.length) {
       warnings.push(`${headless.pendingImports.length} summary(ies) are waiting for a GM to be online in Foundry to be imported.`);
@@ -211,6 +228,7 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
   if (disk.freeBytes !== null && disk.freeBytes < 1024 ** 3) warnings.push("Less than 1 GB free in the data directory.");
 
   const pipeline = pipelineTracker.build({ sessions, recordings, worker });
+  const playing = store.defaultCampaign({ create: false });
 
   return {
     now: new Date().toISOString(),
@@ -219,6 +237,10 @@ export async function buildStatus(store: Store, sources: MonitorSources, foundry
     recordings,
     worker,
     llm,
+    /** The campaign being played: where new recordings go and whose Foundry server is joined. `chosen`: picked in the Campaign tab. */
+    campaign: playing
+      ? { id: playing.id, name: campaignName(playing), world: playing.world_id, chosen: Boolean(playing.selected_at), unassigned: playing.folder === UNASSIGNED_FOLDER }
+      : null,
     foundry: {
       ...foundry,
       headless,

@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import type { SessionRow, Store } from "./db.js";
-import { bus } from "./events.js";
 import { primarySession, sessionPaths, sessionRecordings } from "./paths.js";
 
 /**
@@ -145,13 +144,4 @@ export function storySessionIds(store: Store, session: SessionRow): string[] {
   const found = findStoryFile(session.id);
   const ids = new Set([session.id, ...(found ? [found.folderId, ...found.covers] : [])]);
   return [...ids].filter((id) => store.getSession(id));
-}
-
-/** Asks the Foundry bridge to import a session's story as a journal entry. Throws if it isn't ready. */
-export function announceStory(store: Store, session: SessionRow): StoryFile {
-  const story = loadStory(store, session);
-  console.log(`[story] asking Foundry to import "${story.title}" (session ${story.sessionNumbers.join(" + ")})`);
-  bus.emitEvent({ type: "story.ready", sessionId: story.sessionId, number: story.sessionNumber, title: story.title });
-  for (const id of storySessionIds(store, session)) store.markSent(id, "story");
-  return story;
 }

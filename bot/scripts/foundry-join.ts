@@ -1,6 +1,7 @@
 /**
  * Joins Foundry once as the headless bridge user and reports what happened, using the same
- * settings as the bot (FOUNDRY_URL, FOUNDRY_USER, FOUNDRY_PASSWORD, FOUNDRY_BROWSER, FOUNDRY_BOT_URL).
+ * settings as the bot: the Foundry server of the campaign being played (the Console's Campaign
+ * tab), else FOUNDRY_URL, FOUNDRY_USER and FOUNDRY_PASSWORD; FOUNDRY_BROWSER, FOUNDRY_BOT_URL.
  *
  *   npm run foundry                 # join, print status, log out
  *   npm run foundry -- --stay       # stay joined until Ctrl+C (status every 30 s)
@@ -11,19 +12,26 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { config } from "../src/config.js";
+import { Store } from "../src/db.js";
 import { JoinError } from "../src/foundry/client.js";
+import { foundryTarget } from "../src/foundry/index.js";
 import { playwrightLauncher } from "../src/foundry/playwright.js";
 
 const args = new Set(process.argv.slice(2));
 const f = config.foundry;
 const log = (m: string) => console.log(`[foundry] ${m}`);
+const target = foundryTarget(new Store());
+if (!target.url) {
+  console.error(`[foundry] ${target.campaign ?? "The campaign being played"} has no Foundry address. Set it in the Console's Campaign tab.`);
+  process.exit(1);
+}
 
-log(`joining ${f.url} as ${f.user} with ${f.browser}; the module will use ${f.botUrl}`);
+log(`joining ${target.url} as ${target.user}${target.campaign ? ` for ${target.campaign}` : ""} with ${f.browser}; the module will use ${f.botUrl}`);
 const t0 = Date.now();
 const launch = playwrightLauncher({
-  url: f.url,
-  user: f.user,
-  password: f.password,
+  url: target.url,
+  user: target.user,
+  password: target.password ?? f.password,
   browser: f.browser,
   botUrl: f.botUrl,
   apiToken: config.api.token,

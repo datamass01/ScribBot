@@ -440,6 +440,66 @@ def test_alert_when_the_worker_is_stuck(tmp_path):
     assert p["queue"]["stalled"] is True and any(a["key"] == "stalled" for a in p["alerts"])
 
 
+def test_a_clip_in_progress_counts_as_work_but_is_stuck_only_after_two_minutes(tmp_path):
+    clock = FakeClock()
+    responses = {"http://127.0.0.1:7420/status": bot_status([], queued=0)}
+    responses["http://127.0.0.1:7420/status"]["worker"]["current"] = {"file": "x.wav", "seconds": 5.0}
+    monitor = sm.Monitor(make_config(tmp_path), fake_fetch(responses), clock=clock)
+    monitor.status()
+    clock.t += sm.STALL_AFTER_S + 10
+    responses["http://127.0.0.1:7420/status"]["worker"]["current"] = {"file": "x.wav", "seconds": 90.0}  # slow first clip
+    p = monitor.status()["monitor"]["pipeline"]
+    q = p["queue"]
+    assert (q["depth"], q["busy"], q["busySec"], q["waiting"], q["stalled"]) == (0, True, 90, True, False)
+    assert p["shutdown"]["state"] == "wait" and "converting a clip" in " ".join(p["shutdown"]["reasons"])
+    responses["http://127.0.0.1:7420/status"]["worker"]["current"] = {"file": "x.wav", "seconds": sm.STALL_AFTER_S + 5.0}
+    clock.t += sm.STATUS_TTL_S
+    p = monitor.status()["monitor"]["pipeline"]
+    assert p["queue"]["stalled"] is True
+    assert "on one clip for" in next(a["text"] for a in p["alerts"] if a["key"] == "stalled")
+
+
+def test_the_rate_holds_through_silence_and_the_first_clip_after_it_is_not_stuck(tmp_path):
+    clock = FakeClock()
+    responses = {}
+
+    def at(queued, done, dt):
+        clock.t += dt
+        responses["http://127.0.0.1:7420/status"] = bot_status([], queued=queued)
+        responses["http://127.0.0.1:7420/status"]["worker"]["liveClips"] = {"done": done, "failed": 0}
+        return monitor.status()["monitor"]["pipeline"]["queue"]
+
+    monitor = sm.Monitor(make_config(tmp_path), fake_fetch(responses), clock=clock)
+    at(10, 0, 0)
+    assert at(0, 30, 60)["ratePerMin"] == 30.0
+    for _ in range(4):  # everyone steps away: nothing to convert for 4 minutes
+        q = at(0, 30, 60)
+    assert (q["ratePerMin"], q["activeSec"]) == (30.0, 60)  # not 30 clips / 5 min = 6
+    for _ in range(3):  # the whole window is silence now
+        q = at(0, 30, 60)
+    assert (q["ratePerMin"], q["activeSec"]) == (30.0, 0)  # the last measured rate holds
+    q = at(3, 30, 5)  # they're back
+    assert (q["waiting"], q["noProgressSec"], q["stalled"]) == (True, 0, False)
+
+
+def test_clips_that_never_reach_the_worker_are_stuck_but_failed_ones_are_not(tmp_path):
+    clock = FakeClock()
+    write_session(tmp_path, "s", clips=10, converted=4)
+    responses = {"http://127.0.0.1:7420/status": bot_status([session_row("s", 1, "transcribing", processing=True)], queued=0)}
+    monitor = sm.Monitor(make_config(tmp_path), fake_fetch(responses), clock=clock)
+    monitor.status()
+    clock.t += sm.STALL_AFTER_S
+    p = monitor.status()["monitor"]["pipeline"]
+    q = p["queue"]
+    assert (q["ratePerMin"], q["etaSec"], q["waiting"], q["stalled"]) == (0.0, None, True, True)
+    assert "Nothing has reached the transcription worker" in next(a["text"] for a in p["alerts"] if a["key"] == "stalled")
+    responses["http://127.0.0.1:7420/status"] = bot_status([session_row("s", 1, "failed")], queued=0)
+    clock.t += sm.STALL_AFTER_S
+    p = monitor.status()["monitor"]["pipeline"]
+    assert (p["queue"]["waiting"], p["queue"]["stalled"]) == (False, False)
+    assert "stalled" not in {a["key"] for a in p["alerts"]}
+
+
 def test_a_paused_worker_is_not_reported_as_stuck(tmp_path):
     clock = FakeClock()
     write_session(tmp_path, "s", clips=10, converted=2)

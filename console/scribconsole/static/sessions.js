@@ -1,7 +1,9 @@
-// Sessions: create, stop, resume, re-run, merge, label and trash sessions, post them to Foundry,
-// and manage who plays which character. Every action calls the bot's /admin API through the
-// Console, which runs the same code as the matching /scrib command.
+// Sessions: create, stop, resume, re-run, merge, label and trash sessions, and post them to Foundry.
+// Who plays which character, and each campaign's settings, are in the Campaign tab (campaign.js).
+// Every action calls the bot's /admin API through the Console, which runs the same code as the
+// matching /scrib command.
 import { $, api, attempt, bytes, confirmDialog, dur, esc, openDialog, pill, showText, toast, when } from "./util.js";
+import { openReview } from "./review.js";
 
 const REFRESH_MS = 5000;
 const STATUS_CLASS = { recording: "err", transcribing: "info", summarizing: "info", complete: "ok", failed: "err" };
@@ -16,9 +18,9 @@ let selected = null;
 let detail = null;
 let fetchedAt = 0;
 let loading = false;
-let mappings = null;
 let campaigns = [];
 let campaignFilter = "all";
+let reviewing = false;
 
 export function show(el, s) {
   root = el;
@@ -46,7 +48,8 @@ export function show(el, s) {
         </table></div>
       </section>
       <section class="card" id="s-detail" hidden></section>
-      <section class="card" id="s-mappings"></section>
+      <section class="card review" id="s-review" hidden></section>
+      <div class="row small muted"><button data-act="purge-audio" title="Delete kept audio older than AUDIO_RETENTION_DAYS now, instead of waiting for the 6-hourly check">Purge expired audio now</button></div>
       <div class="menu-list" id="s-menu" hidden role="menu"></div>`;
     root.dataset.ready = "1";
     root.addEventListener("click", onClick);
@@ -59,7 +62,6 @@ export function show(el, s) {
     });
   }
   refresh();
-  loadMappings();
 }
 
 export function hide() {
@@ -118,10 +120,18 @@ function actionsFor(s) {
       why: off || busy || merged || (s.audioPurged ? "The audio was deleted after transcription." : null) },
     { act: "summarize", label: "Summarize", hint: "Send the transcript to the LLM and write the summary.",
       why: off || busy || merged || (!s.hasTranscript ? "No transcript yet." : llmProblem()) },
-    { act: "post-summary", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
+    { act: "review-summary", label: needsReview(s, "summary") ? "Review summary for Foundry…" : "Review and edit summary…",
+      hint: "See it as Foundry will, correct it or ask the LLM to, then approve it.",
       why: off || merged || (!s.hasSummary ? "No summary yet." : null) },
-    { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
+    { act: "post-summary", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
+      why: off || merged || (!s.hasSummary ? "No summary yet." : needsReview(s, "summary") ? "Review and approve it first." : null) },
+    { act: "review-story", label: needsReview(s, "story") ? "Review story for Foundry…" : "Review and edit story…",
+      hint: "See the story write-up as Foundry will, correct it, then approve it.",
       why: off || merged || (!s.hasStory ? "No story write-up yet." : null) },
+    { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
+      why: off || merged || (!s.hasStory ? "No story write-up yet." : needsReview(s, "story") ? "Review and approve it first." : null) },
+    { act: "discord", label: "Post to Discord…", hint: "Post the summary, story or transcript in a text channel. Nothing is posted to Discord otherwise.",
+      why: off || merged || (!s.hasSummary && !s.hasStory && !s.hasTranscript ? "Nothing to post yet." : null) },
     { act: "merge", label: "Merge into an earlier session…", hint: "For a game split in two by a restart.", why: off || busy || merged },
     ...(campaigns.length > 1 ? [{ act: "move-campaign", label: "Move to another campaign…", hint: "Renumbers it there; its folder moves with it.",
       why: off || busy || merged || (s.legacyLayout ? "Update the folder layout first." : null) }] : []),
@@ -129,6 +139,9 @@ function actionsFor(s) {
     { act: "trash", label: "Trash…", hint: "Move it to the trash, where it can be restored or deleted for good.", danger: true, why: off || busy },
   ];
 }
+
+/** Review is on and this summary or story hasn't been approved as it is now. */
+const needsReview = (s, kind) => Boolean(s.reviewRequired && s[`${kind}Review`] && s[`${kind}Review`].state !== "approved");
 
 /**
  * Where a session's summary or story stands in Foundry: confirmed by the bridge client (module
@@ -138,6 +151,11 @@ const WAITING = "Foundry hasn't confirmed it yet: no bridge client or GM online,
   "or ScribBot Bridge older than 0.7.0 (which never confirms).";
 function journal(s, kind) {
   const sent = s[`${kind}SentAt`], at = s[`${kind}JournalAt`], name = s[`${kind}JournalName`];
+  if (needsReview(s, kind)) {
+    const changed = s[`${kind}Review`].state === "changed";
+    return { state: "warn", short: `${kind}: review`, long: changed ? "changed since it was approved; approve it again" : "waiting for review",
+      title: `Foundry gets it once it's approved: open Review in the session's menu.${changed ? " It changed after it was approved." : ""}` };
+  }
   if (at && (!sent || at >= sent)) return { state: "ok", short: `${kind} ✓`, long: `in Foundry as “${name}” (${when(at)})`, title: `In Foundry as “${name}”, confirmed ${when(at)}` };
   if (sent) return { state: "warn", short: `${kind} sent`, long: `sent ${when(sent)}, not confirmed yet`, title: `Sent ${when(sent)}. ${WAITING}` };
   return null;
@@ -149,6 +167,10 @@ function primaryFor(s) {
   if (s.recording) return `<button class="danger" data-act="stop" data-id="${esc(s.id)}">■ Stop</button>`;
   if (s.processing) return "";
   if (s.status === "failed" && s.mergedInto == null) return `<button data-act="process" data-id="${esc(s.id)}">Resume</button>`;
+  if (s.mergedInto == null) {
+    const kind = needsReview(s, "summary") ? "summary" : needsReview(s, "story") ? "story" : null;
+    if (kind) return `<button class="primary" data-act="review-${kind}" data-id="${esc(s.id)}" title="See the ${kind} as Foundry will, correct it, and approve it">Review</button>`;
+  }
   return "";
 }
 
@@ -156,7 +178,7 @@ function primaryFor(s) {
 function visible() {
   return list.filter((s) => {
     if (campaignFilter !== "all" && String(s.campaignId) !== campaignFilter) return false;
-    if (filter === "attention" && !(s.status === "failed" && s.mergedInto == null)) return false;
+    if (filter === "attention" && !(s.mergedInto == null && (s.status === "failed" || needsReview(s, "summary") || needsReview(s, "story")))) return false;
     if (!search) return true;
     return String(s.number) === search.replace(/^#/, "") || (s.title || "").toLowerCase().includes(search) || s.id.includes(search);
   });
@@ -247,6 +269,9 @@ async function onClick(e) {
     case "process": return s && run(s, "process", {}, `Processing session ${s.number}…`);
     case "retranscribe": return s && retranscribe(s);
     case "summarize": return s && run(s, "summarize", {}, `Summarizing session ${s.number}…`);
+    case "review-summary": return s && review(s, "summary");
+    case "review-story": return s && review(s, "story");
+    case "discord": return s && postToDiscord(s);
     case "post-summary": return s && post(s, "summary");
     case "post-story": return s && post(s, "story");
     case "merge": return s && merge(s);
@@ -257,15 +282,27 @@ async function onClick(e) {
     case "preview": return s && preview(s, btn.dataset.name);
     case "migrate": return migrateLayout();
     case "move-campaign": return s && moveCampaign(s);
-    case "rename-campaign": return renameCampaign();
     case "close-detail": selected = null; detail = null; $("s-detail").hidden = true; return render();
-    case "map-add": return mapDialog(null);
-    case "map-edit": return mapDialog(mappings?.mappings.find((m) => m.discordId === btn.dataset.discord && m.guildId === btn.dataset.guild));
-    case "map-remove": return unmap(btn.dataset.guild, btn.dataset.discord);
-    case "map-gm": return setGm(btn.dataset.guild, btn.dataset.discord, btn.dataset.value === "true");
-    case "map-refresh": return loadMappings();
     case "purge-audio": return purgeAudio();
   }
+}
+
+/** The review screen takes the tab's place until it's closed. */
+function review(s, kind) {
+  const listCard = root.querySelector("section.card:not(#s-detail):not(#s-review)");
+  listCard.hidden = true;
+  $("s-detail").hidden = true;
+  reviewing = true;
+  openReview($("s-review"), s.id, kind, {
+    onDiscord: (what) => postToDiscord(s, what),
+    onClose: () => {
+      reviewing = false;
+      listCard.hidden = false;
+      if (detail) $("s-detail").hidden = false;
+      fetchedAt = 0;
+      refresh().then(() => { if (detail?.id === s.id) loadDetail(s.id, false); });
+    },
+  });
 }
 
 async function run(s, action, body, okText) {
@@ -298,6 +335,37 @@ async function post(s, what) {
         : `No Foundry client is connected, so nothing received “${r.title}”. Open the world as the GM or bridge user and post it again, ` +
           "or import it from Foundry's journal sidebar (Import ScribBot Session).", r.foundryConnected || headless ? "ok" : "err");
   }
+}
+
+/** The bot posts session content to Discord only when asked here: pick what and where. */
+async function postToDiscord(s, preselect) {
+  let guilds;
+  try {
+    guilds = (await api("GET", "/api/admin/discord")).guilds || [];
+  } catch (err) {
+    return toast(err.message, "err");
+  }
+  const guild = guilds.find((g) => g.id === s.guildId);
+  if (!guild) return toast("The bot isn't in this session's Discord server (or isn't logged in).", "err");
+  if (!guild.text.length) return toast("The bot can't post in any text channel of that server.", "err");
+  const kinds = [
+    ["summary", "Summary", s.hasSummary, "the recap, top quotes and open threads, with the full summary attached as Markdown"],
+    ["story", "Story write-up", s.hasStory, "attached as Markdown"],
+    ["transcript", "Transcript", s.hasTranscript, "the whole session, attached as Markdown"],
+  ].filter(([, , ok]) => ok);
+  const pick = preselect && kinds.some(([k]) => k === preselect) ? preselect : kinds[0][0];
+  const review = (k) => (s.reviewRequired && s[`${k}Review`] && s[`${k}Review`].state !== "approved") ? " (not approved for Foundry yet)" : "";
+  const r = await openDialog(`<form><h3>Post session ${s.number} to Discord</h3>
+    <fieldset class="field" style="border:none;padding:0;margin:0"><span>What</span>
+      ${kinds.map(([k, label, , hint]) => `<label class="check"><input type="radio" name="what" value="${k}" ${k === pick ? "checked" : ""}>
+        ${esc(label)}${esc(review(k))} <small class="muted">${esc(hint)}</small></label>`).join("")}</fieldset>
+    <label class="field"><span>Channel</span><select name="channelId">
+      ${guild.text.map((t) => `<option value="${esc(t.id)}" ${t.id === s.textChannelId ? "selected" : ""}>#${esc(t.name)}</option>`).join("")}</select>
+      <small>Everyone who can read the channel sees it.</small></label>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Post</button></div></form>`);
+  if (!r) return;
+  await attempt(() => api("POST", `/api/admin/sessions/${encodeURIComponent(s.id)}/discord`, r.data),
+    (x) => `Posted to #${x.channelName}.`);
 }
 
 async function merge(s) {
@@ -391,7 +459,7 @@ async function newRecording() {
       ${guilds.map((g) => `<option value="${esc(g.id)}">${esc(g.name)}${g.recording ? ` (recording #${g.recording.number})` : ""}</option>`).join("")}</select></label>
     ${campaigns.length ? `<label class="field"><span>Campaign</span><select name="campaignId">
       ${campaigns.map((c) => `<option value="${c.id}" ${c.isDefault ? "selected" : ""}>${esc(c.name)}${c.worldId ? "" : " (no Foundry world yet)"}</option>`).join("")}
-      </select><small>Numbered and filed under this campaign. The default is the Foundry world that synced most recently.</small></label>` : ""}
+      </select><small>Numbered and filed under this campaign, with its character mappings. The default is the campaign being played (Campaign tab).</small></label>` : ""}
     <label class="field"><span>Voice channel</span><select name="voiceChannelId" id="nr-voice" required></select></label>
     <label class="field"><span>Text channel for notices</span><select name="textChannelId" id="nr-text" required></select>
       <small>The recording notice is posted here, as <code>/scrib start</code> would, so everyone knows they're being recorded.</small></label>
@@ -441,7 +509,7 @@ function renderDetail() {
   const s = detail;
   const el = $("s-detail");
   if (!s) { el.hidden = true; return; }
-  el.hidden = false;
+  el.hidden = reviewing; // the review screen has the tab while it's open
   const editing = el.contains(document.activeElement) && document.activeElement.matches("input, textarea");
   if (editing) return; // don't replace what someone is typing
   const end = s.endedAt ? Date.parse(s.endedAt) : null;
@@ -507,81 +575,6 @@ async function preview(s, name) {
   }
 }
 
-// ---------- players and characters (/scrib map, unmap, gm)
-async function loadMappings() {
-  const el = $("s-mappings");
-  if (!el) return;
-  try {
-    mappings = await api("GET", "/api/admin/mappings");
-  } catch (err) {
-    mappings = null;
-    el.innerHTML = `<div class="card-head"><h2>Players and characters</h2></div><p class="muted">${esc(err.body?.offline ? "Needs the bot to be running." : err.message)}</p>`;
-    return;
-  }
-  const rowsHtml = mappings.mappings.map((m) => `<tr>
-      <td>${m.name ? esc(m.name) : `<span class="muted">${esc(m.discordId)}</span>`}</td>
-      <td>${m.isGm ? "<b>GM</b>" : esc(m.character || "–")}${m.foundryUserId ? ` <span class="muted small">(Foundry linked)</span>` : ""}</td>
-      <td class="actions-cell">
-        <button data-act="map-edit" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}">Change</button>
-        <button data-act="map-gm" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}" data-value="${!m.isGm}">${m.isGm ? "Not GM" : "Make GM"}</button>
-        <button class="danger" data-act="map-remove" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}">Remove</button></td></tr>`).join("");
-  el.innerHTML = `<div class="card-head"><h2>Players and characters</h2><span class="spacer"></span>
-      <button data-act="map-refresh">Refresh</button><button data-act="map-add">Map a player…</button></div>
-    <p class="muted small" style="margin-top:0">Who speaks for which character, the same as <code>/scrib map</code> and <code>/scrib gm</code>.
-      Picking a Foundry user also stores the Discord ID in Foundry. A change applies to people who haven't spoken yet in a running recording.</p>
-    <div class="table-wrap"><table><thead><tr><th>Discord user</th><th>Character</th><th></th></tr></thead>
-    <tbody>${rowsHtml || `<tr><td colspan="3" class="muted">Nobody is mapped yet. Linked Foundry users are recognized without a mapping.</td></tr>`}</tbody></table></div>
-    <div class="row" style="margin-top:10px"><button data-act="purge-audio" title="Delete kept audio older than AUDIO_RETENTION_DAYS now, instead of waiting for the 6-hourly check">Purge expired audio now</button></div>`;
-}
-
-async function mapDialog(existing) {
-  let guilds = [];
-  try {
-    guilds = (await api("GET", "/api/admin/discord")).guilds || [];
-  } catch (err) {
-    return toast(err.message, "err");
-  }
-  if (!guilds.length) return toast("The bot isn't in any Discord server.", "err");
-  const people = new Map();
-  for (const g of guilds) for (const v of g.voice) for (const m of v.members) people.set(`${g.id}:${m.id}`, { guildId: g.id, id: m.id, name: m.name });
-  for (const m of mappings?.mappings || []) people.set(`${m.guildId}:${m.discordId}`, { guildId: m.guildId, id: m.discordId, name: m.name || m.discordId });
-  const roster = (mappings?.roster || []).filter((r) => r.actorName || r.isGm);
-  const r = await openDialog(`<form><h3>${existing ? `Change ${esc(existing.name || existing.discordId)}` : "Map a player"}</h3>
-    <label class="field" ${guilds.length > 1 && !existing ? "" : "hidden"}><span>Server</span><select name="guildId">
-      ${guilds.map((g) => `<option value="${esc(g.id)}" ${existing?.guildId === g.id ? "selected" : ""}>${esc(g.name)}</option>`).join("")}</select></label>
-    <label class="field" ${existing ? "hidden" : ""}><span>Discord user</span><select name="person">
-      ${[...people.values()].map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}
-      <option value="">Someone else (enter their user ID)…</option></select>
-      <small>People in voice channels right now, and everyone already mapped.</small></label>
-    <label class="field" ${existing ? "hidden" : ""}><span>…or their Discord user ID</span><input name="discordId" inputmode="numeric" pattern="\\d{5,25}" placeholder="Right-click the user → Copy User ID"></label>
-    <label class="field"><span>Character</span><select name="character">
-      ${roster.map((x) => `<option value="foundry:${esc(x.foundryUserId)}">${esc(x.actorName ? `${x.actorName} (Foundry user ${x.userName})` : `${x.userName} (GM)`)}</option>`).join("")}
-      <option value="">Another name…</option></select></label>
-    <label class="field"><span>…or a character name</span><input name="name" maxlength="100" placeholder="Not linked to a Foundry actor"></label>
-    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div></form>`);
-  if (!r) return;
-  const guildId = existing?.guildId || r.data.guildId || guilds[0].id;
-  const discordId = existing?.discordId || r.data.discordId?.trim() || r.data.person;
-  const character = r.data.character || r.data.name?.trim();
-  if (!discordId) return toast("Pick a Discord user or enter their ID.", "err");
-  if (!character) return toast("Pick a character or enter a name.", "err");
-  await attempt(() => api("PUT", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}`, { character }),
-    (x) => `Mapped to ${x.mapped.replace(/\*\*/g, "")}.`);
-  loadMappings();
-}
-
-async function unmap(guildId, discordId) {
-  const ok = await confirmDialog("Remove this mapping?", "<p>They'll be labelled by their Foundry link, or else their Discord name.</p>", { ok: "Remove", danger: true });
-  if (!ok) return;
-  await attempt(() => api("DELETE", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}`), "Removed.");
-  loadMappings();
-}
-
-async function setGm(guildId, discordId, isGm) {
-  await attempt(() => api("POST", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}/gm`, { isGm }), isGm ? "Marked as GM." : "No longer GM.");
-  loadMappings();
-}
-
 async function purgeAudio() {
   await attempt(() => api("POST", "/api/admin/maintenance/purge-audio", {}), (r) => `Audio purged for ${r.purged} session(s).`);
 }
@@ -590,33 +583,17 @@ async function purgeAudio() {
 function renderCampaignHeader() {
   const el = $("s-campaign");
   if (!el) return;
-  if (!campaigns.length) { el.innerHTML = ""; return; }
+  const manage = readOnly ? "" : ` <a class="small" href="#campaign">Campaigns…</a>`;
+  if (!campaigns.length) { el.innerHTML = manage; return; }
   if (campaigns.length === 1) {
     const c = campaigns[0];
-    el.innerHTML = `<span class="muted small" title="Folder data\\campaigns\\${esc(c.folder)}">· ${esc(c.name)}</span>
-      <button class="link small" data-act="rename-campaign" data-campaign="${c.id}">Rename…</button>`;
+    el.innerHTML = `<span class="muted small" title="Folder data\\campaigns\\${esc(c.folder)}">· ${esc(c.name)}</span>${manage}`;
     return;
   }
   el.innerHTML = `<select id="s-campaign-filter" aria-label="Campaign">
       <option value="all">All campaigns</option>
-      ${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === campaignFilter ? "selected" : ""}>${esc(c.name)} (${c.sessions})</option>`).join("")}
-    </select> <button class="link small" data-act="rename-campaign">Rename…</button>`;
-}
-
-async function renameCampaign() {
-  const current = campaigns.find((c) => String(c.id) === campaignFilter) ?? campaigns.find((c) => c.isDefault) ?? campaigns[0];
-  if (!current) return;
-  const r = await openDialog(`<form><h3>Rename a campaign</h3>
-    <label class="field" ${campaigns.length > 1 ? "" : "hidden"}><span>Campaign</span><select name="id">
-      ${campaigns.map((c) => `<option value="${c.id}" ${c.id === current.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
-    <label class="field"><span>Name shown here</span><input name="alias" maxlength="100" value="${esc(current.alias || "")}" placeholder="${esc(current.title || current.folder)}">
-      <small>Only the name shown in the Console changes. The folder stays <code>data\\campaigns\\${esc(current.folder)}</code>, named after the Foundry world
-        ${current.worldId ? `<code>${esc(current.worldId)}</code>` : ""}. Leave blank to use the world's title.</small></label>
-    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div></form>`);
-  if (!r) return;
-  await attempt(() => api("PATCH", `/api/admin/campaigns/${encodeURIComponent(r.data.id || current.id)}`, { alias: r.data.alias.trim() || null }), "Saved.");
-  fetchedAt = 0;
-  refresh();
+      ${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === campaignFilter ? "selected" : ""}>${esc(c.name)} (${c.sessions})${c.isDefault ? " · being played" : ""}</option>`).join("")}
+    </select>${manage}`;
 }
 
 async function moveCampaign(s) {

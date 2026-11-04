@@ -91,6 +91,56 @@ describe("PipelineTracker", () => {
     expect(p.alerts.map((a) => a.key)).toContain("stalled");
   });
 
+  it("counts the clip the worker is converting, and calls it stuck only after two minutes on it", () => {
+    const { tracker, advance } = setup();
+    let p = tracker.build({ sessions: [], recordings: [], worker: { ...worker, current: { file: "x.wav", seconds: 5 } } });
+    advance(130_000);
+    p = tracker.build({ sessions: [], recordings: [], worker: { ...worker, current: { file: "x.wav", seconds: 90 } } });
+    const q = p.queue;
+    expect([q.depth, q.busy, q.busySec, q.waiting, q.stalled]).toEqual([0, true, 90, true, false]); // slow first clip
+    expect(p.shutdown.state).toBe("wait");
+    expect(p.shutdown.reasons.join(" ")).toContain("converting a clip");
+    p = tracker.build({ sessions: [], recordings: [], worker: { ...worker, current: { file: "x.wav", seconds: 125 } } });
+    expect(p.queue.stalled).toBe(true);
+    expect(p.alerts.find((a) => a.key === "stalled")?.text).toContain("on one clip for");
+  });
+
+  it("keeps the rate through silence at the table, and doesn't call the first clip after it stuck", () => {
+    const { tracker, advance } = setup();
+    const live = (queued: number, done: number) => ({ ...worker, queued, liveClips: { done, failed: 0 } });
+    tracker.build({ sessions: [], recordings: [], worker: live(10, 0) });
+    advance(60_000);
+    let p = tracker.build({ sessions: [], recordings: [], worker: live(0, 30) });
+    expect(p.queue.ratePerMin).toBe(30);
+    for (let i = 0; i < 4; i++) { // everyone steps away: nothing to convert for 4 minutes
+      advance(60_000);
+      p = tracker.build({ sessions: [], recordings: [], worker: live(0, 30) });
+    }
+    expect([p.queue.ratePerMin, p.queue.activeSec]).toEqual([30, 60]); // not 30 clips / 5 min = 6
+    for (let i = 0; i < 3; i++) { // the whole window is silence now
+      advance(60_000);
+      p = tracker.build({ sessions: [], recordings: [], worker: live(0, 30) });
+    }
+    expect([p.queue.ratePerMin, p.queue.activeSec]).toEqual([30, 0]); // the last measured rate holds
+    advance(5_000);
+    p = tracker.build({ sessions: [], recordings: [], worker: live(3, 30) }); // they're back
+    expect([p.queue.waiting, p.queue.noProgressSec, p.queue.stalled]).toEqual([true, 0, false]);
+  });
+
+  it("calls clips that never reach the worker stuck, but not a failed session's", () => {
+    const { dir, tracker, advance } = setup();
+    session(dir, "s", { clips: 10, converted: 4 });
+    tracker.build({ sessions: [row("s")], recordings: [], worker });
+    advance(120_000);
+    let p = tracker.build({ sessions: [row("s")], recordings: [], worker });
+    expect([p.queue.ratePerMin, p.queue.etaSec, p.queue.waiting, p.queue.stalled]).toEqual([0, null, true, true]);
+    expect(p.alerts.find((a) => a.key === "stalled")?.text).toContain("Nothing has reached the transcription worker");
+    advance(120_000);
+    p = tracker.build({ sessions: [row("s", { status: "failed", processing: false })], recordings: [], worker });
+    expect([p.queue.waiting, p.queue.stalled]).toEqual([false, false]);
+    expect(p.alerts.map((a) => a.key)).not.toContain("stalled");
+  });
+
   it("says it's safe once nothing is pending, and points failed sessions at /scrib process", () => {
     const { dir, tracker } = setup();
     session(dir, "f", { clips: 5, converted: 5 });

@@ -1,4 +1,5 @@
-import { type FoundryLauncher, type FoundryPage, type ImportResult, JoinError, type PageStatus } from "./client.js";
+import { type FoundryLauncher, type FoundryPage, type FoundryTarget, type ImportResult, JoinError, type PageStatus } from "./client.js";
+import { foundryBaseUrl } from "./url.js";
 
 /**
  * Joins a Foundry world in a headless Chromium-family browser driven by playwright-core,
@@ -76,9 +77,15 @@ async function loadPlaywright(): Promise<PW> {
   }
 }
 
-export function playwrightLauncher(opts: LaunchOptions): FoundryLauncher {
-  const log = opts.log ?? ((m: string) => console.log(`[foundry] ${m}`));
-  return async () => {
+/** `opts` holds the defaults; a target passed at each join (the campaign's server) wins over them. */
+export function playwrightLauncher(base: LaunchOptions): FoundryLauncher {
+  const log = base.log ?? ((m: string) => console.log(`[foundry] ${m}`));
+  return async (target?: FoundryTarget) => {
+    // The client never launches without an address; refuse rather than fall back to another server.
+    if (target && !target.url) throw new JoinError("unreachable", "no Foundry address is set for this campaign");
+    const opts: LaunchOptions = target
+      ? { ...base, url: target.url!, user: target.user, password: target.password ?? base.password }
+      : base;
     const { chromium } = await loadPlaywright();
     const isPath = /[\\/]/.test(opts.browser);
     let browser;
@@ -194,11 +201,20 @@ async function joinWorld(browser: Browser, opts: LaunchOptions, log: (msg: strin
 }
 
 async function login(page: Page, opts: LaunchOptions) {
-  const joinUrl = new URL("join", `${opts.url}/`).toString();
+  // Addresses saved before they were cleaned up on save may still end in /game or /join.
+  const base = foundryBaseUrl(opts.url);
+  const joinUrl = new URL("join", `${base}/`).toString();
+  let response;
   try {
-    await page.goto(joinUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    response = await page.goto(joinUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
   } catch (err) {
-    throw new JoinError("unreachable", `Foundry at ${opts.url} didn't answer (${firstLine(err)}).`);
+    throw new JoinError("unreachable", `Foundry at ${base} didn't answer (${firstLine(err)}).`);
+  }
+  if (response && response.status() >= 400) {
+    throw new JoinError(
+      "unreachable",
+      `${joinUrl} answered HTTP ${response.status()}. Is ${base} the address of the Foundry server (what you'd open before /join)?`,
+    );
   }
   const landing = classifyLanding(page.url());
   if (landing === "setup") throw new JoinError("no-world", "no world is running in Foundry (it is on the setup screen). Launch the world.");

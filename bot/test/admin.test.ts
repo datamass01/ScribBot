@@ -9,6 +9,7 @@ process.env.API_TOKEN = "secret-token";
 process.env.API_PORT = "0";
 process.env.WORKER_URL = "http://127.0.0.1:9";
 process.env.LLM_PROVIDER = "anthropic";
+process.env.REVIEW_BEFORE_FOUNDRY = "false"; // these test sending as such; review.test.ts covers the review gate
 process.env.ANTHROPIC_API_KEY = "";
 process.env.ANTHROPIC_AUTH_TOKEN = "";
 delete process.env.ANTHROPIC_PROFILE;
@@ -40,16 +41,24 @@ function fakeSessions() {
     processFromConsole: async (s: SessionRow, o: { summaryOnly?: boolean; retranscribe?: boolean }) => {
       calls.push(`${o.summaryOnly ? "summarize" : "process"} ${s.id}${o.retranscribe ? " retranscribe" : ""}`);
     },
+    postToDiscord: async (s: SessionRow, what: string, channelId?: string) => {
+      calls.push(`discord ${s.id} ${what} ${channelId ?? "-"}`);
+      return { channelId: channelId ?? "t1", channelName: "table" };
+    },
+    reviseFromConsole: async (s: SessionRow, feedback: string) => {
+      calls.push(`revise ${s.id} ${feedback}`);
+    },
     mergeInto: (a: SessionRow, b: SessionRow) => {
       calls.push(`merge ${b.id} into ${a.id}`);
       return "merged";
     },
-    setMapping: (g: string, d: string, v: string) => {
-      calls.push(`map ${g} ${d} ${v}`);
+    setMapping: (g: string, d: string, v: string, c?: number) => {
+      calls.push(`map ${g} ${d} ${v} @${c}`);
       return `**${v}**`;
     },
-    clearMapping: (g: string, d: string) => void calls.push(`unmap ${g} ${d}`),
-    setGm: (g: string, d: string, gm: boolean) => void calls.push(`gm ${g} ${d} ${gm}`),
+    clearMapping: (g: string, d: string, c?: number) => void calls.push(`unmap ${g} ${d} @${c}`),
+    setGm: (g: string, d: string, gm: boolean, c?: number) => void calls.push(`gm ${g} ${d} ${gm} @${c}`),
+    playingCampaignId: () => 0,
     memberNames: async (_g: string, ids: string[]) => Object.fromEntries(ids.map((id) => [id, `user-${id}`])),
   };
 }
@@ -184,6 +193,16 @@ describe("Console admin API", () => {
     expect(store.getSession(s.id)?.summary_sent_at).toBeTruthy();
   });
 
+  it("posts a session's content to Discord only when the Console asks", async () => {
+    const s = newSession({ "summary.json": "{}" });
+    const ok = await call("POST", `/admin/sessions/${s.id}/discord`, { what: "transcript", channelId: "123456789012" });
+    expect(ok.body).toEqual({ ok: true, channelId: "123456789012", channelName: "table" });
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "summary" })).status).toBe(200);
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "audio" })).status).toBe(400);
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "story", channelId: "#general" })).status).toBe(400);
+    expect(sessions.calls).toEqual([`discord ${s.id} transcript 123456789012`, `discord ${s.id} summary -`]);
+  });
+
   it("records Foundry's confirmation that the journal entry exists", async () => {
     const ack = (id: string, body: unknown, token = "secret-token") =>
       fetch(`${base}/sessions/${id}/journal`, {
@@ -241,7 +260,66 @@ describe("Console admin API", () => {
     expect((await call("POST", "/admin/mappings/g1/123456789/gm", { isGm: true })).status).toBe(200);
     expect((await call("DELETE", "/admin/mappings/g1/123456789")).status).toBe(200);
     expect((await call("PUT", "/admin/mappings/g1/not-an-id", { character: "Thorin" })).status).toBe(400);
-    expect(sessions.calls).toEqual(["map g1 123456789 Thorin", "gm g1 123456789 true", "unmap g1 123456789"]);
+    expect(sessions.calls).toEqual(["map g1 123456789 Thorin @0", "gm g1 123456789 true @0", "unmap g1 123456789 @0"]);
+  });
+
+  it("changes a named campaign's mappings, and refuses an unknown one", async () => {
+    const c = store.createCampaign({ name: "Mapping test" });
+    expect((await call("PUT", `/admin/mappings/g1/123456789?campaign=${c.id}`, { character: "Elara" })).status).toBe(200);
+    expect((await call("DELETE", `/admin/mappings/g1/123456789?campaign=${c.id}`)).status).toBe(200);
+    expect((await call("PUT", "/admin/mappings/g1/123456789?campaign=99999", { character: "Elara" })).status).toBe(404);
+    expect(sessions.calls).toEqual([`map g1 123456789 Elara @${c.id}`, `unmap g1 123456789 @${c.id}`]);
+    store.deleteCampaign(c.id);
+  });
+
+  it("lists a campaign's mappings with the shared ones it doesn't override", async () => {
+    const c = store.createCampaign({ name: "Mapped campaign" });
+    store.upsertMapping({ campaignId: 0, guildId: "g1", discordId: "111111", characterName: "Thorin" });
+    store.upsertMapping({ campaignId: 0, guildId: "g1", discordId: "222222", characterName: "Elara" });
+    store.upsertMapping({ campaignId: c.id, guildId: "g1", discordId: "222222", characterName: "Grubnak" });
+    const r = (await call("GET", `/admin/mappings?campaign=${c.id}`)).body;
+    expect(r.mappings.map((m: any) => [m.discordId, m.character, m.shared])).toEqual([["111111", "Thorin", true], ["222222", "Grubnak", false]]);
+    store.deleteMapping("g1", "111111", 0);
+    store.deleteMapping("g1", "222222", 0);
+    store.deleteCampaign(c.id);
+  });
+
+  it("manages campaigns for the Campaign tab without ever returning a password", async () => {
+    const created = await call("POST", "/admin/campaigns", { name: "Curse of Strahd" });
+    expect(created.status).toBe(200);
+    const id = created.body.campaign.id;
+    expect(created.body.campaign).toMatchObject({ name: "Curse of Strahd", folder: "curse-of-strahd", worldId: null });
+
+    const patch = await call("PATCH", `/admin/campaigns/${id}`, {
+      worldId: "strahd", foundryUrl: "https://foundry.example.com/game", foundryUser: "Scribe", foundryPassword: "hunter2",
+    });
+    expect(patch.status).toBe(200);
+    expect((await call("PATCH", `/admin/campaigns/${id}`, { foundryUrl: "ftp://nope" })).status).toBe(400);
+
+    const list = await call("GET", "/admin/campaigns");
+    expect(JSON.stringify(list.body)).not.toContain("hunter2");
+    const c = list.body.campaigns.find((x: any) => x.id === id);
+    expect(c).toMatchObject({ worldId: "strahd", foundry: { url: "https://foundry.example.com", user: "Scribe", passwordSet: true } });
+    expect(list.body.foundryDefaults).toHaveProperty("passwordSet");
+    expect(list.body.foundryDefaults).not.toHaveProperty("url"); // .env's address is never shown for a campaign
+
+    // Choosing it makes it the campaign being played; null goes back to automatic.
+    expect((await call("POST", "/admin/campaigns/playing", { campaignId: id })).body.playing).toMatchObject({ id, name: "Curse of Strahd" });
+    expect((await call("GET", "/admin/campaigns")).body.chosenId).toBe(id);
+    expect(store.defaultCampaign().id).toBe(id);
+    expect((await call("POST", "/admin/campaigns/playing", { campaignId: null })).status).toBe(200);
+    expect((await call("GET", "/admin/campaigns")).body.chosenId).toBeNull();
+
+    // Clearing the password; deleting is refused once it holds a session.
+    await call("PATCH", `/admin/campaigns/${id}`, { foundryPassword: null });
+    expect(store.getCampaign(id)!.foundry_password).toBeNull();
+    const s = store.createSession({ id: "2026-11-02-camp", guildId: "g1", channelId: "v", textChannelId: null, startedAt: new Date().toISOString(), campaignId: id });
+    const refused = await call("DELETE", `/admin/campaigns/${id}`);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toContain("1 session");
+    store.db.prepare("DELETE FROM sessions WHERE id = ?").run(s.id);
+    expect((await call("DELETE", `/admin/campaigns/${id}`)).status).toBe(200);
+    expect(store.getCampaign(id)).toBeUndefined();
   });
 
   it("refuses to restart while recording and restarts otherwise", async () => {

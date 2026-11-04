@@ -5,15 +5,17 @@ import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import { config } from "../config.js";
 import { writeFileAtomic } from "../fsutil.js";
-import type { RosterRow, SessionRow, Store } from "../db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, type RosterRow, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { composeSession } from "../layout.js";
 import { linksToWrite } from "../links.js";
 import { logsSince } from "../monitor.js";
 import { foundryActorsFile, sessionPaths } from "../paths.js";
-import { announceStory, findStoryFile, loadStory, storyAsset, storySessionIds } from "../story.js";
+import { findStoryFile, loadStory, storyAsset, storySessionIds } from "../story.js";
+import { announceStory, foundryMayHave, reviewBlocker } from "../review.js";
 import { ChatLogSchema, JournalAckSchema, RosterPayloadSchema } from "../types.js";
 import { adminGuard, registerAdminRoutes, type AdminDeps } from "./admin.js";
+import { allowedOrigins, originOf } from "./origins.js";
 import { buildStatus, type FoundryActivity, type MonitorSources } from "./status.js";
 
 const DASHBOARD_FILE = new URL("../../public/dashboard.html", import.meta.url);
@@ -27,7 +29,7 @@ function tokenMatches(given: string | undefined) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const publicSession = (s: SessionRow) => ({
+const publicSession = (store: Store) => (s: SessionRow) => ({
   id: s.id,
   number: s.number,
   status: s.status,
@@ -38,6 +40,9 @@ const publicSession = (s: SessionRow) => ({
   hasSummary: fs.existsSync(sessionPaths(s.id).summary),
   hasChatlog: fs.existsSync(sessionPaths(s.id).chatlog),
   hasStory: findStoryFile(s.id) !== null,
+  // Review before Foundry: false while it waits for approval (the module's import dialog says so).
+  summaryApproved: foundryMayHave(store, s, "summary"),
+  storyApproved: foundryMayHave(store, s, "story"),
 });
 
 /** `admin`: the Console's routes (/admin/*); left out, they don't exist. */
@@ -49,7 +54,8 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
 
   const app = Fastify({ bodyLimit: 25 * 1024 * 1024, logger: false });
   await app.register(cors, {
-    origin: config.api.origins,
+    // FOUNDRY_ORIGINS, plus each campaign's own Foundry server (the Campaign tab), read per request.
+    origin: (origin, cb) => cb(null, Boolean(origin) && allowedOrigins(store).has(originOf(origin!) ?? "")),
     methods: ["GET", "POST"],
     allowedHeaders: ["authorization", "content-type"],
   });
@@ -86,7 +92,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
   app.get("/ws", { websocket: true }, (socket) => {
     const send = (data: unknown) => socket.readyState === socket.OPEN && socket.send(JSON.stringify(data));
     const rec = getRecording();
-    send({ type: "hello", recording: rec ? publicSession(rec) : null });
+    send({ type: "hello", recording: rec ? publicSession(store)(rec) : null });
     const off = bus.onEvent(send);
     foundry.sockets++;
     socket.on("close", () => {
@@ -108,8 +114,10 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       discord_id: u.discordId,
     }));
     store.replaceRoster(rows);
-    // Each Foundry world is a campaign; the one synced most recently gets new recordings.
-    if (parsed.data.world) store.touchWorld(parsed.data.world, parsed.data.worldTitle ?? null);
+    // Each Foundry world is a campaign; without one chosen in the Campaign tab, the one synced most
+    // recently gets new recordings.
+    const campaign = parsed.data.world ? store.touchWorld(parsed.data.world, parsed.data.worldTitle ?? null) : store.defaultCampaign({ create: false });
+    store.setMeta("roster_world", parsed.data.world ?? null);
     const actorsJson = JSON.stringify(parsed.data.actors, null, 2);
     writeFileAtomic(foundryActorsFile(), actorsJson);
     // The session's own copy: the session named in the sync (start/stop), else the one recording.
@@ -124,7 +132,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     foundry.lastRosterWorld = parsed.data.world;
     // Fill in Foundry's "Discord ID" flags from /scrib map, including mappings made while Foundry
     // was offline; this repeats on every sync until the flags match (05 C11).
-    const links = linksToWrite(store.getAllMappings(), rows);
+    const links = linksToWrite(store.getCampaignMappings(campaign && campaign.folder !== UNASSIGNED_FOLDER ? campaign.id : ALL_CAMPAIGNS), rows);
     if (links.length) {
       console.log(`[api] asking Foundry to link ${links.length} user(s) to their Discord IDs (from /scrib map)`);
       bus.emitEvent({ type: "roster.link", links });
@@ -134,11 +142,11 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
 
   if (admin) registerAdminRoutes(app, store, admin, () => foundry.sockets);
 
-  app.get("/sessions", async () => store.listSessions(50).map(publicSession));
+  app.get("/sessions", async () => store.listSessions(50).map(publicSession(store)));
 
   app.get<{ Params: { id: string } }>("/sessions/:id", async (req, reply) => {
     const s = findSession(req.params.id);
-    return s ? publicSession(s) : reply.code(404).send({ error: "no such session" });
+    return s ? publicSession(store)(s) : reply.code(404).send({ error: "no such session" });
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/chatlog", async (req, reply) => {
@@ -183,6 +191,9 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       if (!s) return reply.code(404).send({ error: "no such session" });
       const file = sessionPaths(s.id)[key];
       if (!fs.existsSync(file)) return reply.code(404).send({ error: `${key} not available yet`, status: s.status });
+      // Foundry gets a summary only once it's approved (with review on); the Console reads it through /admin.
+      const held = key === "summary" ? reviewBlocker(store, s, "summary") : null;
+      if (held) return reply.code(409).send({ error: held, review: true });
       return reply.type("application/json").send(fs.readFileSync(file, "utf8"));
     };
   app.get("/sessions/:id/summary", serveJson("summary"));
@@ -193,7 +204,10 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     const s = findSession(req.params.id);
     if (!s) return reply.code(404).send({ error: "no such session" });
     try {
-      return loadStory(store, s);
+      const story = loadStory(store, s);
+      const held = reviewBlocker(store, s, "story");
+      if (held) return reply.code(409).send({ error: held, review: true });
+      return story;
     } catch (err) {
       return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -211,6 +225,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       const story = announceStory(store, s);
       return { ok: true, sessionId: story.sessionId, title: story.title, foundryConnected: foundry.sockets > 0 };
     } catch (err) {
+      if (reviewBlocker(store, s, "story")) return reply.code(409).send({ error: err instanceof Error ? err.message : String(err), review: true });
       return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });

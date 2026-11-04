@@ -585,6 +585,30 @@ def whisper_options(settings) -> WhisperOptions:
 SETTLED_SECONDS = 120
 
 
+
+
+def campaign_folder_of(session_dir: Path | str) -> str | None:
+    """The campaign folder of a recording folder (DATA_DIR/campaigns/<folder>/sessions/...), or None (old flat layout).
+
+    Same rule as the bot's campaignFolderOfPath().
+    """
+    import re
+
+    m = re.search(r"(?:^|[\\/])campaigns[\\/]([^\\/]+)[\\/]sessions(?:[\\/]|$)", str(session_dir))
+    return m.group(1) if m else None
+
+
+def notes_file(campaign_dir: Path, name: str, folder: str | None) -> Path:
+    """A campaign's own note (CAMPAIGN_DIR/<folder>/<name>), else the shared one. Same rule as the bot's campaignNoteFile()."""
+    import re
+
+    if folder and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", folder):
+        own = campaign_dir / folder / name
+        if own.exists():
+            return own
+    return campaign_dir / name
+
+
 def glossary_names(text: str) -> list[str]:
     """Same rule as the bot's glossaryNames(): each list item or line, up to any ':' note."""
     import re

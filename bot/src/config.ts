@@ -29,9 +29,15 @@ const EnvSchema = z.object({
 
   // Headless Foundry client (bot/src/foundry/): off | session (joins while recording, and to
   // import a summary) | always (stays joined while the bot runs).
+  // Blank means the default, as for every setting; true/false are accepted as session/off.
   FOUNDRY_HEADLESS: z.preprocess(
-    (v) => (typeof v === "string" ? (/^(true|1|yes|on)$/i.test(v.trim()) ? "session" : /^(false|0|no|off|)$/i.test(v.trim()) ? "off" : v.trim().toLowerCase()) : v),
-    z.enum(["off", "session", "always"]).default("off"),
+    (v) => {
+      if (typeof v !== "string") return v;
+      const s = v.trim().toLowerCase();
+      if (!s) return undefined;
+      return /^(true|1|yes|on)$/.test(s) ? "session" : /^(false|0|no|off)$/.test(s) ? "off" : s;
+    },
+    z.enum(["off", "session", "always"]).default("session"),
   ),
   FOUNDRY_URL: optionalString,
   FOUNDRY_USER: z.string().default("ScribBot"),
@@ -89,6 +95,11 @@ const EnvSchema = z.object({
   AUTO_SUMMARIZE: z.preprocess(
     (v) => (typeof v === "string" ? /^(true|1|yes|on)$/i.test(v.trim()) : v),
     z.boolean().default(false),
+  ),
+  // On by default: a summary or story goes to Foundry only after someone has reviewed and approved it.
+  REVIEW_BEFORE_FOUNDRY: z.preprocess(
+    (v) => (typeof v === "string" ? !/^(false|0|no|off)$/i.test(v.trim()) : v),
+    z.boolean().default(true),
   ),
 
   DELETE_AUDIO_AFTER_TRANSCRIBE: z.preprocess(
@@ -148,6 +159,7 @@ export const SUMMARY_KEYS = [
   "LLM_CLI_PATH",
   "SUMMARY_CHUNK_MINUTES",
   "AUTO_SUMMARIZE",
+  "REVIEW_BEFORE_FOUNDRY",
 ] as const;
 
 const SummaryEnvSchema = EnvSchema.pick(Object.fromEntries(SUMMARY_KEYS.map((k) => [k, true])) as { [K in (typeof SUMMARY_KEYS)[number]]: true });
@@ -182,6 +194,7 @@ function buildSummaryConfig(e: z.infer<typeof SummaryEnvSchema>) {
       chunkMinutes: e.SUMMARY_CHUNK_MINUTES,
     },
     autoSummarize: e.AUTO_SUMMARIZE,
+    reviewBeforeFoundry: e.REVIEW_BEFORE_FOUNDRY,
   };
 }
 
@@ -279,6 +292,10 @@ export const config = {
   /** Summarize automatically after transcription. Off: only `/scrib summarize` sends a transcript to the LLM. Live, like llm. */
   get autoSummarize() {
     return summaryConfig().autoSummarize;
+  },
+  /** A summary or story goes to Foundry only once someone has approved it (bot/src/review.ts). Live, like llm. */
+  get reviewBeforeFoundry() {
+    return summaryConfig().reviewBeforeFoundry;
   },
   /** Transcribe each clip as it is recorded, then delete the WAV once its text is saved. */
   deleteAudioAfterTranscribe: env.DELETE_AUDIO_AFTER_TRANSCRIBE,

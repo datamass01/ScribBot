@@ -1,4 +1,4 @@
-"""The ScribBot Console: one local page with Sessions, Monitoring and Configuration tabs.
+"""The ScribBot Console: one local page with Sessions, Campaign, Monitoring and Configuration tabs.
 
     python -m scribconsole            # serves http://127.0.0.1:7422/ and opens your browser
     python -m scribconsole --no-browser --port 7500 --no-log-file
@@ -26,11 +26,17 @@ from urllib.parse import parse_qs, urlsplit
 
 from .botlink import SLOW_TIMEOUT_S, BotLink, BotUnreachable, admin_path, worker_call
 from .envfile import EnvFile, EnvValueError
-from .monitoring import REPO_ROOT, Config, LogFile, Monitor, log
+from .monitoring import REPO_ROOT, SAFE_FOLDER, Config, LogFile, Monitor, log
 from .settings import Settings, SettingsError, restart_needed_by
 from .setup_checks import NodeVersion, run_checks
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The Foundry module's own page builder and styles, so the review screen previews a journal entry
+# with exactly the code Foundry runs (foundry-module/scripts/journal.js has no Foundry globals).
+FOUNDRY_FILES = {
+    "journal.js": REPO_ROOT / "foundry-module" / "scripts" / "journal.js",
+    "scribbot.css": REPO_ROOT / "foundry-module" / "styles" / "scribbot.css",
+}
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".svg": "image/svg+xml"}
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -150,6 +156,44 @@ class Console:
             })
         return out
 
+    def offline_campaigns(self) -> dict[str, Any]:
+        """The campaigns from the database, read-only, while the bot is down (never the Foundry password)."""
+        db = self.cfg.data_dir / "scribbot.db"
+        out: dict[str, Any] = {"campaigns": [], "chosenId": None, "rosterWorld": None, "foundryDefaults": None, "readOnly": True}
+        if not db.exists():
+            return out
+        try:
+            conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=1)
+        except sqlite3.Error:
+            return out
+        try:
+            conn.row_factory = sqlite3.Row
+            cols = {r[1] for r in conn.execute("pragma table_info(campaigns)")}
+            if not cols:
+                return out
+            rows = [dict(r) for r in conn.execute("SELECT * FROM campaigns ORDER BY last_seen_at IS NULL, last_seen_at DESC, id")]
+            counts = dict(conn.execute(
+                "SELECT campaign_id, COUNT(*) FROM sessions WHERE merged_into_id IS NULL AND deleted_at IS NULL GROUP BY campaign_id").fetchall())
+        except sqlite3.Error as err:
+            log(f"couldn't read campaigns from {db}: {err}")
+            return out
+        finally:
+            conn.close()
+        chosen = max((r for r in rows if r.get("selected_at")), key=lambda r: r["selected_at"], default=None)
+        out["chosenId"] = chosen["id"] if chosen else None
+        # Without a choice, the world Foundry synced last is where new recordings go (the bot's defaultCampaign()).
+        default = chosen or next((r for r in rows if r.get("world_id") and r.get("last_seen_at")), None)
+        for r in rows:
+            out["campaigns"].append({
+                "id": r["id"], "worldId": r.get("world_id"), "folder": r["folder"], "title": r.get("title"), "alias": r.get("alias"),
+                "name": r.get("alias") or r.get("title") or r["folder"], "lastSeenAt": r.get("last_seen_at"),
+                "isDefault": default is not None and default["id"] == r["id"], "chosen": chosen is not None and chosen["id"] == r["id"],
+                "unassigned": r["folder"] == "_unassigned", "sessions": counts.get(r["id"], 0),
+                "folderPath": str(self.cfg.data_dir / "campaigns" / r["folder"]),
+                "foundry": {"url": r.get("foundry_url"), "user": r.get("foundry_user"), "passwordSet": bool(r.get("foundry_password"))},
+            })
+        return out
+
     # ---- configuration
 
     def save_settings(self, changes: dict[str, Any], version: str | None) -> dict[str, Any]:
@@ -195,11 +239,24 @@ class Console:
             self.audit.event(f"worker {action} ({reason})")
         return reply.status, reply.body if isinstance(reply.body, dict) else {"ok": reply.status < 400}
 
-    # ---- campaign notes
+    # ---- campaign notes: CAMPAIGN_DIR/<campaign folder>/<file> (the Campaign tab), or the shared CAMPAIGN_DIR/<file>
 
-    def campaign_file(self, name: str) -> Path | None:
+    def campaign_file(self, name: str, folder: str | None = None) -> Path | None:
         file = CAMPAIGN_FILES.get(name)
-        return self.cfg.campaign_dir / file if file else None
+        if not file or (folder is not None and not SAFE_FOLDER.fullmatch(folder)):
+            return None
+        return self.cfg.campaign_dir / folder / file if folder else self.cfg.campaign_dir / file
+
+    def read_campaign_file(self, name: str, folder: str | None) -> dict[str, Any] | None:
+        """A campaign's note, or the shared one it still uses (inherited) until the campaign saves its own."""
+        file = self.campaign_file(name, folder)
+        if not file:
+            return None
+        shared = self.campaign_file(name)
+        if file.exists() or not folder:
+            return {"path": str(file), "exists": file.exists(), "inherited": False, "text": file.read_text("utf-8") if file.exists() else ""}
+        return {"path": str(file), "exists": False, "inherited": shared.exists(), "sharedPath": str(shared),
+                "text": shared.read_text("utf-8") if shared.exists() else ""}
 
 
 def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
@@ -216,6 +273,8 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
             try:
                 if path in ("/", "/index.html", "/dashboard"):
                     return self._static("index.html")
+                if path.startswith("/static/foundry/"):
+                    return self._foundry_file(path[len("/static/foundry/"):])
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
                 if path == "/status":
@@ -237,11 +296,11 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/setup":
                     return self._json(200, console.setup())
                 if path.startswith("/api/campaign/"):
-                    file = console.campaign_file(path.rsplit("/", 1)[1])
-                    if not file:
+                    folder = parse_qs(url.query).get("campaign", [None])[0]
+                    note = console.read_campaign_file(path.rsplit("/", 1)[1], folder)
+                    if not note:
                         return self._json(404, {"ok": False, "error": "no such file"})
-                    text = file.read_text("utf-8") if file.exists() else ""
-                    return self._json(200, {"path": str(file), "exists": file.exists(), "text": text})
+                    return self._json(200, note)
                 if path.startswith("/api/admin/"):
                     return self._admin("GET", path[len("/api/admin/"):], url.query, None)
                 return self._send(404, b"not found", "text/plain")
@@ -305,14 +364,14 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
                         return self._json(502, {"ok": False, "error": f"The worker isn't answering ({err.reason})."})
                     return self._json(code, reply)
                 if path.startswith("/api/campaign/") and method == "PUT":
-                    file = console.campaign_file(path.rsplit("/", 1)[1])
+                    file = console.campaign_file(path.rsplit("/", 1)[1], parse_qs(url.query).get("campaign", [None])[0])
                     if not file or not isinstance(body, dict) or not isinstance(body.get("text"), str):
                         return self._json(400, {"ok": False, "error": "expected {text}"})
                     file.parent.mkdir(parents=True, exist_ok=True)
                     tmp = file.with_name(file.name + ".tmp")
                     tmp.write_text(body["text"], encoding="utf-8")
                     tmp.replace(file)
-                    console.audit.event(f"campaign file saved: {file.name}")
+                    console.audit.event(f"campaign file saved: {file.relative_to(console.cfg.campaign_dir)}")
                     return self._json(200, {"ok": True})
                 return self._json(404, {"ok": False, "error": "not found"})
             except Exception as err:  # noqa: BLE001
@@ -327,13 +386,15 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
                 return self._json(400, {"ok": False, "error": "bad path"})
             # Listing a CLI's models starts that CLI, which can take a while.
             slow = (method != "GET" and target.startswith(SLOW_ADMIN)) or target.startswith("/admin/llm/models")
-            listing = method == "GET" and target.split("?")[0] == "/admin/sessions"
+            listing = method == "GET" and target.split("?")[0] in ("/admin/sessions", "/admin/campaigns")
             try:
                 # The sampler already knows the bot is down: on Windows a refused connection takes ~2 s.
                 if listing and console.monitor.bot_online is False:
                     raise BotUnreachable("the bot is offline")
                 reply = console.link.call(method, target, body, timeout=SLOW_TIMEOUT_S if slow else 10)
             except BotUnreachable as err:
+                if listing and target.startswith("/admin/campaigns"):
+                    return self._json(200, console.offline_campaigns())
                 if listing:
                     deleted = parse_qs(query).get("deleted", ["exclude"])[0]
                     return self._json(200, {"sessions": console.offline_sessions(deleted), "readOnly": True})
@@ -385,6 +446,12 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
             if not kind or not file.is_file():
                 return self._send(404, b"not found", "text/plain")
             self._send(200, file.read_bytes(), kind)
+
+        def _foundry_file(self, name: str) -> None:
+            file = FOUNDRY_FILES.get(name)
+            if not file or not file.is_file():
+                return self._send(404, b"not found", "text/plain")
+            self._send(200, file.read_bytes(), STATIC_TYPES[file.suffix])
 
         def _json(self, code: int, data: Any) -> None:
             self._send(code, json.dumps(data).encode("utf-8"), "application/json")
