@@ -197,7 +197,11 @@ function Run-Checks {
     } else {
         Row FAIL "Node.js 22.12+" "not found"; Need-Fix "Node.js 22.12+" (Hint-Node)
     }
-    if (Get-Command npm -ErrorAction SilentlyContinue) { Row ok "npm" ("$(npm --version 2>$null)".Trim()) }
+    # Only trust a version npm actually prints: a leftover shim in %APPDATA%\npm (from `npm i -g npm`)
+    # is found even without Node.js, prints nothing and still exits 0.
+    $npmVersion = ""
+    if ($nodeOk -and (Get-Command npm -ErrorAction SilentlyContinue)) { $npmVersion = "$(npm --version 2>$null)".Trim() }
+    if ($npmVersion) { Row ok "npm" $npmVersion }
     elseif ($nodeOk) { Row FAIL "npm" "not found"; Need-Fix "npm" @("Reinstall Node.js from https://nodejs.org/; npm comes with it.") }
     else { Row skip "npm" "comes with Node.js" }
 
@@ -243,8 +247,10 @@ function Run-Checks {
     if ($script:wantCuda) {
         $gpu = $null
         if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-            $gpu = "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1)".Trim()
-            if ($LASTEXITCODE -ne 0) { $gpu = $null }
+            # Read all of it before taking the first line: in Windows PowerShell 5.1, Select-Object -First
+            # stops the pipeline and kills nvidia-smi if it hasn't exited yet, so $LASTEXITCODE is -1.
+            $names = @(nvidia-smi --query-gpu=name --format=csv,noheader 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $names.Count) { $gpu = "$($names[0])".Trim() }
         }
         if ($gpu) { Row ok "NVIDIA GPU driver" $gpu }
         else { Row warn "NVIDIA GPU driver" "not working: install it (https://www.nvidia.com/drivers) or set WHISPER_DEVICE=cpu" }
