@@ -293,6 +293,75 @@ With `REVIEW_BEFORE_FOUNDRY=true` (the default; a live setting, like the LLM one
 - **LLM corrections.** `reviseSummary()` (`/scrib revise`, `POST /admin/sessions/:id/summary/revise`) sends the current summary, hand edits included, the chunk notes it came from (`notes.json`), the campaign notes and the reviewer's feedback, plus every earlier request so a revision doesn't undo one (`revisePrompt()`), and asks for the whole summary back with only what was asked changed. Quotes the summary already had are kept as they were; new ones are verified like a fresh summary's. The request is appended to `revisions` in `summary.json`. It runs under the processing guard (`reviseSession()`, status `summarizing`); a failure leaves the summary unchanged, the session `complete` with the reason in `error`, and the table told. Stories come from the skill (§8.1), so only their text is edited here.
 - **Approving.** `POST /admin/sessions/:id/summary|story/approve` `{hash, post?}` records the approval and, unless `post: false`, sends it (`manual`, so **Import summaries automatically** off doesn't stop it). `/scrib approve [session] [what]` approves the current version from Discord, for someone who has read it in the Console or in a Console post to Discord. Approving or revising from Discord needs the GM mapping (`/scrib gm`) or Manage Server.
 
+### 8.3 Planned: the Story becomes the only write-up
+
+**Status: planned, not built.** §4–§9 still describe today's behavior. When this is built, it is folded into them and this section is removed.
+
+Today a session can get two write-ups: the **Summary**, written by the bot after every session (§8, structured JSON rendered field by field), and the **Story**, written separately with the `summarize-session` skill (§8.1). The Story reads better: a cleaned transcript, one writer who sees the whole session, a fixed section template, a style guide and a checker. The Summary's advantage is only that it runs unattended. The plan keeps the Story and has the bot write it, so a session has one document, everywhere.
+
+#### Who runs it: the bot
+
+The bot writes the story in its pipeline, in the step where it writes the summary today. The Console stays optional (it reviews, edits and approves through `/admin/*`, as now) and nothing waits on it.
+
+The bot doesn't port the skill. It runs the skill's own standard-library scripts, so the agent path (§8.1) and the pipeline share one hallucination filter, one template, one prompt and one checker, and can't drift apart:
+
+- **Python.** `worker/.venv`'s interpreter when it exists (the worker needs Python anyway, and both run on one machine, §14), else `py -3` on Windows and `python3` elsewhere. No new setting. `/status` warns when none is found.
+- **The scripts get machine-readable output** for the bot: `prepare.py --json` prints where it wrote each file and writes `story/nicknames.json` beside `nicknames.md`; `verify.py --json` prints `{pass, failures[], warnings[], quotes[]}`. Their text output stays for people.
+- **The model gets `PROMPT.md` as its instructions** (the system prompt) and the pack as its material. The bot's own `SYSTEM_PROMPT`, chunk and merge prompts go.
+
+#### Steps (`bot/src/story/write.ts`)
+
+Each step writes into the game's `story/` folder and is skipped when its output is already there, so `/scrib process` resumes (CLAUDE.md conventions).
+
+1. **Prepare.** `prepare.py <session id> --unconfirmed-ok --json --chunk-minutes <SUMMARY_CHUNK_MINUTES>` builds `pack.md`, `chunks/`, `noise.md`, `lines.json` and the filled-in template. Skipped while `pack.md` is newer than `transcript.json` and `chatlog.json`.
+   - **Nicknames.** Unattended, nobody can answer `prepare.py`'s nickname questions, so `--unconfirmed-ok` treats every unconfirmed name as a real person: the writer is told to leave them out, and `verify.py` fails a story that uses one. The names, with their evidence lines and suggestions, are listed in the review screen (and in `/scrib nickname`'s autocomplete). Confirming one (`POST /admin/sessions/:id/nicknames`, `/scrib nickname name:<nick> who:<character|GM|absent|not-a-person>`) saves it to `data/nicknames.json` as `--nickname` does, prepares the pack again, and offers to rewrite the story.
+2. **Write.** One `generateJson` request with the schema `{ title, markdown }`, effort `high`. The prompt is `pack.md` followed by the filled-in template, the same as `prompt-full.md`.
+   - **Chunking (`SUMMARY_CHUNKING`, off by default).** On, the model first writes "Part notes" (the format at the end of `PROMPT.md`) for each `chunks/NN.md`, 3 at a time, saved as `story/notes/NN.md`, then writes the story from all the notes plus the template. For models with small context windows: about 3k tokens per 15-minute part instead of about 12k tokens per hour for the whole pack. Part notes already written are reused on a resume.
+3. **Check.** `verify.py --json`. If it fails, the failures go back to the model with the draft ("fix these, change nothing else"), up to 2 times. A story that still fails is kept, and the review screen lists its failures above the editor as warnings. They don't block approval: approving it anyway is the reviewer's call. It is never sent to Foundry unapproved.
+4. **Save.** `summary.story.md` is written atomically (`writeFileAtomic`), and `story/verify.json` holds the last check. A story already there, when the session is summarized again (`/scrib summarize`), is first moved to `story/previous/<time>.story.md`; `prepare.py` itself still never overwrites one.
+5. **Review and deliver** as in §8.2, for the story only: held until approved (with `REVIEW_BEFORE_FOUNDRY=true`), then `story.ready`.
+
+Status names don't change (`summarizing` covers steps 1–4), so the database needs no migration. The monitoring queue shows the step: "preparing", "part 3/7", "writing", "checking (2nd try)".
+
+**Revisions.** `reviseStory()` (`/scrib revise`, `POST /admin/sessions/:id/story/revise`) sends `PROMPT.md`, the pack (or the part notes when chunking is on), the current story with hand edits, the reviewer's feedback and every earlier request (saved in `story/revisions.json`), then checks the result like a new story. A failed revision leaves the story as it was.
+
+**Output length.** A story of a long session can need 8–16k tokens of output. Every adapter has to allow that (`maxTokens` in the API adapters; nothing to do for the CLI adapters), and a reply cut off by the length limit is retried once with chunking, then reported as a failure, never saved half-written.
+
+#### Settings (Configuration → Summaries)
+
+| Variable | Default | Console |
+|---|---|---|
+| `SUMMARY_CHUNKING` (new, live) | `false` | **Write in parts.** "Off: the whole session goes to the model in one request, so it writes the story with everything in view. That works with any model that holds about 12k tokens per hour of play (40k for a three-hour session); every hosted model does. On: the session is cut into parts of *Part length* minutes; the model takes notes on each part, then writes the story from its notes. Use it for local or small models (8k–16k context) or when long sessions fail. It makes more requests, and the story sees the session only through the notes." |
+| `SUMMARY_CHUNK_MINUTES` | `25` | **Part length (minutes)**, shown only while *Write in parts* is on. Today it chunks the summary; afterwards it is passed to `prepare.py --chunk-minutes`. |
+
+Both go into `.env.example`, `settings-catalog.ts` (then `npm run schemas`), the README and §12.
+
+#### What changes on each page
+
+| Where | Today | After |
+|---|---|---|
+| **Discord commands** | `/scrib summarize` writes the summary; `/scrib story` imports a skill-written story; `/scrib approve … what:summary\|story`; `/scrib revise` revises the summary | `/scrib summarize` writes (or rewrites) the story. `/scrib story` imports it once approved. `/scrib approve` and `/scrib revise` lose `what` and act on the story. New `/scrib nickname`. Same permissions |
+| **Discord notices** (§9.1a) | "Summary written / revised, held for review / sent" | The same notices about the story, plus "N names need confirming" when the pack has unconfirmed nicknames |
+| **Console, Sessions** | Summary and Story columns; Summarize, Review, Post to Discord (summary, story, transcript) | One **Story** column (not written, writing (step), failed check, awaiting review, approved, sent). **Write story** / **Rewrite story**. Post to Discord: story or transcript |
+| **Console, Review** | Summary editor (a field per part of `SummarySchema`) or Markdown story editor, preview, LLM corrections, approve | Story only. Preview from `buildStoryPages()` as now. The editor is one Markdown area per template section (from `template.md`'s headings, so sections can't be dropped or reordered), saved as one file. Above it: the `verify.py` result (failures, warnings, each quote's source line) and the unconfirmed names, with confirm buttons. **Ask the LLM for corrections** and **Approve and post** work on the story |
+| **Console, Configuration** | `SUMMARY_CHUNK_MINUTES` under Summaries | *Write in parts* toggle with the text above, and *Part length* under it |
+| **Console, Monitoring** | Queue shows `summarizing` | Shows the step (see Steps) |
+| **Bot dashboard** (`public/dashboard.html`) | Latest summary card | Latest story card: title, status, check result |
+| **Foundry module** (0.9.0) | Imports a summary journal (`buildJournalPages`) and, separately, a story journal (`buildStoryPages`); the import dialog lists both | Imports the story journal only, auto-import included (`story.ready`). The import dialog lists one entry per session. Journals already imported stay as they are |
+| **HTTP API** (§9.2) | `GET /sessions/:id/summary`, `summary.ready`, `/admin/…/summary/*` | Story routes as now plus `…/story/revise` and `…/nicknames`. The summary routes (`GET /sessions/:id/summary`, `/admin/sessions/:id/summary`, `…/summary/import`, `…/summary/revise`, `…/summary/approve`) and the `summary.ready` event are removed in the same change. `GET /sessions` drops `summaryApproved`. The bot and the module are upgraded together: a module before 0.9.0 can no longer import anything |
+| **Skill** (§8.1) | The only way to get a story | Still works by hand or with another model on the same files. `SKILL.md` says the bot writes the story itself and that a story already there is never overwritten by `prepare.py` |
+
+#### What goes, and old sessions
+
+These go in the same change: the summary routes, `summarize/prompts.ts`, the `ChunkNotes`/`Summary` schemas, `render.ts`, the summary editor and the module's `buildJournalPages()`. The quote checker in `summarize/quotes.ts` goes too, because `verify.py` checks the story's quotes. The bot no longer writes `notes.json`, `summary.json` or `summary.md`. Sessions that already have them keep the files on disk, and nothing reads them except the Console's preview (`GET /admin/sessions/:id/preview/summary.md`, read-only), shown beside **Write story**. Summary journals already in Foundry stay as they are. The approval columns (`summary_approved_hash`, `summary_approved_at`) stay in the database unused, so no migration is needed.
+
+#### Tests
+
+- **Bot:** the pipeline with a fake provider and the real scripts on a copy of `fixture-tts`, with chunking off and on; resume after each step; verify failures fed back and the attempt limit; a reply cut off by the length limit; revisions with earlier feedback; nickname confirmation preparing the pack again; the review gate for the story only; the summary routes answering 404; an old session's `summary.md` still shown in the Console preview.
+- **Skill:** `prepare.py --json` and `verify.py --json` output.
+- **Console:** the section editor round trip, verify results and nickname confirmation through the fake bot.
+- **Module:** the import dialog listing only stories.
+
 ## 9. Interfaces
 
 ### 9.1 Slash commands
