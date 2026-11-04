@@ -121,6 +121,10 @@ def test_serves_the_page_and_only_its_own_files(setup):
     assert request(port, "GET", "/static/app.js")[0] == 200
     assert request(port, "GET", "/static/../server.py")[0] == 404
     assert request(port, "GET", "/static/%2e%2e%2fserver.py")[0] == 404
+    # The review preview loads the Foundry module's page builder, and nothing else from outside static/.
+    assert request(port, "GET", "/static/foundry/journal.js")[0] == 200
+    assert request(port, "GET", "/static/foundry/main.js")[0] == 404
+    assert request(port, "GET", "/static/foundry/../roles.js")[0] == 404
 
 
 def test_refuses_foreign_host_names(setup):

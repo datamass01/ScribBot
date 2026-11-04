@@ -31,6 +31,12 @@ from .settings import Settings, SettingsError, restart_needed_by
 from .setup_checks import NodeVersion, run_checks
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The Foundry module's own page builder and styles, so the review screen previews a journal entry
+# with exactly the code Foundry runs (foundry-module/scripts/journal.js has no Foundry globals).
+FOUNDRY_FILES = {
+    "journal.js": REPO_ROOT / "foundry-module" / "scripts" / "journal.js",
+    "scribbot.css": REPO_ROOT / "foundry-module" / "styles" / "scribbot.css",
+}
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".svg": "image/svg+xml"}
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -267,6 +273,8 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
             try:
                 if path in ("/", "/index.html", "/dashboard"):
                     return self._static("index.html")
+                if path.startswith("/static/foundry/"):
+                    return self._foundry_file(path[len("/static/foundry/"):])
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
                 if path == "/status":
@@ -438,6 +446,12 @@ def make_handler(console: Console) -> type[BaseHTTPRequestHandler]:
             if not kind or not file.is_file():
                 return self._send(404, b"not found", "text/plain")
             self._send(200, file.read_bytes(), kind)
+
+        def _foundry_file(self, name: str) -> None:
+            file = FOUNDRY_FILES.get(name)
+            if not file or not file.is_file():
+                return self._send(404, b"not found", "text/plain")
+            self._send(200, file.read_bytes(), STATIC_TYPES[file.suffix])
 
         def _json(self, code: int, data: Any) -> None:
             self._send(code, json.dumps(data).encode("utf-8"), "application/json")

@@ -9,6 +9,7 @@ process.env.API_TOKEN = "secret-token";
 process.env.API_PORT = "0";
 process.env.WORKER_URL = "http://127.0.0.1:9";
 process.env.LLM_PROVIDER = "anthropic";
+process.env.REVIEW_BEFORE_FOUNDRY = "false"; // these test sending as such; review.test.ts covers the review gate
 process.env.ANTHROPIC_API_KEY = "";
 process.env.ANTHROPIC_AUTH_TOKEN = "";
 delete process.env.ANTHROPIC_PROFILE;
@@ -39,6 +40,13 @@ function fakeSessions() {
     },
     processFromConsole: async (s: SessionRow, o: { summaryOnly?: boolean; retranscribe?: boolean }) => {
       calls.push(`${o.summaryOnly ? "summarize" : "process"} ${s.id}${o.retranscribe ? " retranscribe" : ""}`);
+    },
+    postToDiscord: async (s: SessionRow, what: string, channelId?: string) => {
+      calls.push(`discord ${s.id} ${what} ${channelId ?? "-"}`);
+      return { channelId: channelId ?? "t1", channelName: "table" };
+    },
+    reviseFromConsole: async (s: SessionRow, feedback: string) => {
+      calls.push(`revise ${s.id} ${feedback}`);
     },
     mergeInto: (a: SessionRow, b: SessionRow) => {
       calls.push(`merge ${b.id} into ${a.id}`);
@@ -183,6 +191,16 @@ describe("Console admin API", () => {
     expect(res.body).toEqual({ ok: true, title: "Into the Mire", foundryConnected: false });
     expect(events).toContainEqual({ type: "summary.ready", sessionId: s.id, number: s.number, title: "Into the Mire", manual: true });
     expect(store.getSession(s.id)?.summary_sent_at).toBeTruthy();
+  });
+
+  it("posts a session's content to Discord only when the Console asks", async () => {
+    const s = newSession({ "summary.json": "{}" });
+    const ok = await call("POST", `/admin/sessions/${s.id}/discord`, { what: "transcript", channelId: "123456789012" });
+    expect(ok.body).toEqual({ ok: true, channelId: "123456789012", channelName: "table" });
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "summary" })).status).toBe(200);
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "audio" })).status).toBe(400);
+    expect((await call("POST", `/admin/sessions/${s.id}/discord`, { what: "story", channelId: "#general" })).status).toBe(400);
+    expect(sessions.calls).toEqual([`discord ${s.id} transcript 123456789012`, `discord ${s.id} summary -`]);
   });
 
   it("records Foundry's confirmation that the journal entry exists", async () => {

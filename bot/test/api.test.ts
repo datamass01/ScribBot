@@ -11,6 +11,7 @@ process.env.WORKER_URL = "http://127.0.0.1:9"; // nothing listens here: the work
 // No Anthropic credentials anywhere: empty values stop dotenv filling them from a real .env,
 // and an empty config dir hides any `ant auth login` profile on this machine.
 process.env.LLM_PROVIDER = "anthropic";
+process.env.REVIEW_BEFORE_FOUNDRY = "false"; // these test sending as such; review.test.ts covers the review gate
 process.env.AUTO_SUMMARIZE = "true"; // the credential warnings only apply to automatic summaries (see status-manual.test.ts)
 process.env.ANTHROPIC_API_KEY = "";
 process.env.ANTHROPIC_AUTH_TOKEN = "";

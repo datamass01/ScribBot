@@ -4,7 +4,9 @@ import type { SessionRow, Store } from "./db.js";
 import { bus } from "./events.js";
 import { composeSession } from "./layout.js";
 import { sessionPaths, sessionRecordings } from "./paths.js";
-import { summarizeSession } from "./summarize/summarize.js";
+import { announceSummary } from "./review.js";
+import { reviseSummary, summarizeSession } from "./summarize/summarize.js";
+import type { LLMProvider } from "./summarize/provider.js";
 import type { SummaryFile } from "./summarize/schema.js";
 import { readTimeline } from "./timeline.js";
 import { config } from "./config.js";
@@ -13,7 +15,8 @@ import { transcribe, transcribeClip } from "./worker-client.js";
 
 export interface PipelineHooks {
   notify?: (text: string) => Promise<unknown> | void;
-  onSummary?: (file: SummaryFile) => Promise<unknown> | void;
+  /** `held`: review is on, so it waits for approval instead of going to Foundry. */
+  onSummary?: (file: SummaryFile, info: { held: boolean }) => Promise<unknown> | void;
   /** Runs before summarizing, e.g. to wait for the Foundry chat log of a session just stopped. */
   beforeSummary?: () => Promise<unknown>;
   log?: (msg: string) => void;
@@ -53,7 +56,7 @@ export function processBlocker(session: SessionRow | undefined, opts: { retransc
 export async function processSession(
   store: Store,
   sessionId: string,
-  opts: PipelineHooks & { retranscribe?: boolean; skipSummary?: boolean } = {},
+  opts: PipelineHooks & { retranscribe?: boolean; skipSummary?: boolean; provider?: LLMProvider } = {},
 ) {
   const session = store.getSession(sessionId);
   const blocker = processBlocker(session, opts);
@@ -141,12 +144,11 @@ export async function processSession(
 
     await opts.beforeSummary?.();
     setStatus("summarizing");
-    const file = await summarizeSession(store, sessionId, { log });
+    const file = await summarizeSession(store, sessionId, { log, provider: opts.provider });
     store.markSummarized(sessionId);
     bus.emitEvent({ type: "session.status", sessionId, status: "complete" });
-    bus.emitEvent({ type: "summary.ready", sessionId, number: session.number, title: file.summary.title });
-    store.markSent(sessionId, "summary");
-    await opts.onSummary?.(file);
+    const held = deliver(store, sessionId, log);
+    await opts.onSummary?.(file, { held });
     return file;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -164,6 +166,63 @@ export async function processSession(
   } finally {
     running.delete(sessionId);
     progress.delete(sessionId);
+  }
+}
+
+/** Sends a new summary to Foundry, unless review holds it for approval. Returns whether it was held. */
+function deliver(store: Store, sessionId: string, log: (msg: string) => void) {
+  const session = store.getSession(sessionId)!;
+  if (config.reviewBeforeFoundry) {
+    log(`[pipeline] session ${session.number}: summary held for review before Foundry`);
+    return true;
+  }
+  announceSummary(store, session);
+  return false;
+}
+
+/**
+ * Review: has the LLM correct a session's summary as `feedback` says (summarize.ts `reviseSummary`).
+ * Runs under the same guard as processing, so nothing else summarizes it meanwhile. A failure
+ * leaves the summary as it was: the session stays complete, with the reason in its error.
+ */
+export async function reviseSession(
+  store: Store,
+  sessionId: string,
+  feedback: string,
+  opts: Omit<PipelineHooks, "beforeSummary"> & { provider?: LLMProvider } = {},
+) {
+  const session = store.getSession(sessionId);
+  const blocker = processBlocker(session);
+  if (blocker || !session) throw new Error(blocker ?? "No such session.");
+  if (!fs.existsSync(sessionPaths(sessionId).summary)) throw new Error(`Session ${session.number} has no summary to revise.`);
+  running.add(sessionId);
+  const log = opts.log ?? console.log;
+  const notify = async (text: string) => {
+    try {
+      await opts.notify?.(text);
+    } catch (err) {
+      log(`[pipeline] notify failed: ${err}`);
+    }
+  };
+  const setStatus = (status: Parameters<Store["setSessionStatus"]>[1], error: string | null = null) => {
+    store.setSessionStatus(sessionId, status, error);
+    bus.emitEvent({ type: "session.status", sessionId, status, error });
+  };
+  try {
+    setStatus("summarizing");
+    const file = await reviseSummary(store, sessionId, feedback, { log, provider: opts.provider });
+    setStatus("complete");
+    const held = deliver(store, sessionId, log);
+    await opts.onSummary?.(file, { held });
+    return file;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`[pipeline] session ${session.number}: revising the summary failed: ${err instanceof Error ? err.stack : err}`);
+    setStatus("complete", `Revising the summary failed: ${message}. The summary is unchanged.`);
+    await notify(`⚠️ Revising session ${session.number}'s summary failed: ${message}\nThe summary is unchanged.`);
+    throw err;
+  } finally {
+    running.delete(sessionId);
   }
 }
 

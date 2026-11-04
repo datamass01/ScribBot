@@ -13,6 +13,7 @@ const initial: SummaryConfig = {
   // Every other key is unset (undefined).
   llm: { provider: "anthropic", chunkMinutes: 25 } as SummaryConfig["llm"],
   autoSummarize: false,
+  reviewBeforeFoundry: true,
 };
 
 let n = 0;

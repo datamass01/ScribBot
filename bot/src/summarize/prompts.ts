@@ -1,5 +1,5 @@
 import type { Participant } from "../types.js";
-import type { ChunkNotes } from "./schema.js";
+import type { ChunkNotes, Summary } from "./schema.js";
 
 export const SYSTEM_PROMPT = `You are the chronicler for a tabletop roleplaying campaign. You turn raw session transcripts into accurate, vivid records the players will read and keep in their game's journal.
 
@@ -91,4 +91,59 @@ Write the final summary of this session:
 - Choose the 5-15 best quotes from the notes. Keep each quote's text and timestamp exactly as given.
 - characterHighlights must have one entry for every player character who took part.
 - Deduplicate NPCs and loot.`;
+}
+
+/**
+ * Review: revise the current summary (which may hold a person's own corrections) as the reviewer
+ * asks. Earlier feedback is repeated so a new revision doesn't undo an old one.
+ */
+export function revisePrompt(opts: {
+  participants: Participant[];
+  context: string;
+  glossary: string;
+  notes: ChunkNotes[] | null;
+  current: Summary;
+  feedback: string;
+  earlierFeedback: string[];
+  sessionNumber: number;
+}) {
+  const notes = opts.notes
+    ? `
+The notes the summary was written from, extracted in order from the session transcript:
+
+<notes>
+${JSON.stringify(opts.notes, null, 1)}
+</notes>
+`
+    : "";
+  const earlier = opts.earlierFeedback.length
+    ? `
+Corrections asked for earlier, already applied; keep them:
+<earlier_feedback>
+${opts.earlierFeedback.map((f) => `- ${f}`).join("\n")}
+</earlier_feedback>
+`
+    : "";
+  return `${campaignBlock(opts.context, opts.glossary)}
+
+<participants>
+${participantsBlock(opts.participants)}
+</participants>
+${notes}
+This is the current summary of session ${opts.sessionNumber}. A person at the table has reviewed it before it goes into the campaign's journal, and may already have corrected parts of it by hand.
+
+<current_summary>
+${JSON.stringify(opts.current, null, 1)}
+</current_summary>
+${earlier}
+The reviewer asks for these corrections:
+
+<feedback>
+${opts.feedback.trim()}
+</feedback>
+
+Return the whole summary again with the corrections made:
+- Change what the feedback asks for and anything that must change with it (a renamed character or NPC is renamed everywhere). Keep everything else as it is, word for word, including any hand edits.
+- The reviewer was at the table: trust the feedback over the notes when they disagree.
+- Quotes must still be in-character lines copied verbatim from the session. Keep each kept quote's text and timestamp exactly. Remove a quote if asked; never invent one.`;
 }

@@ -91,6 +91,14 @@ export const SummarySchema = z.object({
 });
 export type Summary = z.infer<typeof SummarySchema>;
 
+/** A change asked of the LLM during review (`/admin/sessions/:id/summary/revise`, `/scrib revise`). */
+export interface SummaryRevision {
+  at: string;
+  feedback: string;
+  provider: string;
+  model: string;
+}
+
 /** What is written to summary.json: the model's summary plus bookkeeping. */
 export interface SummaryFile {
   sessionId: string;
@@ -103,4 +111,8 @@ export interface SummaryFile {
   participants: { discordId: string; displayName: string; character: string | null; actorId: string | null; isGm: boolean }[];
   summary: Summary & { quotes: (Summary["quotes"][number] & { seconds: number; verified: boolean })[] };
   droppedQuotes: Summary["quotes"];
+  /** Last saved from the review editor (a person's corrections), if ever. */
+  editedAt?: string;
+  /** Every LLM revision asked for during review, oldest first; their feedback is sent with the next one. */
+  revisions?: SummaryRevision[];
 }

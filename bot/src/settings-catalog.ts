@@ -260,6 +260,9 @@ export const SETTINGS: Setting[] = [
   { key: "AUTO_SUMMARIZE", group: "Summaries", live: true, label: "Summarize automatically", type: "bool", default: "false", options: yesNo,
     readBy: ["bot", "console"],
     help: "Send every transcript to the LLM when it's done. Off: sessions end at a saved transcript until someone asks for a summary." },
+  { key: "REVIEW_BEFORE_FOUNDRY", group: "Summaries", live: true, label: "Review before posting to Foundry", type: "bool", default: "true", options: yesNo,
+    readBy: ["bot", "console"],
+    help: "A summary or story goes to Foundry only after someone approves it: in the Console (Sessions → Review, with a Foundry-style preview, editing and LLM revisions) or with /scrib approve. Off: summaries go straight to Foundry as before." },
 
   // ---------------------------------------------------------------- Storage and retention
   { key: "DATA_DIR", group: "Storage and retention", label: "Data folder", type: "path", default: "./data", readBy: ALL, advanced: true,

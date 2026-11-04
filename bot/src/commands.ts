@@ -24,13 +24,20 @@ import { recordingNotice } from "./notice.js";
 import { foundryActorsFile, sessionPaths } from "./paths.js";
 import { linksToWrite, unlink, type RosterLink } from "./links.js";
 import { formatGap, mergeSessions } from "./merge.js";
-import { isProcessing, makeLiveTranscriber, processBlocker, processSession } from "./pipeline.js";
+import { isProcessing, makeLiveTranscriber, processBlocker, processSession, reviseSession } from "./pipeline.js";
 import { SessionRecorder, type RecorderOptions } from "./recorder.js";
 import { SHUTDOWN_NOTE, defaultSessionToProcess, lastActivityMs } from "./recovery.js";
 import { readTimeline } from "./timeline.js";
 import type { SummaryFile } from "./summarize/schema.js";
 import { backlogMinutes, workerHealth } from "./worker-client.js";
-import { announceStory, findStoryFile } from "./story.js";
+import { findStoryFile, loadStory } from "./story.js";
+import { readSummaryFile } from "./summarize/summarize.js";
+import { announceStory, announceSummary, approve, reviewState, type ReviewKind } from "./review.js";
+
+/** What the Console can post to Discord (`postToDiscord`). */
+export type DiscordPost = "summary" | "story" | "transcript";
+/** Discord's upload limit for servers without boosts. */
+const DISCORD_FILE_LIMIT = 10 * 1024 * 1024;
 
 export const scribCommand = new SlashCommandBuilder()
   .setName("scrib")
@@ -85,6 +92,22 @@ export const scribCommand = new SlashCommandBuilder()
       .setName("story")
       .setDescription("Import a session's story write-up into Foundry as a journal entry")
       .addStringOption((o) => o.setName("session").setDescription("Session number (default: latest with a story)")),
+  )
+  .addSubcommand((s) =>
+    s
+      .setName("approve")
+      .setDescription("Approve a summary or story (reviewed in the ScribBot Console) and send it to Foundry")
+      .addStringOption((o) => o.setName("session").setDescription("Session number (default: latest awaiting review)"))
+      .addStringOption((o) =>
+        o.setName("what").setDescription("Default: summary").addChoices({ name: "summary", value: "summary" }, { name: "story", value: "story" }),
+      ),
+  )
+  .addSubcommand((s) =>
+    s
+      .setName("revise")
+      .setDescription("Ask the LLM to correct a summary before it goes to Foundry")
+      .addStringOption((o) => o.setName("feedback").setDescription("What to correct, e.g. \"the innkeeper is Brannoc, not Brandon\"").setRequired(true).setMaxLength(2000))
+      .addStringOption((o) => o.setName("session").setDescription("Session number (default: latest with a summary)")),
   )
   .addSubcommand((s) =>
     s
@@ -172,6 +195,10 @@ export class CommandHandler {
           return await this.story(i);
         case "merge":
           return await this.merge(i);
+        case "approve":
+          return await this.approve(i);
+        case "revise":
+          return await this.revise(i);
       }
     } catch (err) {
       const content = `⚠️ ${err instanceof Error ? err.message : String(err)}`;
@@ -498,7 +525,7 @@ export class CommandHandler {
       skipSummary: !summarize,
       beforeSummary: () => this.awaitChatlog?.(sessionId) ?? Promise.resolve(),
       notify: (text) => this.send(channelId, text),
-      onSummary: (file) => this.postSummary(channelId, file),
+      onSummary: (file, { held }) => this.summaryNotice(channelId, file, held),
     }).catch(() => {
       // already reported via notify
     });
@@ -523,21 +550,73 @@ export class CommandHandler {
     }
   }
 
-  private async postSummary(channelId: string | null, f: SummaryFile) {
-    const s = f.summary;
-    const recap = s.recap.length > 3900 ? `${s.recap.slice(0, 3900)}…` : s.recap;
-    const embed = new EmbedBuilder()
-      .setTitle(`Session ${f.sessionNumber}: ${s.title}`)
-      .setDescription(recap)
-      .setColor(0x8b5cf6)
-      .setFooter({ text: `Summarized by ${f.model}. Full notes attached and sent to Foundry.` });
-    const quotes = s.quotes.slice(0, 3).map((q) => `> "${q.text}"\n> — **${q.character}**`);
-    if (quotes.length) embed.addFields({ name: "Quotes", value: quotes.join("\n\n").slice(0, 1024) });
-    if (s.hooks.length) embed.addFields({ name: "Open threads", value: s.hooks.map((h) => `• ${h}`).join("\n").slice(0, 1024) });
+  /**
+   * The table hears that a summary is ready, never its text: the content goes to Discord only when
+   * someone posts it from the Console (`postToDiscord`).
+   */
+  private async summaryNotice(channelId: string | null, f: SummaryFile, held: boolean, revised = false) {
+    const what = revised ? "summary was revised" : "summary is written";
+    const next = held
+      ? "It's waiting for review in the ScribBot Console before it goes to Foundry."
+      : "It was sent to Foundry.";
+    await this.tell(channelId, `📜 Session ${f.sessionNumber}'s ${what} (${f.model}). ${next}`);
+  }
 
-    const md = sessionPaths(f.sessionId).summaryMd;
-    const files = fs.existsSync(md) ? [new AttachmentBuilder(md, { name: `session-${f.sessionNumber}.md` })] : [];
-    await this.send(channelId, { embeds: [embed], files });
+  /**
+   * Posts a session's summary, story or transcript to a Discord text channel, on request from the
+   * Console. Nothing else posts session content to Discord. `channelId` must be in the session's
+   * server; left out, the session's text channel.
+   */
+  async postToDiscord(session: SessionRow, what: DiscordPost, channelId?: string) {
+    if (!this.client.isReady()) throw new Error("The bot isn't connected to Discord yet.");
+    const guild = this.client.guilds.cache.get(session.guild_id);
+    if (!guild) throw new Error("The bot isn't in this session's Discord server any more.");
+    const target = channelId ?? session.text_channel_id;
+    if (!target) throw new Error("This session has no text channel; pick one.");
+    const channel = guild.channels.cache.get(target);
+    if (!channel?.isSendable()) throw new Error("Pick a text channel in the session's server that the bot can post in.");
+
+    const p = sessionPaths(session.id);
+    const attach = (file: string, name: string) => {
+      const size = fs.statSync(file).size;
+      if (size > DISCORD_FILE_LIMIT) {
+        throw new Error(`${name} is ${Math.ceil(size / 1024 / 1024)} MB; Discord takes files up to ${DISCORD_FILE_LIMIT / 1024 / 1024} MB.`);
+      }
+      return new AttachmentBuilder(file, { name });
+    };
+    let payload: Parameters<SendableChannels["send"]>[0];
+    if (what === "summary") {
+      if (!fs.existsSync(p.summary)) throw new Error(`Session ${session.number} has no summary yet.`);
+      const f = readSummaryFile(session.id);
+      const s = f.summary;
+      const embed = new EmbedBuilder()
+        .setTitle(`Session ${f.sessionNumber}: ${s.title}`)
+        .setDescription(s.recap.length > 3900 ? `${s.recap.slice(0, 3900)}…` : s.recap)
+        .setColor(0x8b5cf6)
+        .setFooter({ text: `Summarized by ${f.model}. Full notes attached.` });
+      const quotes = s.quotes.slice(0, 3).map((q) => `> "${q.text}"\n> — **${q.character}**`);
+      if (quotes.length) embed.addFields({ name: "Quotes", value: quotes.join("\n\n").slice(0, 1024) });
+      if (s.hooks.length) embed.addFields({ name: "Open threads", value: s.hooks.map((h) => `• ${h}`).join("\n").slice(0, 1024) });
+      payload = { embeds: [embed], files: fs.existsSync(p.summaryMd) ? [attach(p.summaryMd, `session-${f.sessionNumber}.md`)] : [] };
+    } else if (what === "story") {
+      const found = findStoryFile(session.id);
+      if (!found) throw new Error(`Session ${session.number} has no story write-up.`);
+      const story = loadStory(this.store, session);
+      const embed = new EmbedBuilder()
+        .setTitle(story.title)
+        .setDescription(`The story of session ${story.sessionNumbers.join(" + ")}, attached.`)
+        .setColor(0x8b5cf6);
+      payload = { embeds: [embed], files: [attach(found.file, `session-${story.sessionNumber}-story.md`)] };
+    } else {
+      if (!fs.existsSync(p.transcriptMd)) throw new Error(`Session ${session.number} has no transcript yet.`);
+      payload = {
+        content: `📄 Session ${session.number}'s transcript.`,
+        files: [attach(p.transcriptMd, `session-${session.number}-transcript.md`)],
+      };
+    }
+    await channel.send(payload);
+    console.log(`[commands] session ${session.number}: ${what} posted to #${channel.name} from the Console`);
+    return { channelId: channel.id, channelName: channel.name };
   }
 
   // ---------- info ----------
@@ -749,6 +828,77 @@ export class CommandHandler {
       `📜 Sent **${story.title}** (session ${story.sessionNumbers.join(" + ")}) to Foundry. ` +
         "The bridge client creates the journal entry, or updates it if it's already there.",
     );
+  }
+
+  // ---------- review before Foundry ----------
+
+  /** Approving or revising is for the GM (mapped with /scrib gm) or someone who can manage the server. */
+  private requireReviewer(i: ChatInputCommandInteraction<"cached">, session: SessionRow) {
+    if (i.memberPermissions.has(PermissionFlagsBits.ManageGuild)) return;
+    const campaignId = session.campaign_id ?? this.playingCampaignId();
+    if (this.store.getMappings(i.guildId, campaignId).some((m) => m.discord_id === i.user.id && m.is_gm)) return;
+    throw new Error("Only the GM (see `/scrib gm`) or someone with Manage Server can approve or revise what goes to Foundry.");
+  }
+
+  private async approve(i: ChatInputCommandInteraction<"cached">) {
+    const kind = (i.options.getString("what") ?? "summary") as ReviewKind;
+    const ref = i.options.getString("session");
+    const mine = this.store.listSessions(1000).filter((s) => s.guild_id === i.guildId && !s.deleted_at && !s.merged_into_id);
+    const session = ref
+      ? this.store.findSession(i.guildId, ref)
+      : (mine.find((s) => reviewState(this.store, s, kind)?.approved === false) ?? mine.find((s) => reviewState(this.store, s, kind)));
+    if (!session) throw new Error(ref ? "No such session." : `No session has a ${kind} to approve.`);
+    if (session.deleted_at) throw new Error(`Session ${session.number} is in the trash. Restore it first.`);
+    this.requireReviewer(i, session);
+    if (isProcessing(session.id)) throw new Error(`Session ${session.number} is being processed; approve it once that's done.`);
+    approve(this.store, session, kind);
+    if (kind === "story") {
+      const story = announceStory(this.store, session);
+      await i.reply(`✅ Approved **${story.title}** (session ${story.sessionNumbers.join(" + ")}) and sent it to Foundry.`);
+    } else {
+      const summary = announceSummary(this.store, session, { manual: true });
+      await i.reply(`✅ Approved session ${session.number}'s summary, **${summary.title}**, and sent it to Foundry.`);
+    }
+  }
+
+  private async revise(i: ChatInputCommandInteraction<"cached">) {
+    const ref = i.options.getString("session");
+    const session = ref
+      ? this.store.findSession(i.guildId, ref)
+      : this.store.listSessions(1000).find((s) => s.guild_id === i.guildId && !s.deleted_at && fs.existsSync(sessionPaths(s.id).summary));
+    if (!session) throw new Error(ref ? "No such session." : "No session has a summary to revise.");
+    this.requireReviewer(i, session);
+    const feedback = i.options.getString("feedback", true);
+    await this.checkRevise(session, feedback);
+    await i.reply(`✏️ Asking the LLM to revise session ${session.number}'s summary. I'll say here when the new version is ready.`);
+    this.runRevision(session.id, i.channelId, feedback);
+  }
+
+  /** Why a revision would be refused, thrown. Shared with the Console. */
+  private async checkRevise(session: SessionRow, feedback: string) {
+    const blocker = processBlocker(session);
+    if (blocker) throw new Error(blocker);
+    if (session.deleted_at) throw new Error(`Session ${session.number} is in the trash. Restore it first.`);
+    if (!fs.existsSync(sessionPaths(session.id).summary)) throw new Error(`Session ${session.number} has no summary to revise. Summarize it first.`);
+    if (!feedback.trim()) throw new Error("Say what to correct.");
+    const problem = await llmConfigProblem();
+    if (problem) throw new Error(problem);
+  }
+
+  private runRevision(sessionId: string, channelId: string | null, feedback: string) {
+    void reviseSession(this.store, sessionId, feedback, {
+      notify: (text) => this.send(channelId, text),
+      onSummary: (file, { held }) => this.summaryNotice(channelId, file, held, true),
+    }).catch(() => {
+      // already reported via notify
+    });
+  }
+
+  /** `/scrib revise` from the Console's review screen; the new version is posted in the session's text channel. */
+  async reviseFromConsole(session: SessionRow, feedback: string) {
+    await this.checkRevise(session, feedback);
+    console.log(`[commands] session ${session.number}: summary revision requested from the Console`);
+    this.runRevision(session.id, session.text_channel_id, feedback);
   }
 
   private async merge(i: ChatInputCommandInteraction<"cached">) {

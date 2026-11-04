@@ -94,7 +94,18 @@ class Bridge {
       headers: { Authorization: `Bearer ${setting("apiToken")}`, ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`ScribBot ${method} ${path}: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const text = await res.text();
+      // 409 with review: the bot holds it until someone approves it (REVIEW_BEFORE_FOUNDRY); its message says where.
+      let body = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = null;
+      }
+      if (body?.review && body.error) throw new Error(body.error);
+      throw new Error(`ScribBot ${method} ${path}: ${res.status} ${text}`);
+    }
     return res.json();
   }
 
@@ -669,15 +680,21 @@ async function promptImport() {
     return;
   }
   // One option per thing to import: "summary:<id>" (the bot's AI summary) or "story:<id>" (a story write-up).
+  // One still waiting for review in ScribBot (bot 0.8+: summaryApproved/storyApproved false) is shown, but can't be picked.
+  const option = (kind, s, when) => {
+    const waiting = s[`${kind}Approved`] === false;
+    return `<option value="${kind}:${s.id}"${waiting ? " disabled" : ""}>${when}: ${kind}${waiting ? " (awaiting review in ScribBot)" : ""}</option>`;
+  };
   const options = sessions
     .flatMap((s) => {
       const when = `Session ${s.number} (${new Date(s.startedAt).toLocaleDateString()})`;
-      return [
-        ...(s.hasStory ? [`<option value="story:${s.id}">${when}: story</option>`] : []),
-        ...(s.hasSummary ? [`<option value="summary:${s.id}">${when}: summary</option>`] : []),
-      ];
+      return [...(s.hasStory ? [option("story", s, when)] : []), ...(s.hasSummary ? [option("summary", s, when)] : [])];
     })
     .join("");
+  if (sessions.every((s) => (!s.hasStory || s.storyApproved === false) && (!s.hasSummary || s.summaryApproved === false))) {
+    ui.notifications.warn("ScribBot: every summary and story is still awaiting review. Approve one in the ScribBot Console (Sessions → Review) or with /scrib approve in Discord.");
+    return;
+  }
   const choice = await foundry.applications.api.DialogV2.prompt({
     window: { title: game.i18n.localize("SCRIBBOT.Import") },
     content: `<div class="form-group"><label>Import</label><select name="choice">${options}</select></div>`,

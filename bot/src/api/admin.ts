@@ -6,12 +6,13 @@ import { config } from "../config.js";
 import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName as nameOf, gameFolderOf, type CampaignRow, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { mergedInto, unusableReason } from "../merge.js";
-import { sessionPaths, sessionRecordings } from "../paths.js";
+import { foundryActorsFile, sessionPaths, sessionRecordings } from "../paths.js";
 import { isProcessing, processingProgress, purgeExpiredAudio } from "../pipeline.js";
-import { announceStory, findStoryFile, storyPath } from "../story.js";
+import { findStoryFile, loadStory, storyPath } from "../story.js";
+import { announceStory, announceSummary, approve, reviewState, saveStoryEdit, saveSummaryEdit, StaleReviewError, type ReviewKind } from "../review.js";
 import { createProvider } from "../summarize/provider.js";
 import { listModels } from "../summarize/models.js";
-import type { SummaryFile } from "../summarize/schema.js";
+import { readSummaryFile } from "../summarize/summarize.js";
 import { moveToCampaign, sessionTimeline } from "../layout.js";
 import { applyLayout, planLayout } from "../migrate-layout.js";
 import { workerHealth } from "../worker-client.js";
@@ -32,6 +33,10 @@ export interface AdminSessions {
   startFromConsole(opts: { guildId: string; voiceChannelId: string; textChannelId: string; campaignId?: number }): Promise<SessionRow>;
   stopFromConsole(sessionId: string): Promise<SessionRow>;
   processFromConsole(session: SessionRow, opts: { summaryOnly?: boolean; retranscribe?: boolean }): Promise<void>;
+  /** `/scrib revise`: the LLM corrects the summary as `feedback` says; runs in the background. */
+  reviseFromConsole(session: SessionRow, feedback: string): Promise<void>;
+  /** Post the session's summary, story or transcript to a Discord text channel (the session's own by default). */
+  postToDiscord(session: SessionRow, what: "summary" | "story" | "transcript", channelId?: string): Promise<{ channelId: string; channelName: string }>;
   mergeInto(a: SessionRow, b: SessionRow): string;
   /** `campaignId` left out: the campaign being played (`playingCampaignId()`), as for the slash commands. */
   setMapping(guildId: string, discordId: string, value: string, campaignId?: number): string;
@@ -172,7 +177,17 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       hasChatlog: live && fs.existsSync(p.chatlog),
       hasSummary: live && fs.existsSync(p.summary),
       hasStory: live && findStoryFile(s.id) !== null,
+      // Review before Foundry (bot/src/review.ts): null when there's nothing to review.
+      reviewRequired: config.reviewBeforeFoundry,
+      summaryReview: live ? reviewView(s, "summary") : null,
+      storyReview: live ? reviewView(s, "story") : null,
     };
+  };
+
+  /** "approved", "changed" (approved once, edited or rewritten since) or "pending"; null: nothing to review. */
+  const reviewView = (s: SessionRow, kind: ReviewKind) => {
+    const r = reviewState(store, s, kind);
+    return r ? { state: r.approved ? "approved" : r.changedSinceApproval ? "changed" : "pending", approvedAt: r.approvedAt } : null;
   };
 
   const find = (id: string) => {
@@ -291,12 +306,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/sessions/:id/summary/import",
     handle((req: IdReq) => {
       const s = usable(find(req.params.id));
-      const file = sessionPaths(s.id).summary;
-      if (!fs.existsSync(file)) throw new HttpError(409, `Session ${s.number} has no summary yet. Summarize it first.`);
-      const { summary: sum } = JSON.parse(fs.readFileSync(file, "utf8")) as SummaryFile;
-      console.log(`[admin] asking Foundry to import the summary of session ${s.number}`);
-      bus.emitEvent({ type: "summary.ready", sessionId: s.id, number: s.number, title: sum.title, manual: true });
-      store.markSent(s.id, "summary");
+      const sum = announceSummary(store, s, { manual: true });
       return { ok: true, title: sum.title, foundryConnected: foundrySockets() > 0 };
     }),
   );
@@ -306,6 +316,121 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
       const s = usable(find(req.params.id));
       const story = announceStory(store, s);
       return { ok: true, title: story.title, foundryConnected: foundrySockets() > 0 };
+    }),
+  );
+
+  // ---------- review before Foundry (bot/src/review.ts) ----------
+
+  /** Actors as the Foundry module links them in journal pages (`@UUID[Actor.id]{name}`): the session's copy, else the last roster sync. */
+  const foundryActors = (s: SessionRow) => {
+    const own = sessionPaths(s.id).actors;
+    try {
+      const raw = JSON.parse(fs.readFileSync(fs.existsSync(own) ? own : foundryActorsFile(), "utf8")) as { actors?: { id?: unknown; name?: unknown; img?: unknown }[] } | unknown[];
+      const list = Array.isArray(raw) ? raw : (raw.actors ?? []);
+      return (list as { id?: unknown; name?: unknown; img?: unknown }[])
+        .filter((a) => typeof a?.id === "string" && typeof a?.name === "string")
+        .map((a) => ({ id: a.id as string, name: a.name as string, img: typeof a.img === "string" && !a.img.startsWith("data:") ? a.img : null }));
+    } catch {
+      return [];
+    }
+  };
+
+  /** What the Console's review screen shows: the content as Foundry gets it, its review state, and the actors it links. */
+  const reviewPayload = (s: SessionRow) => {
+    const summaryState = reviewState(store, s, "summary");
+    const storyState = reviewState(store, s, "story");
+    let story: unknown = null;
+    if (storyState) {
+      try {
+        story = { ...loadStory(store, s), problem: null };
+      } catch (err) {
+        // Not ready (template notes left): still shown, so it can be finished here.
+        const found = findStoryFile(s.id);
+        story = found ? { markdown: fs.readFileSync(found.file, "utf8"), title: null, assets: [], problem: err instanceof Error ? err.message : String(err) } : null;
+      }
+    }
+    return {
+      ok: true,
+      session: summary(s),
+      required: config.reviewBeforeFoundry,
+      busy: isProcessing(s.id),
+      foundryConnected: foundrySockets() > 0,
+      summary: summaryState ? { ...summaryState, file: readSummaryFile(s.id) } : null,
+      story: storyState && story ? { ...storyState, file: story } : null,
+      actors: foundryActors(s),
+    };
+  };
+
+  const stale = <T>(fn: () => T) => {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof StaleReviewError) throw new HttpError(409, err.message);
+      throw err;
+    }
+  };
+
+  app.get("/admin/sessions/:id/review", handle((req: IdReq) => reviewPayload(usable(find(req.params.id)))));
+
+  const SummaryEdit = z.object({ summary: z.unknown(), hash: z.string().optional() });
+  app.put(
+    "/admin/sessions/:id/summary",
+    handle((req: IdReq) => {
+      const s = usable(find(req.params.id));
+      if (isProcessing(s.id)) throw new HttpError(409, `Session ${s.number} is being processed; save once it's done.`);
+      const body = SummaryEdit.parse(req.body);
+      stale(() => saveSummaryEdit(store, s, body.summary, body.hash));
+      return reviewPayload(find(s.id));
+    }),
+  );
+
+  const StoryEdit = z.object({ markdown: z.string().max(2_000_000), hash: z.string().optional() });
+  app.put(
+    "/admin/sessions/:id/story",
+    handle((req: IdReq) => {
+      const s = usable(find(req.params.id));
+      const body = StoryEdit.parse(req.body);
+      stale(() => saveStoryEdit(store, s, body.markdown, body.hash));
+      return reviewPayload(find(s.id));
+    }),
+  );
+
+  const Revise = z.object({ feedback: z.string().trim().min(1, "Say what to correct.").max(4000) });
+  app.post(
+    "/admin/sessions/:id/summary/revise",
+    handle(async (req: IdReq) => {
+      const s = usable(find(req.params.id));
+      await sessions.reviseFromConsole(s, Revise.parse(req.body).feedback);
+      return { ok: true, session: summary(find(s.id)) };
+    }),
+  );
+
+  // Approve what the reviewer saw (`hash`) and, unless `post: false`, send it to Foundry.
+  const Approve = z.object({ hash: z.string().min(1), post: z.boolean().optional() });
+  for (const kind of ["summary", "story"] as const) {
+    app.post(
+      `/admin/sessions/:id/${kind}/approve`,
+      handle((req: IdReq) => {
+        const s = usable(find(req.params.id));
+        if (isProcessing(s.id)) throw new HttpError(409, `Session ${s.number} is being processed; approve it once that's done.`);
+        const body = Approve.parse(req.body);
+        stale(() => approve(store, s, kind, body.hash));
+        if (body.post === false) return { ok: true, posted: false };
+        const title = kind === "summary" ? announceSummary(store, s, { manual: true }).title : announceStory(store, s).title;
+        return { ok: true, posted: true, title, foundryConnected: foundrySockets() > 0 };
+      }),
+    );
+  }
+
+  // Session content reaches Discord only this way: someone asks for it in the Console.
+  const DiscordBody = z.object({ what: z.enum(["summary", "story", "transcript"]), channelId: z.string().regex(/^\d{5,25}$/).optional() });
+  app.post(
+    "/admin/sessions/:id/discord",
+    handle(async (req: IdReq) => {
+      const s = usable(find(req.params.id));
+      const body = DiscordBody.parse(req.body);
+      const posted = await sessions.postToDiscord(s, body.what, body.channelId);
+      return { ok: true, ...posted };
     }),
   );
 

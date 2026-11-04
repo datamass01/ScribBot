@@ -38,6 +38,11 @@ export interface SessionRow {
   summary_journal_name: string | null;
   story_journal_at: string | null;
   story_journal_name: string | null;
+  /** When the summary or story was approved for Foundry (migration 6), and a hash of the file approved. */
+  summary_approved_at: string | null;
+  summary_approved_hash: string | null;
+  story_approved_at: string | null;
+  story_approved_hash: string | null;
   /** The campaign (Foundry world) it belongs to; null until the layout migration (layout.ts). */
   campaign_id: number | null;
   /** Its recording folder relative to DATA_DIR, e.g. campaigns/<world>/sessions/<game id>/recordings/<id>; null: the old flat sessions/<id>. */
@@ -185,6 +190,12 @@ export const MIGRATIONS: string[] = [
    DROP TABLE mappings;
    ALTER TABLE mappings_v5 RENAME TO mappings;
    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`,
+  // 6: review before Foundry. Who approved which content (a hash of the file), so an edit or a new
+  // summary needs approving again.
+  `ALTER TABLE sessions ADD COLUMN summary_approved_at TEXT;
+   ALTER TABLE sessions ADD COLUMN summary_approved_hash TEXT;
+   ALTER TABLE sessions ADD COLUMN story_approved_at TEXT;
+   ALTER TABLE sessions ADD COLUMN story_approved_hash TEXT;`,
 ];
 
 /** A folder name for a campaign made in the Console before its Foundry world is known. */
@@ -523,6 +534,13 @@ export class Store {
     this.db
       .prepare(`UPDATE sessions SET ${what}_journal_at = ?, ${what}_journal_name = ? WHERE id = ?`)
       .run(new Date().toISOString(), name, id);
+  }
+
+  /** Approve this content (by hash) of the summary or story for Foundry. */
+  markApproved(id: string, what: "summary" | "story", hash: string) {
+    this.db
+      .prepare(`UPDATE sessions SET ${what}_approved_at = ?, ${what}_approved_hash = ? WHERE id = ?`)
+      .run(new Date().toISOString(), hash, id);
   }
 
   markSent(id: string, what: "summary" | "story") {

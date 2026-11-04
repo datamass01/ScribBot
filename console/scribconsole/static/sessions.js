@@ -3,6 +3,7 @@
 // Every action calls the bot's /admin API through the Console, which runs the same code as the
 // matching /scrib command.
 import { $, api, attempt, bytes, confirmDialog, dur, esc, openDialog, pill, showText, toast, when } from "./util.js";
+import { openReview } from "./review.js";
 
 const REFRESH_MS = 5000;
 const STATUS_CLASS = { recording: "err", transcribing: "info", summarizing: "info", complete: "ok", failed: "err" };
@@ -19,6 +20,7 @@ let fetchedAt = 0;
 let loading = false;
 let campaigns = [];
 let campaignFilter = "all";
+let reviewing = false;
 
 export function show(el, s) {
   root = el;
@@ -46,6 +48,7 @@ export function show(el, s) {
         </table></div>
       </section>
       <section class="card" id="s-detail" hidden></section>
+      <section class="card review" id="s-review" hidden></section>
       <div class="row small muted"><button data-act="purge-audio" title="Delete kept audio older than AUDIO_RETENTION_DAYS now, instead of waiting for the 6-hourly check">Purge expired audio now</button></div>
       <div class="menu-list" id="s-menu" hidden role="menu"></div>`;
     root.dataset.ready = "1";
@@ -117,10 +120,18 @@ function actionsFor(s) {
       why: off || busy || merged || (s.audioPurged ? "The audio was deleted after transcription." : null) },
     { act: "summarize", label: "Summarize", hint: "Send the transcript to the LLM and write the summary.",
       why: off || busy || merged || (!s.hasTranscript ? "No transcript yet." : llmProblem()) },
-    { act: "post-summary", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
+    { act: "review-summary", label: needsReview(s, "summary") ? "Review summary for Foundry…" : "Review and edit summary…",
+      hint: "See it as Foundry will, correct it or ask the LLM to, then approve it.",
       why: off || merged || (!s.hasSummary ? "No summary yet." : null) },
-    { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
+    { act: "post-summary", label: "Post summary to Foundry", hint: "Creates or updates its journal entry.",
+      why: off || merged || (!s.hasSummary ? "No summary yet." : needsReview(s, "summary") ? "Review and approve it first." : null) },
+    { act: "review-story", label: needsReview(s, "story") ? "Review story for Foundry…" : "Review and edit story…",
+      hint: "See the story write-up as Foundry will, correct it, then approve it.",
       why: off || merged || (!s.hasStory ? "No story write-up yet." : null) },
+    { act: "post-story", label: "Post story to Foundry", hint: "The summarize-session skill's write-up.",
+      why: off || merged || (!s.hasStory ? "No story write-up yet." : needsReview(s, "story") ? "Review and approve it first." : null) },
+    { act: "discord", label: "Post to Discord…", hint: "Post the summary, story or transcript in a text channel. Nothing is posted to Discord otherwise.",
+      why: off || merged || (!s.hasSummary && !s.hasStory && !s.hasTranscript ? "Nothing to post yet." : null) },
     { act: "merge", label: "Merge into an earlier session…", hint: "For a game split in two by a restart.", why: off || busy || merged },
     ...(campaigns.length > 1 ? [{ act: "move-campaign", label: "Move to another campaign…", hint: "Renumbers it there; its folder moves with it.",
       why: off || busy || merged || (s.legacyLayout ? "Update the folder layout first." : null) }] : []),
@@ -128,6 +139,9 @@ function actionsFor(s) {
     { act: "trash", label: "Trash…", hint: "Move it to the trash, where it can be restored or deleted for good.", danger: true, why: off || busy },
   ];
 }
+
+/** Review is on and this summary or story hasn't been approved as it is now. */
+const needsReview = (s, kind) => Boolean(s.reviewRequired && s[`${kind}Review`] && s[`${kind}Review`].state !== "approved");
 
 /**
  * Where a session's summary or story stands in Foundry: confirmed by the bridge client (module
@@ -137,6 +151,11 @@ const WAITING = "Foundry hasn't confirmed it yet: no bridge client or GM online,
   "or ScribBot Bridge older than 0.7.0 (which never confirms).";
 function journal(s, kind) {
   const sent = s[`${kind}SentAt`], at = s[`${kind}JournalAt`], name = s[`${kind}JournalName`];
+  if (needsReview(s, kind)) {
+    const changed = s[`${kind}Review`].state === "changed";
+    return { state: "warn", short: `${kind}: review`, long: changed ? "changed since it was approved; approve it again" : "waiting for review",
+      title: `Foundry gets it once it's approved: open Review in the session's menu.${changed ? " It changed after it was approved." : ""}` };
+  }
   if (at && (!sent || at >= sent)) return { state: "ok", short: `${kind} ✓`, long: `in Foundry as “${name}” (${when(at)})`, title: `In Foundry as “${name}”, confirmed ${when(at)}` };
   if (sent) return { state: "warn", short: `${kind} sent`, long: `sent ${when(sent)}, not confirmed yet`, title: `Sent ${when(sent)}. ${WAITING}` };
   return null;
@@ -148,6 +167,10 @@ function primaryFor(s) {
   if (s.recording) return `<button class="danger" data-act="stop" data-id="${esc(s.id)}">■ Stop</button>`;
   if (s.processing) return "";
   if (s.status === "failed" && s.mergedInto == null) return `<button data-act="process" data-id="${esc(s.id)}">Resume</button>`;
+  if (s.mergedInto == null) {
+    const kind = needsReview(s, "summary") ? "summary" : needsReview(s, "story") ? "story" : null;
+    if (kind) return `<button class="primary" data-act="review-${kind}" data-id="${esc(s.id)}" title="See the ${kind} as Foundry will, correct it, and approve it">Review</button>`;
+  }
   return "";
 }
 
@@ -155,7 +178,7 @@ function primaryFor(s) {
 function visible() {
   return list.filter((s) => {
     if (campaignFilter !== "all" && String(s.campaignId) !== campaignFilter) return false;
-    if (filter === "attention" && !(s.status === "failed" && s.mergedInto == null)) return false;
+    if (filter === "attention" && !(s.mergedInto == null && (s.status === "failed" || needsReview(s, "summary") || needsReview(s, "story")))) return false;
     if (!search) return true;
     return String(s.number) === search.replace(/^#/, "") || (s.title || "").toLowerCase().includes(search) || s.id.includes(search);
   });
@@ -246,6 +269,9 @@ async function onClick(e) {
     case "process": return s && run(s, "process", {}, `Processing session ${s.number}…`);
     case "retranscribe": return s && retranscribe(s);
     case "summarize": return s && run(s, "summarize", {}, `Summarizing session ${s.number}…`);
+    case "review-summary": return s && review(s, "summary");
+    case "review-story": return s && review(s, "story");
+    case "discord": return s && postToDiscord(s);
     case "post-summary": return s && post(s, "summary");
     case "post-story": return s && post(s, "story");
     case "merge": return s && merge(s);
@@ -259,6 +285,24 @@ async function onClick(e) {
     case "close-detail": selected = null; detail = null; $("s-detail").hidden = true; return render();
     case "purge-audio": return purgeAudio();
   }
+}
+
+/** The review screen takes the tab's place until it's closed. */
+function review(s, kind) {
+  const listCard = root.querySelector("section.card:not(#s-detail):not(#s-review)");
+  listCard.hidden = true;
+  $("s-detail").hidden = true;
+  reviewing = true;
+  openReview($("s-review"), s.id, kind, {
+    onDiscord: (what) => postToDiscord(s, what),
+    onClose: () => {
+      reviewing = false;
+      listCard.hidden = false;
+      if (detail) $("s-detail").hidden = false;
+      fetchedAt = 0;
+      refresh().then(() => { if (detail?.id === s.id) loadDetail(s.id, false); });
+    },
+  });
 }
 
 async function run(s, action, body, okText) {
@@ -291,6 +335,37 @@ async function post(s, what) {
         : `No Foundry client is connected, so nothing received “${r.title}”. Open the world as the GM or bridge user and post it again, ` +
           "or import it from Foundry's journal sidebar (Import ScribBot Session).", r.foundryConnected || headless ? "ok" : "err");
   }
+}
+
+/** The bot posts session content to Discord only when asked here: pick what and where. */
+async function postToDiscord(s, preselect) {
+  let guilds;
+  try {
+    guilds = (await api("GET", "/api/admin/discord")).guilds || [];
+  } catch (err) {
+    return toast(err.message, "err");
+  }
+  const guild = guilds.find((g) => g.id === s.guildId);
+  if (!guild) return toast("The bot isn't in this session's Discord server (or isn't logged in).", "err");
+  if (!guild.text.length) return toast("The bot can't post in any text channel of that server.", "err");
+  const kinds = [
+    ["summary", "Summary", s.hasSummary, "the recap, top quotes and open threads, with the full summary attached as Markdown"],
+    ["story", "Story write-up", s.hasStory, "attached as Markdown"],
+    ["transcript", "Transcript", s.hasTranscript, "the whole session, attached as Markdown"],
+  ].filter(([, , ok]) => ok);
+  const pick = preselect && kinds.some(([k]) => k === preselect) ? preselect : kinds[0][0];
+  const review = (k) => (s.reviewRequired && s[`${k}Review`] && s[`${k}Review`].state !== "approved") ? " (not approved for Foundry yet)" : "";
+  const r = await openDialog(`<form><h3>Post session ${s.number} to Discord</h3>
+    <fieldset class="field" style="border:none;padding:0;margin:0"><span>What</span>
+      ${kinds.map(([k, label, , hint]) => `<label class="check"><input type="radio" name="what" value="${k}" ${k === pick ? "checked" : ""}>
+        ${esc(label)}${esc(review(k))} <small class="muted">${esc(hint)}</small></label>`).join("")}</fieldset>
+    <label class="field"><span>Channel</span><select name="channelId">
+      ${guild.text.map((t) => `<option value="${esc(t.id)}" ${t.id === s.textChannelId ? "selected" : ""}>#${esc(t.name)}</option>`).join("")}</select>
+      <small>Everyone who can read the channel sees it.</small></label>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Post</button></div></form>`);
+  if (!r) return;
+  await attempt(() => api("POST", `/api/admin/sessions/${encodeURIComponent(s.id)}/discord`, r.data),
+    (x) => `Posted to #${x.channelName}.`);
 }
 
 async function merge(s) {
@@ -434,7 +509,7 @@ function renderDetail() {
   const s = detail;
   const el = $("s-detail");
   if (!s) { el.hidden = true; return; }
-  el.hidden = false;
+  el.hidden = reviewing; // the review screen has the tab while it's open
   const editing = el.contains(document.activeElement) && document.activeElement.matches("input, textarea");
   if (editing) return; // don't replace what someone is typing
   const end = s.endedAt ? Date.parse(s.endedAt) : null;
