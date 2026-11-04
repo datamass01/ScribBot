@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { loadCampaign } from "../campaign.js";
+import { campaignFolderOfPath, loadCampaign } from "../campaign.js";
 import type { Store } from "../db.js";
 import { sessionTimeline } from "../layout.js";
 import { sessionPaths } from "../paths.js";
@@ -51,7 +51,7 @@ export async function summarizeSession(
   if (!chunks.length) throw new Error("The transcript is empty: nothing to summarize");
 
   const provider = opts.provider ?? (await createProvider());
-  const { context, glossary } = loadCampaign();
+  const { context, glossary } = loadCampaign(campaignFolderOfPath(paths.dir));
   log(`[summarize] ${sessionId}: ${stream.length} entries in ${chunks.length} chunk(s) via ${provider.name}/${provider.model}`);
 
   // Pass 1: structured notes per chunk.

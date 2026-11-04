@@ -3,7 +3,8 @@
  *   npx tsx scripts/transcribe-dir.ts <session-dir> [extra names...] [--delete-audio]
  * Audio is kept unless --delete-audio is given.
  */
-import { sttKeywords } from "../src/campaign.js";
+import path from "node:path";
+import { campaignFolderOfPath, sttKeywords } from "../src/campaign.js";
 import { transcribe } from "../src/worker-client.js";
 
 const args = process.argv.slice(2);
@@ -12,7 +13,7 @@ if (!dir) {
   console.error("usage: transcribe-dir.ts <session-dir> [names...] [--delete-audio]");
   process.exit(1);
 }
-const keywords = sttKeywords(names);
+const keywords = sttKeywords(names, campaignFolderOfPath(path.resolve(dir)));
 console.log(`keywords: ${keywords.join(", ") || "(none)"}`);
 const started = Date.now();
 await transcribe(dir, keywords, {

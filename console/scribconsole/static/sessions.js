@@ -1,6 +1,7 @@
-// Sessions: create, stop, resume, re-run, merge, label and trash sessions, post them to Foundry,
-// and manage who plays which character. Every action calls the bot's /admin API through the
-// Console, which runs the same code as the matching /scrib command.
+// Sessions: create, stop, resume, re-run, merge, label and trash sessions, and post them to Foundry.
+// Who plays which character, and each campaign's settings, are in the Campaign tab (campaign.js).
+// Every action calls the bot's /admin API through the Console, which runs the same code as the
+// matching /scrib command.
 import { $, api, attempt, bytes, confirmDialog, dur, esc, openDialog, pill, showText, toast, when } from "./util.js";
 
 const REFRESH_MS = 5000;
@@ -16,7 +17,6 @@ let selected = null;
 let detail = null;
 let fetchedAt = 0;
 let loading = false;
-let mappings = null;
 let campaigns = [];
 let campaignFilter = "all";
 
@@ -46,7 +46,7 @@ export function show(el, s) {
         </table></div>
       </section>
       <section class="card" id="s-detail" hidden></section>
-      <section class="card" id="s-mappings"></section>
+      <div class="row small muted"><button data-act="purge-audio" title="Delete kept audio older than AUDIO_RETENTION_DAYS now, instead of waiting for the 6-hourly check">Purge expired audio now</button></div>
       <div class="menu-list" id="s-menu" hidden role="menu"></div>`;
     root.dataset.ready = "1";
     root.addEventListener("click", onClick);
@@ -59,7 +59,6 @@ export function show(el, s) {
     });
   }
   refresh();
-  loadMappings();
 }
 
 export function hide() {
@@ -257,13 +256,7 @@ async function onClick(e) {
     case "preview": return s && preview(s, btn.dataset.name);
     case "migrate": return migrateLayout();
     case "move-campaign": return s && moveCampaign(s);
-    case "rename-campaign": return renameCampaign();
     case "close-detail": selected = null; detail = null; $("s-detail").hidden = true; return render();
-    case "map-add": return mapDialog(null);
-    case "map-edit": return mapDialog(mappings?.mappings.find((m) => m.discordId === btn.dataset.discord && m.guildId === btn.dataset.guild));
-    case "map-remove": return unmap(btn.dataset.guild, btn.dataset.discord);
-    case "map-gm": return setGm(btn.dataset.guild, btn.dataset.discord, btn.dataset.value === "true");
-    case "map-refresh": return loadMappings();
     case "purge-audio": return purgeAudio();
   }
 }
@@ -391,7 +384,7 @@ async function newRecording() {
       ${guilds.map((g) => `<option value="${esc(g.id)}">${esc(g.name)}${g.recording ? ` (recording #${g.recording.number})` : ""}</option>`).join("")}</select></label>
     ${campaigns.length ? `<label class="field"><span>Campaign</span><select name="campaignId">
       ${campaigns.map((c) => `<option value="${c.id}" ${c.isDefault ? "selected" : ""}>${esc(c.name)}${c.worldId ? "" : " (no Foundry world yet)"}</option>`).join("")}
-      </select><small>Numbered and filed under this campaign. The default is the Foundry world that synced most recently.</small></label>` : ""}
+      </select><small>Numbered and filed under this campaign, with its character mappings. The default is the campaign being played (Campaign tab).</small></label>` : ""}
     <label class="field"><span>Voice channel</span><select name="voiceChannelId" id="nr-voice" required></select></label>
     <label class="field"><span>Text channel for notices</span><select name="textChannelId" id="nr-text" required></select>
       <small>The recording notice is posted here, as <code>/scrib start</code> would, so everyone knows they're being recorded.</small></label>
@@ -507,81 +500,6 @@ async function preview(s, name) {
   }
 }
 
-// ---------- players and characters (/scrib map, unmap, gm)
-async function loadMappings() {
-  const el = $("s-mappings");
-  if (!el) return;
-  try {
-    mappings = await api("GET", "/api/admin/mappings");
-  } catch (err) {
-    mappings = null;
-    el.innerHTML = `<div class="card-head"><h2>Players and characters</h2></div><p class="muted">${esc(err.body?.offline ? "Needs the bot to be running." : err.message)}</p>`;
-    return;
-  }
-  const rowsHtml = mappings.mappings.map((m) => `<tr>
-      <td>${m.name ? esc(m.name) : `<span class="muted">${esc(m.discordId)}</span>`}</td>
-      <td>${m.isGm ? "<b>GM</b>" : esc(m.character || "–")}${m.foundryUserId ? ` <span class="muted small">(Foundry linked)</span>` : ""}</td>
-      <td class="actions-cell">
-        <button data-act="map-edit" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}">Change</button>
-        <button data-act="map-gm" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}" data-value="${!m.isGm}">${m.isGm ? "Not GM" : "Make GM"}</button>
-        <button class="danger" data-act="map-remove" data-guild="${esc(m.guildId)}" data-discord="${esc(m.discordId)}">Remove</button></td></tr>`).join("");
-  el.innerHTML = `<div class="card-head"><h2>Players and characters</h2><span class="spacer"></span>
-      <button data-act="map-refresh">Refresh</button><button data-act="map-add">Map a player…</button></div>
-    <p class="muted small" style="margin-top:0">Who speaks for which character, the same as <code>/scrib map</code> and <code>/scrib gm</code>.
-      Picking a Foundry user also stores the Discord ID in Foundry. A change applies to people who haven't spoken yet in a running recording.</p>
-    <div class="table-wrap"><table><thead><tr><th>Discord user</th><th>Character</th><th></th></tr></thead>
-    <tbody>${rowsHtml || `<tr><td colspan="3" class="muted">Nobody is mapped yet. Linked Foundry users are recognized without a mapping.</td></tr>`}</tbody></table></div>
-    <div class="row" style="margin-top:10px"><button data-act="purge-audio" title="Delete kept audio older than AUDIO_RETENTION_DAYS now, instead of waiting for the 6-hourly check">Purge expired audio now</button></div>`;
-}
-
-async function mapDialog(existing) {
-  let guilds = [];
-  try {
-    guilds = (await api("GET", "/api/admin/discord")).guilds || [];
-  } catch (err) {
-    return toast(err.message, "err");
-  }
-  if (!guilds.length) return toast("The bot isn't in any Discord server.", "err");
-  const people = new Map();
-  for (const g of guilds) for (const v of g.voice) for (const m of v.members) people.set(`${g.id}:${m.id}`, { guildId: g.id, id: m.id, name: m.name });
-  for (const m of mappings?.mappings || []) people.set(`${m.guildId}:${m.discordId}`, { guildId: m.guildId, id: m.discordId, name: m.name || m.discordId });
-  const roster = (mappings?.roster || []).filter((r) => r.actorName || r.isGm);
-  const r = await openDialog(`<form><h3>${existing ? `Change ${esc(existing.name || existing.discordId)}` : "Map a player"}</h3>
-    <label class="field" ${guilds.length > 1 && !existing ? "" : "hidden"}><span>Server</span><select name="guildId">
-      ${guilds.map((g) => `<option value="${esc(g.id)}" ${existing?.guildId === g.id ? "selected" : ""}>${esc(g.name)}</option>`).join("")}</select></label>
-    <label class="field" ${existing ? "hidden" : ""}><span>Discord user</span><select name="person">
-      ${[...people.values()].map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}
-      <option value="">Someone else (enter their user ID)…</option></select>
-      <small>People in voice channels right now, and everyone already mapped.</small></label>
-    <label class="field" ${existing ? "hidden" : ""}><span>…or their Discord user ID</span><input name="discordId" inputmode="numeric" pattern="\\d{5,25}" placeholder="Right-click the user → Copy User ID"></label>
-    <label class="field"><span>Character</span><select name="character">
-      ${roster.map((x) => `<option value="foundry:${esc(x.foundryUserId)}">${esc(x.actorName ? `${x.actorName} (Foundry user ${x.userName})` : `${x.userName} (GM)`)}</option>`).join("")}
-      <option value="">Another name…</option></select></label>
-    <label class="field"><span>…or a character name</span><input name="name" maxlength="100" placeholder="Not linked to a Foundry actor"></label>
-    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div></form>`);
-  if (!r) return;
-  const guildId = existing?.guildId || r.data.guildId || guilds[0].id;
-  const discordId = existing?.discordId || r.data.discordId?.trim() || r.data.person;
-  const character = r.data.character || r.data.name?.trim();
-  if (!discordId) return toast("Pick a Discord user or enter their ID.", "err");
-  if (!character) return toast("Pick a character or enter a name.", "err");
-  await attempt(() => api("PUT", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}`, { character }),
-    (x) => `Mapped to ${x.mapped.replace(/\*\*/g, "")}.`);
-  loadMappings();
-}
-
-async function unmap(guildId, discordId) {
-  const ok = await confirmDialog("Remove this mapping?", "<p>They'll be labelled by their Foundry link, or else their Discord name.</p>", { ok: "Remove", danger: true });
-  if (!ok) return;
-  await attempt(() => api("DELETE", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}`), "Removed.");
-  loadMappings();
-}
-
-async function setGm(guildId, discordId, isGm) {
-  await attempt(() => api("POST", `/api/admin/mappings/${encodeURIComponent(guildId)}/${encodeURIComponent(discordId)}/gm`, { isGm }), isGm ? "Marked as GM." : "No longer GM.");
-  loadMappings();
-}
-
 async function purgeAudio() {
   await attempt(() => api("POST", "/api/admin/maintenance/purge-audio", {}), (r) => `Audio purged for ${r.purged} session(s).`);
 }
@@ -590,33 +508,17 @@ async function purgeAudio() {
 function renderCampaignHeader() {
   const el = $("s-campaign");
   if (!el) return;
-  if (!campaigns.length) { el.innerHTML = ""; return; }
+  const manage = readOnly ? "" : ` <a class="small" href="#campaign">Campaigns…</a>`;
+  if (!campaigns.length) { el.innerHTML = manage; return; }
   if (campaigns.length === 1) {
     const c = campaigns[0];
-    el.innerHTML = `<span class="muted small" title="Folder data\\campaigns\\${esc(c.folder)}">· ${esc(c.name)}</span>
-      <button class="link small" data-act="rename-campaign" data-campaign="${c.id}">Rename…</button>`;
+    el.innerHTML = `<span class="muted small" title="Folder data\\campaigns\\${esc(c.folder)}">· ${esc(c.name)}</span>${manage}`;
     return;
   }
   el.innerHTML = `<select id="s-campaign-filter" aria-label="Campaign">
       <option value="all">All campaigns</option>
-      ${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === campaignFilter ? "selected" : ""}>${esc(c.name)} (${c.sessions})</option>`).join("")}
-    </select> <button class="link small" data-act="rename-campaign">Rename…</button>`;
-}
-
-async function renameCampaign() {
-  const current = campaigns.find((c) => String(c.id) === campaignFilter) ?? campaigns.find((c) => c.isDefault) ?? campaigns[0];
-  if (!current) return;
-  const r = await openDialog(`<form><h3>Rename a campaign</h3>
-    <label class="field" ${campaigns.length > 1 ? "" : "hidden"}><span>Campaign</span><select name="id">
-      ${campaigns.map((c) => `<option value="${c.id}" ${c.id === current.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
-    <label class="field"><span>Name shown here</span><input name="alias" maxlength="100" value="${esc(current.alias || "")}" placeholder="${esc(current.title || current.folder)}">
-      <small>Only the name shown in the Console changes. The folder stays <code>data\\campaigns\\${esc(current.folder)}</code>, named after the Foundry world
-        ${current.worldId ? `<code>${esc(current.worldId)}</code>` : ""}. Leave blank to use the world's title.</small></label>
-    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div></form>`);
-  if (!r) return;
-  await attempt(() => api("PATCH", `/api/admin/campaigns/${encodeURIComponent(r.data.id || current.id)}`, { alias: r.data.alias.trim() || null }), "Saved.");
-  fetchedAt = 0;
-  refresh();
+      ${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === campaignFilter ? "selected" : ""}>${esc(c.name)} (${c.sessions})${c.isDefault ? " · being played" : ""}</option>`).join("")}
+    </select>${manage}`;
 }
 
 async function moveCampaign(s) {

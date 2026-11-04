@@ -13,6 +13,7 @@ const roster: RosterRow[] = [
 ];
 
 const mapping = (m: Partial<MappingRow> & { discord_id: string }): MappingRow => ({
+  campaign_id: 0,
   guild_id: "g",
   foundry_user_id: null,
   actor_id: null,
@@ -71,9 +72,10 @@ describe("Store", () => {
     expect(store.findSession("g1", "2")?.id).toBe("b");
     expect(store.findSession("g1", "1")?.id).toBe("a"); // the default campaign's #1 wins over tomb's
 
-    store.upsertMapping({ guildId: "g1", discordId: "u", characterName: "Thorin" });
-    store.upsertMapping({ guildId: "g1", discordId: "u", isGm: true });
-    expect(store.getMappings("g1")[0]).toMatchObject({ character_name: "Thorin", is_gm: 1 });
+    store.upsertMapping({ campaignId: strahd.id, guildId: "g1", discordId: "u", characterName: "Thorin" });
+    store.upsertMapping({ campaignId: strahd.id, guildId: "g1", discordId: "u", isGm: true });
+    expect(store.getMappings("g1", strahd.id)[0]).toMatchObject({ character_name: "Thorin", is_gm: 1 });
+    expect(store.getMappings("g1", other.id)).toEqual([]); // another campaign has its own
   });
 });
 

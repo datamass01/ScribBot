@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { sttKeywords } from "./campaign.js";
+import { campaignFolderOfPath, sttKeywords } from "./campaign.js";
 import type { SessionRow, Store } from "./db.js";
 import { bus } from "./events.js";
 import { composeSession } from "./layout.js";
@@ -94,7 +94,7 @@ export async function processSession(
         const timeline = timelines[i]!;
         if (!timeline.segments.length) continue;
         const names = timeline.participants.flatMap((x) => (x.character ? [x.character] : []));
-        await transcribe(p.recording, sttKeywords(names), {
+        await transcribe(p.recording, sttKeywords(names, campaignFolderOfPath(p.recording)), {
           deleteAudio,
           clipCount: timeline.segments.length,
           onWaiting: (msg) => {
@@ -173,8 +173,9 @@ export async function processSession(
  */
 export function makeLiveTranscriber(recordingDir: string, log: (msg: string) => void = console.log) {
   let warned = false;
+  const campaign = campaignFolderOfPath(recordingDir);
   return (file: string, characterNames: string[]) => {
-    transcribeClip(recordingDir, file, sttKeywords(characterNames), config.deleteAudioAfterTranscribe).catch((err) => {
+    transcribeClip(recordingDir, file, sttKeywords(characterNames, campaign), config.deleteAudioAfterTranscribe).catch((err) => {
       if (!warned) log(`[live] could not reach the worker; clips will be transcribed at /scrib stop: ${err.message}`);
       warned = true;
     });

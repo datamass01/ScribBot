@@ -43,7 +43,9 @@ from .config import load_settings
 from .logfile import DailyFileHandler
 from .transcribe import (
     Transcriber,
+    campaign_folder_of,
     glossary_names,
+    notes_file,
     is_noise,
     make_transcriber,
     supported_languages,
@@ -304,12 +306,20 @@ def create_app(
         found = unfinished_clips(data_root, settings.recover_hours)
         if not found:
             return
-        try:
-            names = glossary_names((settings.campaign_dir / "glossary.md").read_text("utf-8"))
-        except OSError:
-            names = []
+        glossaries: dict[str | None, list[str]] = {}
+
+        def names_for(session_dir: Path) -> list[str]:
+            """Each recording's own campaign glossary, else the shared one."""
+            folder = campaign_folder_of(session_dir)
+            if folder not in glossaries:
+                try:
+                    glossaries[folder] = glossary_names(notes_file(settings.campaign_dir, "glossary.md", folder).read_text("utf-8"))
+                except OSError:
+                    glossaries[folder] = []
+            return glossaries[folder]
+
         for session_dir, file in found:
-            req = ClipRequest(sessionDir=str(session_dir), file=file, keywords=names, deleteAudio=settings.delete_audio)
+            req = ClipRequest(sessionDir=str(session_dir), file=file, keywords=names_for(session_dir), deleteAudio=settings.delete_audio)
             enqueue(PRIORITY_CURRENT, lambda req=req, d=session_dir: run_clip(req, d))
         sessions = len({d for d, _ in found})
         state["recovered"] = {"sessions": sessions, "clips": len(found)}

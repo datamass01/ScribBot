@@ -316,7 +316,7 @@ run_checks() {
 
   # Foundry browser: only needed when the bot joins Foundry headlessly
   need_browser=0
-  headless="$(lower "$(env_value FOUNDRY_HEADLESS)")"; headless="${headless:-off}"
+  headless="$(lower "$(env_value FOUNDRY_HEADLESS)")"; headless="${headless:-session}"  # the bot's default (bot/src/config.ts)
   browser="$(env_value FOUNDRY_BROWSER)"; browser="${browser:-chromium}"
   if [ "$headless" = off ] && [ "$opt_chromium" = 0 ]; then
     row skip "Foundry browser" "not needed (FOUNDRY_HEADLESS=off)"

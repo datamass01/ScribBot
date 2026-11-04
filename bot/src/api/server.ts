@@ -5,7 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import { config } from "../config.js";
 import { writeFileAtomic } from "../fsutil.js";
-import type { RosterRow, SessionRow, Store } from "../db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, type RosterRow, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { composeSession } from "../layout.js";
 import { linksToWrite } from "../links.js";
@@ -14,6 +14,7 @@ import { foundryActorsFile, sessionPaths } from "../paths.js";
 import { announceStory, findStoryFile, loadStory, storyAsset, storySessionIds } from "../story.js";
 import { ChatLogSchema, JournalAckSchema, RosterPayloadSchema } from "../types.js";
 import { adminGuard, registerAdminRoutes, type AdminDeps } from "./admin.js";
+import { allowedOrigins, originOf } from "./origins.js";
 import { buildStatus, type FoundryActivity, type MonitorSources } from "./status.js";
 
 const DASHBOARD_FILE = new URL("../../public/dashboard.html", import.meta.url);
@@ -49,7 +50,8 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
 
   const app = Fastify({ bodyLimit: 25 * 1024 * 1024, logger: false });
   await app.register(cors, {
-    origin: config.api.origins,
+    // FOUNDRY_ORIGINS, plus each campaign's own Foundry server (the Campaign tab), read per request.
+    origin: (origin, cb) => cb(null, Boolean(origin) && allowedOrigins(store).has(originOf(origin!) ?? "")),
     methods: ["GET", "POST"],
     allowedHeaders: ["authorization", "content-type"],
   });
@@ -108,8 +110,10 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
       discord_id: u.discordId,
     }));
     store.replaceRoster(rows);
-    // Each Foundry world is a campaign; the one synced most recently gets new recordings.
-    if (parsed.data.world) store.touchWorld(parsed.data.world, parsed.data.worldTitle ?? null);
+    // Each Foundry world is a campaign; without one chosen in the Campaign tab, the one synced most
+    // recently gets new recordings.
+    const campaign = parsed.data.world ? store.touchWorld(parsed.data.world, parsed.data.worldTitle ?? null) : store.defaultCampaign({ create: false });
+    store.setMeta("roster_world", parsed.data.world ?? null);
     const actorsJson = JSON.stringify(parsed.data.actors, null, 2);
     writeFileAtomic(foundryActorsFile(), actorsJson);
     // The session's own copy: the session named in the sync (start/stop), else the one recording.
@@ -124,7 +128,7 @@ export async function startApi(store: Store, getRecording: () => SessionRow | nu
     foundry.lastRosterWorld = parsed.data.world;
     // Fill in Foundry's "Discord ID" flags from /scrib map, including mappings made while Foundry
     // was offline; this repeats on every sync until the flags match (05 C11).
-    const links = linksToWrite(store.getAllMappings(), rows);
+    const links = linksToWrite(store.getCampaignMappings(campaign && campaign.folder !== UNASSIGNED_FOLDER ? campaign.id : ALL_CAMPAIGNS), rows);
     if (links.length) {
       console.log(`[api] asking Foundry to link ${links.length} user(s) to their Discord IDs (from /scrib map)`);
       bus.emitEvent({ type: "roster.link", links });

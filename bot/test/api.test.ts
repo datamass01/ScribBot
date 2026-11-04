@@ -87,7 +87,7 @@ describe("Foundry API", () => {
   it("asks Foundry to correct a stale Discord ID flag after a roster sync (05 C11)", async () => {
     const { bus } = await import("../src/events.js");
     const roster = store.getRoster();
-    store.upsertMapping({ guildId: "g", discordId: "222222", foundryUserId: "u1", characterName: "Thorin" });
+    store.upsertMapping({ campaignId: 0, guildId: "g", discordId: "222222", foundryUserId: "u1", characterName: "Thorin" });
     const events: unknown[] = [];
     const off = bus.onEvent((e) => events.push(e));
     const res = await fetch(`${base}/roster`, {
@@ -96,7 +96,7 @@ describe("Foundry API", () => {
       body: JSON.stringify({ world: "w", users: [{ id: "u1", name: "Alice", isGM: false, discordId: "111" }], actors: [] }),
     });
     off();
-    store.deleteMapping("g", "222222");
+    store.deleteMapping("g", "222222", 0);
     store.replaceRoster(roster);
     expect(await res.json()).toMatchObject({ links: 1 });
     expect(events).toContainEqual({ type: "roster.link", links: [{ foundryUserId: "u1", discordId: "222222" }] });

@@ -56,10 +56,19 @@ export interface CampaignRow {
   title: string | null;
   /** A display name set in the Console; the folder doesn't change. */
   alias: string | null;
-  /** The last roster sync from this world: the most recent one is where new recordings go. */
+  /** The last roster sync from this world: without a chosen campaign, the most recent one is where new recordings go. */
   last_seen_at: string | null;
   created_at: string;
+  /** The Foundry server ScribBot joins for this campaign (the Campaign tab); null: FOUNDRY_URL / FOUNDRY_USER / FOUNDRY_PASSWORD from .env. */
+  foundry_url: string | null;
+  foundry_user: string | null;
+  foundry_password: string | null;
+  /** Chosen in the Campaign tab as the campaign being played; the latest choice wins. Null: not chosen. */
+  selected_at: string | null;
 }
+
+/** A campaign as people read it: the Console's alias, else Foundry's title, else the folder. */
+export const campaignName = (c: Pick<CampaignRow, "alias" | "title" | "folder">) => c.alias || c.title || c.folder;
 
 /** The campaign for recordings made before any Foundry world was known. */
 export const UNASSIGNED_FOLDER = "_unassigned";
@@ -73,7 +82,12 @@ export function worldFolderName(worldId: string) {
   return clean && !/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(clean) && clean !== UNASSIGNED_FOLDER ? clean : `world-${clean || "unnamed"}`;
 }
 
+/** `mappings.campaign_id` for a mapping shared by every campaign (mappings made before campaigns had their own). */
+export const ALL_CAMPAIGNS = 0;
+
 export interface MappingRow {
+  /** The campaign it applies in, or ALL_CAMPAIGNS; a campaign's own mapping wins over a shared one. */
+  campaign_id: number;
   guild_id: string;
   discord_id: string;
   foundry_user_id: string | null;
@@ -92,7 +106,8 @@ export interface RosterRow {
   discord_id: string | null;
 }
 
-const MIGRATIONS: string[] = [
+/** Exported for the migration tests. */
+export const MIGRATIONS: string[] = [
   `CREATE TABLE sessions (
      id TEXT PRIMARY KEY,
      guild_id TEXT NOT NULL,
@@ -149,7 +164,34 @@ const MIGRATIONS: string[] = [
    ALTER TABLE sessions ADD COLUMN campaign_id INTEGER REFERENCES campaigns(id);
    ALTER TABLE sessions ADD COLUMN dir TEXT;
    ALTER TABLE sessions ADD COLUMN merged_into_id TEXT;`,
+  // 5: the Campaign tab. Each campaign has its own Foundry server login and character mappings, and
+  // one can be chosen as the campaign being played. Existing mappings stay shared by every campaign (0).
+  `ALTER TABLE campaigns ADD COLUMN foundry_url TEXT;
+   ALTER TABLE campaigns ADD COLUMN foundry_user TEXT;
+   ALTER TABLE campaigns ADD COLUMN foundry_password TEXT;
+   ALTER TABLE campaigns ADD COLUMN selected_at TEXT;
+   CREATE TABLE mappings_v5 (
+     campaign_id INTEGER NOT NULL DEFAULT 0,
+     guild_id TEXT NOT NULL,
+     discord_id TEXT NOT NULL,
+     foundry_user_id TEXT,
+     actor_id TEXT,
+     character_name TEXT,
+     is_gm INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (campaign_id, guild_id, discord_id)
+   );
+   INSERT INTO mappings_v5 (campaign_id, guild_id, discord_id, foundry_user_id, actor_id, character_name, is_gm)
+     SELECT 0, guild_id, discord_id, foundry_user_id, actor_id, character_name, is_gm FROM mappings;
+   DROP TABLE mappings;
+   ALTER TABLE mappings_v5 RENAME TO mappings;
+   CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`,
 ];
+
+/** A folder name for a campaign made in the Console before its Foundry world is known. */
+export function campaignFolderFromName(name: string) {
+  const slug = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  return worldFolderName(slug || "campaign");
+}
 
 export class Store {
   readonly db: Database.Database;
@@ -257,22 +299,128 @@ export class Store {
     return this.db.prepare("SELECT * FROM campaigns WHERE world_id = ?").get(worldId) as CampaignRow | undefined;
   }
 
-  /** The campaign for a Foundry world, created on first sight; records the sync time and title. */
+  /**
+   * The campaign for a Foundry world, created on first sight; records the sync time and title.
+   * A sync (`seen`) from a world no campaign has yet goes to the chosen campaign when that one has
+   * no world yet: a campaign made in the Console gets its world the first time Foundry syncs.
+   */
   touchWorld(worldId: string, title?: string | null, seen = true) {
-    const existing = this.campaignByWorld(worldId);
     const now = new Date().toISOString();
+    let existing = this.campaignByWorld(worldId);
+    const chosen = seen && !existing ? this.selectedCampaign() : undefined;
+    if (chosen && chosen.world_id === null && chosen.folder !== UNASSIGNED_FOLDER) {
+      this.db.prepare("UPDATE campaigns SET world_id = ? WHERE id = ?").run(worldId, chosen.id);
+      console.log(`[db] Foundry world ${worldId} is now the campaign "${campaignName(chosen)}" (the campaign being played had no world yet)`);
+      existing = this.getCampaign(chosen.id);
+    }
     if (existing) {
       this.db
         .prepare("UPDATE campaigns SET title = COALESCE(?, title), last_seen_at = CASE WHEN ? THEN ? ELSE last_seen_at END WHERE id = ?")
         .run(title ?? null, seen ? 1 : 0, now, existing.id);
       return this.getCampaign(existing.id)!;
     }
-    let folder = worldFolderName(worldId);
-    for (let i = 2; this.db.prepare("SELECT 1 FROM campaigns WHERE folder = ?").get(folder); i++) folder = `${worldFolderName(worldId)}-${i}`;
+    const folder = this.freeFolder(worldFolderName(worldId));
     const { lastInsertRowid } = this.db
       .prepare("INSERT INTO campaigns (world_id, folder, title, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(worldId, folder, title ?? null, seen ? now : null, now);
     return this.getCampaign(Number(lastInsertRowid))!;
+  }
+
+  private freeFolder(base: string) {
+    let folder = base;
+    for (let i = 2; this.db.prepare("SELECT 1 FROM campaigns WHERE folder = ?").get(folder); i++) folder = `${base}-${i}`;
+    return folder;
+  }
+
+  /** A campaign made in the Console: a name, and the Foundry world if it's known already. */
+  createCampaign(c: { name: string; worldId?: string | null }) {
+    const name = c.name.trim();
+    if (!name) throw new Error("Give the campaign a name.");
+    const worldId = c.worldId?.trim() || null;
+    if (worldId) {
+      const owner = this.campaignByWorld(worldId);
+      if (owner) throw new Error(`World ${worldId} is already the campaign "${campaignName(owner)}".`);
+    }
+    const folder = this.freeFolder(worldId ? worldFolderName(worldId) : campaignFolderFromName(name));
+    const { lastInsertRowid } = this.db
+      .prepare("INSERT INTO campaigns (world_id, folder, alias, created_at) VALUES (?, ?, ?, ?)")
+      .run(worldId, folder, name, new Date().toISOString());
+    return this.getCampaign(Number(lastInsertRowid))!;
+  }
+
+  /**
+   * Change a campaign's world or Foundry login (undefined: leave as is; null or "": back to .env).
+   * A world another campaign has can only move here when that campaign has no sessions (it is then
+   * removed); the folder never changes.
+   */
+  updateCampaign(
+    id: number,
+    patch: { worldId?: string | null; foundryUrl?: string | null; foundryUser?: string | null; foundryPassword?: string | null },
+  ) {
+    const c = this.getCampaign(id);
+    if (!c) throw new Error("No such campaign.");
+    this.db.transaction(() => {
+      if (patch.worldId !== undefined) {
+        const worldId = patch.worldId?.trim() || null;
+        if (c.folder === UNASSIGNED_FOLDER && worldId) throw new Error("The unassigned campaign can't have a Foundry world; make a new campaign instead.");
+        const owner = worldId ? this.campaignByWorld(worldId) : undefined;
+        if (owner && owner.id !== id) {
+          const n = this.campaignSessionCount(owner.id);
+          if (n) {
+            throw new Error(
+              `World ${worldId} is already the campaign "${campaignName(owner)}" with ${n} session(s). ` +
+                "Move them here first (Sessions → Move to another campaign), or use that campaign.",
+            );
+          }
+          this.deleteCampaign(owner.id);
+        }
+        this.db.prepare("UPDATE campaigns SET world_id = ? WHERE id = ?").run(worldId, id);
+      }
+      const text = (v: string | null | undefined) => (v === undefined ? undefined : v?.trim() || null);
+      const columns: [string, string | null | undefined][] = [
+        ["foundry_url", text(patch.foundryUrl)?.replace(/\/+$/, "") ?? text(patch.foundryUrl)],
+        ["foundry_user", text(patch.foundryUser)],
+        // A password is kept exactly as typed; "" or null clears it.
+        ["foundry_password", patch.foundryPassword === undefined ? undefined : patch.foundryPassword || null],
+      ];
+      for (const [column, value] of columns) {
+        if (value !== undefined) this.db.prepare(`UPDATE campaigns SET ${column} = ? WHERE id = ?`).run(value, id);
+      }
+    })();
+    return this.getCampaign(id)!;
+  }
+
+  /** Sessions filed under a campaign, the trash and merged recordings included. */
+  campaignSessionCount(id: number) {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE campaign_id = ?").get(id) as { n: number }).n;
+  }
+
+  /** Remove a campaign with no sessions (none in the trash either), with its own mappings. */
+  deleteCampaign(id: number) {
+    const c = this.getCampaign(id);
+    if (!c) throw new Error("No such campaign.");
+    const n = this.campaignSessionCount(id);
+    if (n) throw new Error(`"${campaignName(c)}" has ${n} session(s), counting the trash; move or delete them first.`);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM mappings WHERE campaign_id = ?").run(id);
+      this.db.prepare("DELETE FROM campaigns WHERE id = ?").run(id);
+    })();
+  }
+
+  /** Choose the campaign being played (null: none, so the world Foundry synced last decides). */
+  selectCampaign(id: number | null) {
+    this.db.transaction(() => {
+      if (id !== null && !this.getCampaign(id)) throw new Error("No such campaign.");
+      this.db.prepare("UPDATE campaigns SET selected_at = NULL").run();
+      if (id !== null) this.db.prepare("UPDATE campaigns SET selected_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+    })();
+  }
+
+  /** The campaign chosen in the Campaign tab, if any. */
+  selectedCampaign() {
+    return this.db.prepare("SELECT * FROM campaigns WHERE selected_at IS NOT NULL ORDER BY selected_at DESC LIMIT 1").get() as
+      | CampaignRow
+      | undefined;
   }
 
   unassignedCampaign() {
@@ -285,12 +433,15 @@ export class Store {
   }
 
   /**
-   * Where a new recording goes: the world Foundry synced from most recently, else the campaign of
-   * the newest session, else "_unassigned" (created only when `create` is true).
+   * Where a new recording goes, the campaign being played: the one chosen in the Campaign tab, else
+   * the world Foundry synced from most recently, else the campaign of the newest session, else
+   * "_unassigned" (created only when `create` is true).
    */
   defaultCampaign(): CampaignRow;
   defaultCampaign(opts: { create: false }): CampaignRow | null;
   defaultCampaign(opts: { create?: boolean } = {}): CampaignRow | null {
+    const chosen = this.selectedCampaign();
+    if (chosen) return chosen;
     const seen = this.db
       .prepare("SELECT * FROM campaigns WHERE world_id IS NOT NULL AND last_seen_at IS NOT NULL ORDER BY last_seen_at DESC LIMIT 1")
       .get() as CampaignRow | undefined;
@@ -407,16 +558,31 @@ export class Store {
 
   // ---------- mappings ----------
 
-  getMappings(guildId: string) {
-    return this.db.prepare("SELECT * FROM mappings WHERE guild_id = ?").all(guildId) as MappingRow[];
+  /**
+   * The mappings in force for a campaign on a server: the campaign's own, plus the shared ones
+   * (ALL_CAMPAIGNS) for people it doesn't map itself.
+   */
+  getMappings(guildId: string, campaignId: number) {
+    const rows = this.db
+      .prepare("SELECT * FROM mappings WHERE guild_id = ? AND campaign_id IN (?, 0) ORDER BY discord_id")
+      .all(guildId, campaignId) as MappingRow[];
+    return effective(rows);
   }
 
-  /** Every guild's mappings (the Foundry roster is one world shared by all of them). */
-  getAllMappings() {
-    return this.db.prepare("SELECT * FROM mappings ORDER BY guild_id, discord_id").all() as MappingRow[];
+  /** Every server's mappings in force for a campaign (the Foundry roster is one world shared by all of them). */
+  getCampaignMappings(campaignId: number) {
+    const rows = this.db
+      .prepare("SELECT * FROM mappings WHERE campaign_id IN (?, 0) ORDER BY guild_id, discord_id")
+      .all(campaignId) as MappingRow[];
+    return effective(rows);
   }
 
+  /**
+   * Set a mapping in a campaign (or ALL_CAMPAIGNS). Fields left out keep the value in force: the
+   * campaign's own, else the shared one it overrides from now on.
+   */
   upsertMapping(m: {
+    campaignId: number;
     guildId: string;
     discordId: string;
     foundryUserId?: string | null;
@@ -424,9 +590,7 @@ export class Store {
     characterName?: string | null;
     isGm?: boolean;
   }) {
-    const existing = this.db
-      .prepare("SELECT * FROM mappings WHERE guild_id = ? AND discord_id = ?")
-      .get(m.guildId, m.discordId) as MappingRow | undefined;
+    const existing = this.getMappings(m.guildId, m.campaignId).find((x) => x.discord_id === m.discordId);
     const merged = {
       foundry_user_id: m.foundryUserId !== undefined ? m.foundryUserId : (existing?.foundry_user_id ?? null),
       actor_id: m.actorId !== undefined ? m.actorId : (existing?.actor_id ?? null),
@@ -435,19 +599,34 @@ export class Store {
     };
     this.db
       .prepare(
-        `INSERT INTO mappings (guild_id, discord_id, foundry_user_id, actor_id, character_name, is_gm)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (guild_id, discord_id) DO UPDATE SET
+        `INSERT INTO mappings (campaign_id, guild_id, discord_id, foundry_user_id, actor_id, character_name, is_gm)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (campaign_id, guild_id, discord_id) DO UPDATE SET
            foundry_user_id = excluded.foundry_user_id,
            actor_id = excluded.actor_id,
            character_name = excluded.character_name,
            is_gm = excluded.is_gm`,
       )
-      .run(m.guildId, m.discordId, merged.foundry_user_id, merged.actor_id, merged.character_name, merged.is_gm);
+      .run(m.campaignId, m.guildId, m.discordId, merged.foundry_user_id, merged.actor_id, merged.character_name, merged.is_gm);
   }
 
-  deleteMapping(guildId: string, discordId: string) {
-    this.db.prepare("DELETE FROM mappings WHERE guild_id = ? AND discord_id = ?").run(guildId, discordId);
+  /** Remove the mapping in force for someone in a campaign: its own, else the shared one. */
+  deleteMapping(guildId: string, discordId: string, campaignId: number) {
+    const existing = this.getMappings(guildId, campaignId).find((x) => x.discord_id === discordId);
+    if (!existing) return;
+    this.db
+      .prepare("DELETE FROM mappings WHERE campaign_id = ? AND guild_id = ? AND discord_id = ?")
+      .run(existing.campaign_id, guildId, discordId);
+  }
+
+  // ---------- small settings ----------
+
+  getMeta(key: string) {
+    return (this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string | null } | undefined)?.value ?? null;
+  }
+
+  setMeta(key: string, value: string | null) {
+    this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
   // ---------- Foundry roster ----------
@@ -476,4 +655,10 @@ export const recordingRel = (campaignFolder: string, gameId: string, id: string)
   `campaigns/${campaignFolder}/sessions/${gameId}/recordings/${id}`;
 
 /** The game folder's name in a campaign-layout `dir` (…/sessions/<name>/recordings/<id>), or null. */
+/** A campaign's own mappings hide the shared (ALL_CAMPAIGNS) ones for the same person. */
+function effective(rows: MappingRow[]) {
+  const own = new Set(rows.filter((m) => m.campaign_id !== ALL_CAMPAIGNS).map((m) => `${m.guild_id}:${m.discord_id}`));
+  return rows.filter((m) => m.campaign_id !== ALL_CAMPAIGNS || !own.has(`${m.guild_id}:${m.discord_id}`));
+}
+
 export const gameFolderOf = (dir: string | null) => /^campaigns\/[^/]+\/sessions\/([^/]+)\/recordings\/[^/]+$/.exec(dir ?? "")?.[1] ?? null;

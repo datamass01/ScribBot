@@ -30,14 +30,36 @@ export function ensureCampaignFiles(dir = config.campaignDir): string[] {
 const readIfExists = (file: string) =>
   fs.existsSync(file) ? fs.readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "").trim() : "";
 
+export type CampaignNote = "context.md" | "glossary.md";
+
 /**
- * Campaign knowledge from campaign/context.md (lore, recent events) and
- * campaign/glossary.md (names, one per line or "- Name: note"), plus actor
- * names synced from Foundry.
+ * Where a campaign's note lives: CAMPAIGN_DIR/<campaign folder>/<name> (the Campaign tab writes
+ * it), falling back to the shared CAMPAIGN_DIR/<name> when the campaign has none of its own.
+ * The same rule is in the worker (notes_file), the Console and the story skill's prepare.py.
  */
-export function loadCampaign() {
-  const context = readIfExists(path.join(config.campaignDir, "context.md"));
-  const glossaryFile = readIfExists(path.join(config.campaignDir, "glossary.md"));
+export function campaignNoteFile(name: CampaignNote, folder?: string | null, dir = config.campaignDir) {
+  if (folder && isSafeFolder(folder)) {
+    const own = path.join(dir, folder, name);
+    if (fs.existsSync(own)) return own;
+  }
+  return path.join(dir, name);
+}
+
+const isSafeFolder = (folder: string) => /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(folder);
+
+/** The campaign folder of a session or recording folder (DATA_DIR/campaigns/<folder>/sessions/…), or null (old flat layout). */
+export function campaignFolderOfPath(dir: string) {
+  return /(?:^|[\\/])campaigns[\\/]([^\\/]+)[\\/]sessions(?:[\\/]|$)/.exec(dir)?.[1] ?? null;
+}
+
+/**
+ * Campaign knowledge from context.md (world description, lore, the story so far) and glossary.md
+ * (names, one per line or "- Name: note") for a campaign (its folder; none: the shared notes),
+ * plus actor names synced from Foundry.
+ */
+export function loadCampaign(folder?: string | null) {
+  const context = readIfExists(campaignNoteFile("context.md", folder));
+  const glossaryFile = readIfExists(campaignNoteFile("glossary.md", folder));
   const actorNames = loadActorNames();
   const glossary = actorNames.length
     ? `${glossaryFile}\n\nActors in the Foundry world: ${actorNames.join(", ")}`
@@ -66,8 +88,8 @@ export function glossaryNames(glossary: string) {
 }
 
 /** Proper nouns for Whistle's keyword biasing, so it spells fantasy names right. */
-export function sttKeywords(extraNames: string[]) {
-  const { glossaryFile, actorNames } = loadCampaign();
+export function sttKeywords(extraNames: string[], folder?: string | null) {
+  const { glossaryFile, actorNames } = loadCampaign(folder);
   // Party and glossary first: if the list is long, those matter most.
   return [...new Set([...extraNames, ...glossaryNames(glossaryFile), ...actorNames])].slice(0, 150);
 }

@@ -1,11 +1,12 @@
 // The Console shell: tabs, the shared /status poll and the health pills in the header.
 // Polling stops while the page is hidden, so an idle tab costs the bot nothing.
-import { $, api, pill } from "./util.js";
+import { $, api, esc, pill } from "./util.js";
 import * as sessions from "./sessions.js";
+import * as campaign from "./campaign.js";
 import * as monitoring from "./monitoring.js";
 import * as configuration from "./config.js";
 
-const TABS = { sessions, monitoring, configuration };
+const TABS = { sessions, campaign, monitoring, configuration };
 const POLL_MS = 3000;
 let current = null;
 let timer = null;
@@ -33,6 +34,8 @@ function renderHealth(s) {
     w.reachable ? (w.paused ? pill("warn", "worker paused") : pill("ok", w.queued ? `worker · ${w.queued} queued` : "worker")) : pill("err", "worker offline"),
     online ? (f.sockets ? pill("ok", "foundry") : pill("warn", "foundry not connected")) : "",
     rec ? pill("err", rec > 1 ? `${rec} recording` : "recording") : "",
+    online && s.campaign && !s.campaign.unassigned
+      ? `<a href="#campaign" class="pill info" title="The campaign being played${s.campaign.chosen ? "" : " (automatic: the Foundry world that synced last)"}">${esc(s.campaign.name)}</a>` : "",
   ];
   $("health").innerHTML = parts.join("");
   const alerts = (s.warnings || []).length;

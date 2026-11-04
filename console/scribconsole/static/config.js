@@ -19,6 +19,10 @@ let group = null;
 let status = null;
 
 const PROC_LABEL = { bot: "bot", worker: "worker", console: "console" };
+// Set per campaign in the Campaign tab now, so the form doesn't show them. A campaign without an
+// address joins nothing; .env's FOUNDRY_URL applies only while no campaign is being played, and
+// FOUNDRY_USER / FOUNDRY_PASSWORD are the fallback login.
+const CAMPAIGN_KEYS = new Set(["FOUNDRY_URL", "FOUNDRY_USER", "FOUNDRY_PASSWORD"]);
 
 export function show(el, s) {
   root = el;
@@ -28,7 +32,6 @@ export function show(el, s) {
       <section class="card" id="c-setup"><div class="card-head"><h2>Setup checklist</h2></div><p class="muted">Checking…</p></section>
       <div id="c-restart"></div>
       <section class="card" id="c-form"><p class="muted">Loading settings…</p></section>
-      <section class="card" id="c-campaign"></section>
       <div class="savebar" id="c-savebar" hidden>
         <span class="count" id="c-count"></span>
         <button data-act="discard">Discard</button>
@@ -44,7 +47,6 @@ export function show(el, s) {
   }
   load();
   loadSetup();
-  renderCampaign();
 }
 
 export function hide() {
@@ -262,7 +264,14 @@ function settingRow(s) {
 }
 
 function renderForm() {
-  const settings = view.settings.filter((s) => s.group === group && visibleSetting(s));
+  const settings = view.settings.filter((s) => s.group === group && visibleSetting(s) && !CAMPAIGN_KEYS.has(s.key));
+  const moved = view.settings.filter((s) => s.group === group && CAMPAIGN_KEYS.has(s.key));
+  const movedNote = moved.length
+    ? `<div class="setting"><div class="name"><b>Foundry server and login</b></div><div class="control"><div class="help">
+        The Foundry address, ScribBot's Foundry user and its password are set for each campaign in the <a href="#campaign">Campaign tab</a>.
+        A campaign with no address set there doesn't join Foundry. <code>FOUNDRY_USER</code> and <code>FOUNDRY_PASSWORD</code> in .env are still the login for a campaign that doesn't set its own,
+        and <code>FOUNDRY_URL</code> is only used while no campaign is being played.
+      </div></div></div>` : "";
   const basic = settings.filter((s) => !s.advanced).map(settingRow).join("");
   const advanced = settings.filter((s) => s.advanced);
   const changedIn = (g) => view.settings.some((s) => s.group === g && s.key in edits);
@@ -272,7 +281,7 @@ function renderForm() {
     ${view.envExists ? "" : `<div class="notice warn">There's no .env yet. Create it from the template (above) before saving settings.</div>`}
     <div class="groups" role="tablist">${view.groups.map((g) =>
       `<button data-group="${esc(g)}" aria-pressed="${g === group}">${esc(g)}${changedIn(g) ? " •" : ""}</button>`).join("")}</div>
-    <div>${basic || (advanced.length ? "" : `<p class="muted">Nothing to set here with the current choices.</p>`)}</div>
+    <div>${movedNote}${basic || (advanced.length || movedNote ? "" : `<p class="muted">Nothing to set here with the current choices.</p>`)}</div>
     ${advanced.length ? `<details class="advanced" ${openAdvanced ? "open" : ""}><summary>Advanced (${advanced.length})</summary>${advanced.map(settingRow).join("")}</details>` : ""}
     ${view.unknownKeys.length ? `<p class="muted small">Also in .env, not managed here: ${view.unknownKeys.map((k) => `<code>${esc(k)}</code>`).join(", ")}</p>` : ""}`;
   renderSavebar();
@@ -403,7 +412,6 @@ async function onClick(e) {
       return;
     }
     case "restart-worker": return restartWorker(false);
-    case "save-campaign": return saveCampaign(btn.dataset.name);
   }
 }
 
@@ -428,27 +436,4 @@ async function save() {
       toast(err.message, "err");
     }
   }
-}
-
-// ---------- campaign notes
-async function renderCampaign() {
-  const el = $("c-campaign");
-  const files = { glossary: "Names for speech-to-text and the summarizer: one per line, with an optional “: note”.",
-    context: "Setting, party and the story so far, for the summarizer." };
-  const parts = await Promise.all(Object.keys(files).map(async (name) => {
-    try {
-      return [name, await api("GET", `/api/campaign/${name}`)];
-    } catch {
-      return [name, null];
-    }
-  }));
-  el.innerHTML = `<details><summary><b>Campaign notes</b> <span class="muted small">glossary.md and context.md</span></summary>
-    ${parts.map(([name, f]) => `<div class="field" style="margin-top:12px"><span>${name}.md</span><small>${esc(files[name])} ${f ? `<code>${esc(f.path)}</code>` : ""}</small>
-      <textarea id="camp-${name}" spellcheck="false">${esc(f?.text ?? "")}</textarea>
-      <div class="row"><button data-act="save-campaign" data-name="${name}">Save ${name}.md</button>
-        <span class="muted small">Used from the next recording or summary on.</span></div></div>`).join("")}</details>`;
-}
-
-async function saveCampaign(name) {
-  await attempt(() => api("PUT", `/api/campaign/${name}`, { text: $(`camp-${name}`).value }), `${name}.md saved.`);
 }

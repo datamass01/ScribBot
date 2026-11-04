@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { config } from "../config.js";
-import { gameFolderOf, type SessionRow, type Store } from "../db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName as nameOf, gameFolderOf, type CampaignRow, type SessionRow, type Store } from "../db.js";
 import { bus } from "../events.js";
 import { mergedInto, unusableReason } from "../merge.js";
 import { sessionPaths, sessionRecordings } from "../paths.js";
@@ -33,9 +33,11 @@ export interface AdminSessions {
   stopFromConsole(sessionId: string): Promise<SessionRow>;
   processFromConsole(session: SessionRow, opts: { summaryOnly?: boolean; retranscribe?: boolean }): Promise<void>;
   mergeInto(a: SessionRow, b: SessionRow): string;
-  setMapping(guildId: string, discordId: string, value: string): string;
-  clearMapping(guildId: string, discordId: string): void;
-  setGm(guildId: string, discordId: string, isGm: boolean): void;
+  /** `campaignId` left out: the campaign being played (`playingCampaignId()`), as for the slash commands. */
+  setMapping(guildId: string, discordId: string, value: string, campaignId?: number): string;
+  clearMapping(guildId: string, discordId: string, campaignId?: number): void;
+  setGm(guildId: string, discordId: string, isGm: boolean, campaignId?: number): void;
+  playingCampaignId(): number;
   memberNames(guildId: string, ids: string[]): Promise<Record<string, string | null>>;
 }
 
@@ -43,6 +45,8 @@ export interface AdminDeps {
   sessions: AdminSessions;
   /** Clean shutdown, then exit with code 75 so start.ps1 starts the bot again. */
   restart?: (reason: string) => void;
+  /** The campaign being played, or a campaign's Foundry server, changed: the headless client re-targets. */
+  campaignChanged?: () => void;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -126,7 +130,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   const campaignName = (id: number | null) => {
     const c = id == null ? null : store.getCampaign(id);
-    return c ? { campaignId: c.id, campaign: c.alias || c.title || c.folder, campaignFolder: c.folder } : { campaignId: null, campaign: null, campaignFolder: null };
+    return c ? { campaignId: c.id, campaign: nameOf(c), campaignFolder: c.folder } : { campaignId: null, campaign: null, campaignFolder: null };
   };
 
   const summary = (s: SessionRow) => {
@@ -357,36 +361,125 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   // ---------- campaigns (one per Foundry world) and the folder layout ----------
 
+  // The Campaign tab: what each campaign is (name, world, Foundry server) and which one is being played.
+  // Passwords never leave the bot: only whether one is set.
+  const campaignView = (c: CampaignRow, def: CampaignRow | null, all: SessionRow[]) => ({
+    id: c.id,
+    worldId: c.world_id,
+    folder: c.folder,
+    title: c.title,
+    alias: c.alias,
+    name: nameOf(c),
+    lastSeenAt: c.last_seen_at,
+    createdAt: c.created_at,
+    isDefault: def?.id === c.id,
+    chosen: Boolean(c.selected_at) && def?.id === c.id,
+    unassigned: c.folder === UNASSIGNED_FOLDER,
+    sessions: all.filter((x) => x.campaign_id === c.id && !x.merged_into_id && !x.deleted_at).length,
+    /** Counting the trash and merged recordings: a campaign can be deleted only at 0. */
+    rows: store.campaignSessionCount(c.id),
+    folderPath: path.join(config.dataDir, "campaigns", c.folder),
+    foundry: { url: c.foundry_url, user: c.foundry_user, passwordSet: Boolean(c.foundry_password) },
+  });
+
   app.get(
     "/admin/campaigns",
     handle(() => {
       const all = store.listSessions(1_000_000, { deleted: "include" });
       const def = store.defaultCampaign({ create: false });
       return {
-        campaigns: store.listCampaigns().map((c) => ({
-          id: c.id,
-          worldId: c.world_id,
-          folder: c.folder,
-          title: c.title,
-          alias: c.alias,
-          name: c.alias || c.title || c.folder,
-          lastSeenAt: c.last_seen_at,
-          isDefault: def?.id === c.id,
-          sessions: all.filter((x) => x.campaign_id === c.id && !x.merged_into_id && !x.deleted_at).length,
-          folderPath: path.join(config.dataDir, "campaigns", c.folder),
-        })),
+        campaigns: store.listCampaigns().map((c) => campaignView(c, def, all)),
+        /** The campaign chosen in the Campaign tab (null: the world Foundry synced last decides). */
+        chosenId: store.selectedCampaign()?.id ?? null,
+        /** The world of the last roster sync: its Foundry users can be mapped in that world's campaign. */
+        rosterWorld: store.getMeta("roster_world"),
+        /**
+         * The .env fallbacks for a campaign's Foundry user and password (only whether one is set). No
+         * address: a campaign without its own joins nothing, so .env's isn't shown or sent.
+         */
+        foundryDefaults: { user: config.foundry.user, passwordSet: config.foundry.password !== "", headless: config.foundry.headless },
       };
     }),
   );
 
-  const Alias = z.object({ alias: z.string().max(100).nullable() });
+  const optionalText = (max: number) => z.string().max(max).nullable().optional();
+  const FoundryUrl = z
+    .string()
+    .max(500)
+    .nullable()
+    .optional()
+    .refine((v) => !v || /^https?:\/\/[^\s/]+/i.test(v.trim()), "The Foundry address must start with http:// or https://.");
+  const CampaignPatch = z.object({
+    alias: optionalText(100),
+    worldId: optionalText(200),
+    foundryUrl: FoundryUrl,
+    foundryUser: optionalText(100),
+    foundryPassword: optionalText(500),
+  });
+  const CampaignCreate = z.object({ name: z.string().min(1, "Give the campaign a name.").max(100), worldId: optionalText(200) });
+
+  app.post(
+    "/admin/campaigns",
+    handle((req) => {
+      const body = CampaignCreate.parse(req.body);
+      const c = store.createCampaign({ name: body.name, worldId: body.worldId ?? null });
+      console.log(`[admin] campaign "${nameOf(c)}" created (folder ${c.folder})`);
+      return { ok: true, campaign: campaignView(c, store.defaultCampaign({ create: false }), []) };
+    }),
+  );
+
   app.patch(
     "/admin/campaigns/:id",
-    handle((req: FastifyRequest<{ Params: { id: string } }>) => {
+    handle((req: IdReq) => {
       const c = store.getCampaign(Number(req.params.id));
       if (!c) throw new HttpError(404, "No such campaign.");
-      store.setCampaignAlias(c.id, Alias.parse(req.body).alias?.trim() || null);
+      const body = CampaignPatch.parse(req.body);
+      if (body.alias !== undefined) store.setCampaignAlias(c.id, body.alias?.trim() || null);
+      store.updateCampaign(c.id, body);
+      // Field names only: never the values (the password).
+      const changed = Object.keys(body).filter((k) => body[k as keyof typeof body] !== undefined);
+      if (changed.length) console.log(`[admin] campaign "${nameOf(store.getCampaign(c.id)!)}": ${changed.join(", ")} changed`);
+      if (body.worldId !== undefined || body.foundryUrl !== undefined || body.foundryUser !== undefined || body.foundryPassword !== undefined) {
+        deps.campaignChanged?.();
+      }
       return { ok: true };
+    }),
+  );
+
+  app.delete(
+    "/admin/campaigns/:id",
+    handle((req: IdReq) => {
+      const c = store.getCampaign(Number(req.params.id));
+      if (!c) throw new HttpError(404, "No such campaign.");
+      const wasPlaying = store.defaultCampaign({ create: false })?.id === c.id;
+      store.deleteCampaign(c.id);
+      console.log(`[admin] campaign "${nameOf(c)}" deleted`);
+      if (wasPlaying) deps.campaignChanged?.();
+      return { ok: true };
+    }),
+  );
+
+  const PlayingBody = z.object({ campaignId: z.number().int().nullable() });
+  app.post(
+    "/admin/campaigns/playing",
+    handle((req) => {
+      const { campaignId } = PlayingBody.parse(req.body);
+      if (campaignId !== null) {
+        const c = store.getCampaign(campaignId);
+        if (!c) throw new HttpError(404, "No such campaign.");
+        if (c.folder === UNASSIGNED_FOLDER) throw new HttpError(409, "Pick a real campaign: the unassigned one only holds recordings made before any was known.");
+      }
+      store.selectCampaign(campaignId);
+      const now = store.defaultCampaign({ create: false });
+      console.log(`[admin] campaign being played: ${campaignId === null ? "automatic" : `"${nameOf(store.getCampaign(campaignId)!)}"`}`);
+      deps.campaignChanged?.();
+      const live = store.listSessions(50).filter((x) => sessions.isRecording(x.id));
+      return {
+        ok: true,
+        playing: now ? { id: now.id, name: nameOf(now) } : null,
+        // A recording keeps the campaign it started in.
+        note: live.length ? "A recording in progress stays in the campaign it started in; the change applies to the next one." : null,
+      };
     }),
   );
 
@@ -448,14 +541,27 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
 
   // ---------- speakers and characters ----------
 
+  /** ?campaign=<id> on the mapping routes; left out, the campaign being played. */
+  const campaignParam = (req: FastifyRequest) => {
+    const raw = (req.query as { campaign?: string } | undefined)?.campaign;
+    if (raw === undefined || raw === "") return sessions.playingCampaignId();
+    const id = Number(raw);
+    if (!Number.isInteger(id) || (id !== ALL_CAMPAIGNS && !store.getCampaign(id))) throw new HttpError(404, "No such campaign.");
+    return id;
+  };
+
   app.get(
     "/admin/mappings",
-    handle(async () => {
-      const all = store.getAllMappings();
+    handle(async (req) => {
+      const campaignId = campaignParam(req);
+      const all = store.getCampaignMappings(campaignId);
       const guilds = [...new Set(all.map((m) => m.guild_id))];
       const names: Record<string, string | null> = {};
       for (const g of guilds) Object.assign(names, await sessions.memberNames(g, all.filter((m) => m.guild_id === g).map((m) => m.discord_id)));
+      const world = campaignId === ALL_CAMPAIGNS ? null : (store.getCampaign(campaignId)?.world_id ?? null);
+      const rosterWorld = store.getMeta("roster_world");
       return {
+        campaignId,
         mappings: all.map((m) => ({
           guildId: m.guild_id,
           discordId: m.discord_id,
@@ -464,7 +570,12 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
           foundryUserId: m.foundry_user_id,
           actorId: m.actor_id,
           isGm: Boolean(m.is_gm),
+          /** Shared by every campaign (made before campaigns had their own mappings). */
+          shared: m.campaign_id === ALL_CAMPAIGNS && campaignId !== ALL_CAMPAIGNS,
         })),
+        rosterWorld,
+        /** The synced roster is this campaign's world (or either is unknown): its Foundry users can be picked. */
+        rosterMatches: !world || !rosterWorld || world === rosterWorld,
         roster: store.getRoster().map((r) => ({
           foundryUserId: r.foundry_user_id,
           userName: r.user_name,
@@ -483,13 +594,13 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
     "/admin/mappings/:guildId/:discordId",
     handle((req: MapReq) => {
       const discordId = snowflake.parse(req.params.discordId);
-      return { ok: true, mapped: sessions.setMapping(req.params.guildId, discordId, MapBody.parse(req.body).character) };
+      return { ok: true, mapped: sessions.setMapping(req.params.guildId, discordId, MapBody.parse(req.body).character, campaignParam(req)) };
     }),
   );
   app.delete(
     "/admin/mappings/:guildId/:discordId",
     handle((req: MapReq) => {
-      sessions.clearMapping(req.params.guildId, snowflake.parse(req.params.discordId));
+      sessions.clearMapping(req.params.guildId, snowflake.parse(req.params.discordId), campaignParam(req));
       return { ok: true };
     }),
   );
@@ -497,7 +608,7 @@ export function registerAdminRoutes(app: FastifyInstance, store: Store, deps: Ad
   app.post(
     "/admin/mappings/:guildId/:discordId/gm",
     handle((req: MapReq) => {
-      sessions.setGm(req.params.guildId, snowflake.parse(req.params.discordId), GmBody.parse(req.body).isGm);
+      sessions.setGm(req.params.guildId, snowflake.parse(req.params.discordId), GmBody.parse(req.body).isGm, campaignParam(req));
       return { ok: true };
     }),
   );

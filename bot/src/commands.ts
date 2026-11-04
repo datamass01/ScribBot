@@ -17,7 +17,7 @@ import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { llmConfigProblem } from "./summarize/readiness.js";
 import { config } from "./config.js";
-import type { SessionRow, Store } from "./db.js";
+import { ALL_CAMPAIGNS, UNASSIGNED_FOLDER, campaignName, type SessionRow, type Store } from "./db.js";
 import { bus } from "./events.js";
 import { resolveParticipant, speakerLabel } from "./participants.js";
 import { recordingNotice } from "./notice.js";
@@ -262,10 +262,12 @@ export class CommandHandler {
     this.recordings.set(guildId, { recorder, session, textChannelId });
     bus.emitEvent({ type: "session.started", sessionId: id, number: session.number, startedAt });
 
-    const mapped = this.describeVoiceMembers(guildId, voice.members.filter((m) => !m.user.bot).values());
+    const mapped = this.describeVoiceMembers(guildId, voice.members.filter((m) => !m.user.bot).values(), session.campaign_id ?? ALL_CAMPAIGNS);
+    const campaign = session.campaign_id == null ? null : this.store.getCampaign(session.campaign_id);
+    const campaignLine = campaign && campaign.folder !== UNASSIGNED_FOLDER ? `📖 Campaign: **${campaignName(campaign)}**\n` : "";
     return {
       session,
-      text: `${recordingNotice({ sessionNumber: session.number, channel: String(voice), llm: config.llm, autoSummarize: config.autoSummarize })}\n\n${mapped}${workerNote}`,
+      text: `${recordingNotice({ sessionNumber: session.number, channel: String(voice), llm: config.llm, autoSummarize: config.autoSummarize })}\n\n${campaignLine}${mapped}${workerNote}`,
     };
   }
 
@@ -277,7 +279,9 @@ export class CommandHandler {
       async (userId) => {
         const member = await voice.guild.members.fetch(userId).catch(() => null);
         if (!member || member.user.bot) return null;
-        return resolveParticipant(userId, member.displayName, this.store.getMappings(voice.guild.id), this.store.getRoster());
+        // The mappings of the campaign this recording is filed under (looked up now: it can be moved).
+        const campaignId = this.store.getSession(sessionId)?.campaign_id ?? ALL_CAMPAIGNS;
+        return resolveParticipant(userId, member.displayName, this.store.getMappings(voice.guild.id, campaignId), this.store.getRoster());
       },
       {
         onSegment: makeLiveTranscriber(sessionPaths(sessionId).recording),
@@ -438,8 +442,8 @@ export class CommandHandler {
     }
   }
 
-  private describeVoiceMembers(guildId: string, members: Iterable<GuildMember>) {
-    const mappings = this.store.getMappings(guildId);
+  private describeVoiceMembers(guildId: string, members: Iterable<GuildMember>, campaignId = this.playingCampaignId()) {
+    const mappings = this.store.getMappings(guildId, campaignId);
     const roster = this.store.getRoster();
     const lines = [...members].map((m) => {
       const p = resolveParticipant(m.id, m.displayName, mappings, roster);
@@ -584,21 +588,57 @@ export class CommandHandler {
     const user = i.options.getUser("user", true);
     this.assertCanEdit(i, user.id);
     const value = i.options.getString("character", true).trim();
-    await i.reply(`✅ ${user} → ${this.setMapping(i.guildId, user.id, value)}`);
+    await i.reply(`✅ ${user} → ${this.setMapping(i.guildId, user.id, value)}${this.campaignSuffix()}`);
+  }
+
+  /**
+   * The campaign `/scrib map`, `unmap` and `gm` change, and the Console unless it names one: the
+   * campaign being played, or every campaign (ALL_CAMPAIGNS) while there is none yet.
+   */
+  playingCampaignId() {
+    const c = this.store.defaultCampaign({ create: false });
+    return c && c.folder !== UNASSIGNED_FOLDER ? c.id : ALL_CAMPAIGNS;
+  }
+
+  /** " (campaign Name)" after a mapping reply, when there are campaigns to tell apart. */
+  private campaignSuffix() {
+    const id = this.playingCampaignId();
+    const c = id === ALL_CAMPAIGNS ? null : this.store.getCampaign(id);
+    return c && this.store.listCampaigns().filter((x) => x.folder !== UNASSIGNED_FOLDER).length > 1 ? ` (campaign ${campaignName(c)})` : "";
+  }
+
+  /**
+   * Whether the synced Foundry roster is this campaign's world, so its Foundry users can be mapped
+   * and their "Discord ID" flags written. Unknown worlds (a campaign without one, an older module
+   * that doesn't say) count as a match.
+   */
+  private rosterIsFor(campaignId: number) {
+    if (campaignId === ALL_CAMPAIGNS) return true;
+    const world = this.store.getCampaign(campaignId)?.world_id;
+    const rosterWorld = this.store.getMeta("roster_world");
+    return !world || !rosterWorld || world === rosterWorld;
   }
 
   /**
    * `value` is `foundry:<user id>` (a synced Foundry user) or any character name. Returns how it
    * reads, e.g. "**Thorin** (Foundry user Alice)". Shared by `/scrib map` and the Console.
    */
-  setMapping(guildId: string, discordId: string, value: string) {
+  setMapping(guildId: string, discordId: string, value: string, campaignId = this.playingCampaignId()) {
     value = value.trim();
     if (!value) throw new Error("Pick a character.");
-    const previous = this.store.getMappings(guildId).find((m) => m.discord_id === discordId);
+    const previous = this.store.getMappings(guildId, campaignId).find((m) => m.discord_id === discordId);
+    const linked = this.rosterIsFor(campaignId);
     if (value.startsWith("foundry:")) {
+      if (!linked) {
+        throw new Error(
+          `The Foundry roster ScribBot has is from world ${this.store.getMeta("roster_world")}, not this campaign's. ` +
+            "Open the campaign's world in Foundry so it syncs, or enter a character name.",
+        );
+      }
       const r = this.store.getRoster().find((x) => x.foundry_user_id === value.slice(8));
       if (!r) throw new Error("That Foundry user is no longer in the synced roster.");
       this.store.upsertMapping({
+        campaignId,
         guildId,
         discordId,
         foundryUserId: r.foundry_user_id,
@@ -612,8 +652,8 @@ export class CommandHandler {
       this.sendLinks(links);
       return `**${r.actor_name ?? "GM"}** (Foundry user ${r.user_name})`;
     }
-    this.store.upsertMapping({ guildId, discordId, foundryUserId: null, actorId: null, characterName: value });
-    if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
+    this.store.upsertMapping({ campaignId, guildId, discordId, foundryUserId: null, actorId: null, characterName: value });
+    if (previous?.foundry_user_id && linked) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
     return `**${value}** (not linked to a Foundry actor)`;
   }
 
@@ -628,13 +668,13 @@ export class CommandHandler {
     const user = i.options.getUser("user", true);
     this.assertCanEdit(i, user.id);
     this.clearMapping(i.guildId, user.id);
-    await i.reply({ content: `Removed mapping for ${user}.`, flags: MessageFlags.Ephemeral });
+    await i.reply({ content: `Removed mapping for ${user}${this.campaignSuffix()}.`, flags: MessageFlags.Ephemeral });
   }
 
-  clearMapping(guildId: string, discordId: string) {
-    const previous = this.store.getMappings(guildId).find((m) => m.discord_id === discordId);
-    this.store.deleteMapping(guildId, discordId);
-    if (previous?.foundry_user_id) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
+  clearMapping(guildId: string, discordId: string, campaignId = this.playingCampaignId()) {
+    const previous = this.store.getMappings(guildId, campaignId).find((m) => m.discord_id === discordId);
+    this.store.deleteMapping(guildId, discordId, campaignId);
+    if (previous?.foundry_user_id && this.rosterIsFor(campaignId)) this.sendLinks([unlink(previous.foundry_user_id, discordId)]);
   }
 
   private async gm(i: ChatInputCommandInteraction<"cached">) {
@@ -645,13 +685,13 @@ export class CommandHandler {
     await i.reply(isGm ? `🎲 ${user} is the GM.` : `${user} is no longer marked as GM.`);
   }
 
-  setGm(guildId: string, discordId: string, isGm: boolean) {
-    this.store.upsertMapping({ guildId, discordId, isGm });
-    if (isGm) this.sendLinks(linksToWrite(this.store.getAllMappings(), this.store.getRoster()));
+  setGm(guildId: string, discordId: string, isGm: boolean, campaignId = this.playingCampaignId()) {
+    this.store.upsertMapping({ campaignId, guildId, discordId, isGm });
+    if (isGm && this.rosterIsFor(campaignId)) this.sendLinks(linksToWrite(this.store.getCampaignMappings(campaignId), this.store.getRoster()));
   }
 
   private async listMappings(i: ChatInputCommandInteraction<"cached">) {
-    const rows = this.store.getMappings(i.guildId).map((m) => {
+    const rows = this.store.getMappings(i.guildId, this.playingCampaignId()).map((m) => {
       const who = m.is_gm ? "GM" : (m.character_name ?? "?");
       return `<@${m.discord_id}> → **${who}**${m.actor_id ? " (Foundry actor linked)" : ""}`;
     });
@@ -660,8 +700,9 @@ export class CommandHandler {
       voice?.type === ChannelType.GuildVoice || voice?.type === ChannelType.GuildStageVoice
         ? `\n\n${this.describeVoiceMembers(i.guildId, voice.members.filter((m) => !m.user.bot).values())}`
         : "";
+    const suffix = this.campaignSuffix();
     await i.reply({
-      content: (rows.join("\n") || "No mappings yet. Use `/scrib map`.") + unmapped,
+      content: (suffix ? `Mappings${suffix}:\n` : "") + (rows.join("\n") || "No mappings yet. Use `/scrib map`.") + unmapped,
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });

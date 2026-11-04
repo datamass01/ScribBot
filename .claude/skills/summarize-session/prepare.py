@@ -279,7 +279,7 @@ def session_rows(db) -> list[dict]:
     if db is None:
         return []
     cols = {r[1] for r in db.execute("pragma table_info(sessions)")}
-    extra = [c for c in ("dir", "merged_into_id") if c in cols]
+    extra = [c for c in ("dir", "merged_into_id", "campaign_id") if c in cols]
     names = ["id", "number", "status", "started_at", "ended_at", *extra]
     rows = [dict(zip(names, r)) for r in db.execute(f"select {', '.join(names)} from sessions order by started_at desc")]
     for r in rows:
@@ -618,10 +618,19 @@ def foundry_events(sess: dict, offset: float):
 
 # ---------------------------------------------------------------- campaign + people
 
-def read_campaign():
+def campaign_folder_of(folder: Path) -> str | None:
+    """The campaign folder of a recording folder (data/campaigns/<folder>/sessions/...); the bot's campaignFolderOfPath()."""
+    m = re.search(r"(?:^|[\\/])campaigns[\\/]([^\\/]+)[\\/]sessions(?:[\\/]|$)", str(folder))
+    return m.group(1) if m else None
+
+
+def read_campaign(folder: str | None = None):
+    """context.md and glossary.md of a campaign (campaign/<folder>/, written by the Console's Campaign tab), else the shared ones."""
+    base = (REPO / os.environ["CAMPAIGN_DIR"]).resolve() if os.environ.get("CAMPAIGN_DIR") else REPO / "campaign"
     out = {}
     for name in ("context.md", "glossary.md"):
-        p = REPO / "campaign" / name
+        own = base / folder / name if folder and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", folder) else None
+        p = own if own and own.exists() else base / name
         txt = p.read_text(encoding="utf-8") if p.exists() else ""
         out[name] = re.sub(r"<!--.*?-->", "", txt, flags=re.S).strip()
     names = set()
@@ -939,11 +948,19 @@ def main():
         for sid, row in resolve_session(a, rows):
             if sid not in {x for x, _ in resolved}:
                 resolved.append((sid, row))
-    camp, glossary_names = read_campaign()
+    camp, glossary_names = read_campaign(campaign_folder_of(recording_folder(resolved[0][0])))
     mapped = {}
     if db is not None:
         try:
-            mapped = {d: (c, bool(g)) for d, c, g in db.execute("select discord_id, character_name, is_gm from mappings")}
+            cols = {r[1] for r in db.execute("pragma table_info(mappings)")}
+            if "campaign_id" in cols:
+                # The game's campaign's own mappings win over the shared ones (campaign 0), as in the bot.
+                campaign_id = resolved[0][1].get("campaign_id") or 0
+                rows = db.execute("select discord_id, character_name, is_gm from mappings where campaign_id in (?, 0) "
+                                  "order by campaign_id != 0", (campaign_id,))
+            else:
+                rows = db.execute("select discord_id, character_name, is_gm from mappings")
+            mapped = {d: (c, bool(g)) for d, c, g in rows}
         except sqlite3.Error:
             pass
     sessions = [load_session(sid, row, mapped) for sid, row in resolved]

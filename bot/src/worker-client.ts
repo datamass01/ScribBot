@@ -44,6 +44,7 @@ export interface WorkerHealth {
   paused?: boolean;
   loadError?: string | null;
   recovered?: { sessions: number; clips: number };
+  current?: { file: string; seconds: number } | null;
   stats?: { clips: number; clipsPerMin?: number; avgSeconds?: number };
 }
 

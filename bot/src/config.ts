@@ -29,9 +29,15 @@ const EnvSchema = z.object({
 
   // Headless Foundry client (bot/src/foundry/): off | session (joins while recording, and to
   // import a summary) | always (stays joined while the bot runs).
+  // Blank means the default, as for every setting; true/false are accepted as session/off.
   FOUNDRY_HEADLESS: z.preprocess(
-    (v) => (typeof v === "string" ? (/^(true|1|yes|on)$/i.test(v.trim()) ? "session" : /^(false|0|no|off|)$/i.test(v.trim()) ? "off" : v.trim().toLowerCase()) : v),
-    z.enum(["off", "session", "always"]).default("off"),
+    (v) => {
+      if (typeof v !== "string") return v;
+      const s = v.trim().toLowerCase();
+      if (!s) return undefined;
+      return /^(true|1|yes|on)$/.test(s) ? "session" : /^(false|0|no|off)$/.test(s) ? "off" : s;
+    },
+    z.enum(["off", "session", "always"]).default("session"),
   ),
   FOUNDRY_URL: optionalString,
   FOUNDRY_USER: z.string().default("ScribBot"),

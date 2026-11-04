@@ -43,7 +43,21 @@ export interface FoundryPage {
 }
 
 /** Joins the world (throws `JoinError`) and returns once the module is connected to the bot. */
-export type FoundryLauncher = () => Promise<FoundryPage>;
+/** Where to join: the campaign being played's Foundry server (the Campaign tab), else .env. */
+export interface FoundryTarget {
+  /** null: the campaign has no Foundry address, so nothing is joined. */
+  url: string | null;
+  user: string;
+  password?: string;
+  /** The campaign it is for, if one is being played. */
+  campaignId?: number | null;
+  campaign?: string | null;
+  /** The world that campaign expects (its Foundry world id), when known. */
+  world?: string | null;
+}
+
+/** `target` absent: the launcher's own defaults. */
+export type FoundryLauncher = (target?: FoundryTarget) => Promise<FoundryPage>;
 
 export type JoinErrorKind =
   | "not-installed" // playwright-core or the browser is missing
@@ -71,9 +85,14 @@ const SLOW_RETRY: JoinErrorKind[] = ["not-installed", "no-such-user", "login-fai
 export type HeadlessState = "off" | "idle" | "joining" | "connected" | "retrying";
 
 export interface HeadlessStatus {
+  /** The campaign whose Foundry server it joins (or joined), and the world that campaign expects. */
+  campaign: string | null;
+  expectedWorld: string | null;
+  passwordSet: boolean;
   mode: HeadlessMode;
   state: HeadlessState;
-  url: string;
+  /** null: the campaign being played has no Foundry address, so nothing is joined. */
+  url: string | null;
   user: string;
   world: string | null;
   since: string | null;
@@ -85,9 +104,17 @@ export interface HeadlessStatus {
 
 export interface ClientOptions {
   mode: HeadlessMode;
+  /** Used when there is no `target`. */
   url: string;
   user: string;
+  /** Read at each join (and on `retarget()`): the campaign being played can change while the bot runs. */
+  target?: () => FoundryTarget;
   launch: FoundryLauncher;
+  /**
+   * Whether a session's summary or story belongs in a world (null: unknown), so a journal is never
+   * imported into another campaign's world; it waits until that campaign's world is joined.
+   */
+  belongs?: (sessionId: string, world: string | null) => boolean;
   /** How long to keep the client after `/scrib stop` while the chat log hasn't arrived. */
   chatlogWaitMs: number;
   /** Post in Foundry's chat on joining (with why) and before leaving. Default: off. */
@@ -144,6 +171,8 @@ export class HeadlessFoundry {
   /** Serializes join/close/import so two never overlap. */
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
+  /** The target the open page joined. */
+  private joined: FoundryTarget | null = null;
   private readonly log: (msg: string) => void;
 
   constructor(private readonly opts: ClientOptions) {
@@ -156,7 +185,24 @@ export class HeadlessFoundry {
   start() {
     if (this.opts.mode === "off") return;
     if (this.opts.mode === "always") this.reasons.add("always");
-    if (this.pending.size) this.reasons.add("import");
+    if (this.importsHere()) this.reasons.add("import");
+    this.reconcile();
+  }
+
+  /**
+   * The campaign being played, or its Foundry server, changed (the Campaign tab). A page on the old
+   * server is closed and the new one joined, except while a recording still needs its chat log; a
+   * pending retry is tried again at once with the new settings.
+   */
+  retarget() {
+    if (this.opts.mode === "off" || this.stopped) return;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+      this.attempt = 0;
+      this.state = "idle";
+    }
+    if (this.importsHere()) this.reasons.add("import");
     this.reconcile();
   }
 
@@ -199,7 +245,7 @@ export class HeadlessFoundry {
           e.type === "story.ready" ? `${STORY_PREFIX}${e.sessionId}` : e.manual ? `${MANUAL_PREFIX}${e.sessionId}` : e.sessionId,
         );
         this.savePending();
-        this.reasons.add("import");
+        if (this.belongsHere(e.sessionId)) this.reasons.add("import");
         this.reconcile();
         break;
     }
@@ -214,11 +260,15 @@ export class HeadlessFoundry {
   }
 
   status(): HeadlessStatus {
+    const t = this.joined ?? this.current();
     return {
       mode: this.opts.mode,
       state: this.state,
-      url: this.opts.url,
-      user: this.opts.user,
+      url: t.url,
+      user: t.user,
+      campaign: t.campaign ?? null,
+      expectedWorld: t.world ?? null,
+      passwordSet: Boolean(t.password),
       world: this.world,
       since: this.since,
       error: this.error,
@@ -238,9 +288,54 @@ export class HeadlessFoundry {
 
   // ---------- internals ----------
 
+  /** Where the next join goes. A failing lookup (the database) falls back to .env's server. */
+  private current(): FoundryTarget {
+    try {
+      if (this.opts.target) return this.opts.target();
+    } catch (err) {
+      this.log(`could not read the campaign's Foundry settings: ${err instanceof Error ? err.message : err}`);
+    }
+    return { url: this.opts.url, user: this.opts.user };
+  }
+
+  /** The open page is on another server or user than the campaign being played now uses. */
+  private targetChanged() {
+    if (!this.page || !this.joined) return false;
+    const next = this.current();
+    return next.url !== this.joined.url || next.user !== this.joined.user;
+  }
+
+  /** A recording is joined for, or waiting for its chat log: don't switch servers under it. */
+  private recordingHere() {
+    return this.awaiting.size > 0 || [...this.reasons].some((r) => r.startsWith("session "));
+  }
+
+  private keySession(key: string) {
+    return key.startsWith(STORY_PREFIX) ? key.slice(STORY_PREFIX.length) : key.startsWith(MANUAL_PREFIX) ? key.slice(MANUAL_PREFIX.length) : key;
+  }
+
+  /** Whether a session's journal goes in the world joined now (or, before joining, the one expected). */
+  private belongsHere(sessionId: string) {
+    if (!this.opts.belongs) return true;
+    const world = this.page ? this.world : (this.current().world ?? null);
+    try {
+      return this.opts.belongs(sessionId, world);
+    } catch {
+      return true;
+    }
+  }
+
+  private importsHere() {
+    return [...this.pending].some((k) => this.belongsHere(this.keySession(k)));
+  }
+
   private reconcile() {
     if (this.stopped) return;
     const want = this.reasons.size > 0;
+    if (want && this.page && !this.recordingHere() && this.targetChanged()) {
+      void this.enqueue(() => this.closePage("switching to another campaign's Foundry server")).then(() => this.reconcile());
+      return;
+    }
     if (want && !this.page && this.state !== "joining" && !this.retryTimer) {
       void this.enqueue(() => this.join());
     } else if (!want) {
@@ -265,12 +360,22 @@ export class HeadlessFoundry {
 
   private async join() {
     if (this.page || this.stopped || !this.reasons.size) return;
+    const target = this.current();
+    const forCampaign = target.campaign ? ` for ${target.campaign}` : "";
+    if (!target.url) {
+      // Nothing to join until the campaign gets an address (retarget() tries again).
+      const why = `${target.campaign ?? "The campaign being played"} has no Foundry address (Console: Campaign tab), so ScribBot doesn't join Foundry`;
+      if (this.error !== why) this.log(why);
+      this.error = why;
+      this.state = "idle";
+      return;
+    }
     this.state = "joining";
-    this.log(`joining ${this.opts.url} as ${this.opts.user} (${[...this.reasons].join(", ")})`);
+    this.log(`joining ${target.url} as ${target.user}${forCampaign} (${[...this.reasons].join(", ")})`);
     const t0 = Date.now();
     let page: FoundryPage;
     try {
-      page = await this.opts.launch();
+      page = await this.opts.launch(target);
     } catch (err) {
       const kind = err instanceof JoinError ? err.kind : null;
       this.error = err instanceof Error ? err.message : String(err);
@@ -290,6 +395,7 @@ export class HeadlessFoundry {
       return;
     }
     this.page = page;
+    this.joined = target;
     this.attempt = 0;
     this.error = null;
     this.unhealthy = 0;
@@ -298,8 +404,11 @@ export class HeadlessFoundry {
     const st = await page.status().catch(() => null);
     this.world = st?.world ?? null;
     this.log(`joined world ${this.world ?? "?"} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    if (target.world && this.world && target.world !== this.world) {
+      this.log(`warning: ${target.campaign ?? "this campaign"} expects world ${target.world}, but ${target.url} is running ${this.world}`);
+    }
     if (this.opts.announce) {
-      await page.announce(joinAnnouncement(this.opts.user, [...this.reasons])).catch((err) => this.log(`could not post the join message: ${err instanceof Error ? err.message : err}`));
+      await page.announce(joinAnnouncement(target.user, [...this.reasons])).catch((err) => this.log(`could not post the join message: ${err instanceof Error ? err.message : err}`));
     }
     page.onClosed((reason) => void this.enqueue(() => this.lost(page, reason)));
     this.healthTimer = setInterval(() => void this.enqueue(() => this.checkHealth(page)), this.opts.healthCheckMs ?? 30_000);
@@ -321,8 +430,12 @@ export class HeadlessFoundry {
     for (const key of [...this.pending]) {
       const isStory = key.startsWith(STORY_PREFIX);
       const manual = key.startsWith(MANUAL_PREFIX);
-      const sessionId = isStory ? key.slice(STORY_PREFIX.length) : manual ? key.slice(MANUAL_PREFIX.length) : key;
+      const sessionId = this.keySession(key);
       const what = isStory ? "story" : "summary";
+      if (!this.belongsHere(sessionId)) {
+        this.log(`the ${what} of ${sessionId} belongs to another campaign's world; it waits until that world is joined`);
+        continue;
+      }
       try {
         const r = isStory
           ? await page.importStory(sessionId)
@@ -365,12 +478,13 @@ export class HeadlessFoundry {
 
   private async closePage(reason: string, { pageGone = false } = {}) {
     if (this.page && this.opts.announce && !pageGone) {
-      await this.page.announce(leaveAnnouncement(this.opts.user, reason)).catch((err) => this.log(`could not post the leave message: ${err instanceof Error ? err.message : err}`));
+      await this.page.announce(leaveAnnouncement((this.joined ?? this.current()).user, reason)).catch((err) => this.log(`could not post the leave message: ${err instanceof Error ? err.message : err}`));
     }
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.healthTimer = null;
     const page = this.page;
     this.page = null;
+    this.joined = null;
     this.state = this.stopped ? "off" : "idle";
     this.since = null;
     if (!page) return;

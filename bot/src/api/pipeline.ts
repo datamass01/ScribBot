@@ -8,7 +8,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { sttKeywords } from "../campaign.js";
+import { campaignFolderOfPath, sttKeywords } from "../campaign.js";
 import { config } from "../config.js";
 import type { SessionStatus } from "../db.js";
 import { sessionPaths } from "../paths.js";
@@ -122,6 +122,8 @@ export interface PipelineWorker {
   pausedReason?: string | null;
   liveClips?: { done: number; failed: number };
   recovered?: { sessions: number; clips: number };
+  /** The clip the worker is converting right now (not counted in `queued`). */
+  current?: { file: string; seconds: number } | null;
   stats?: unknown;
 }
 
@@ -148,10 +150,34 @@ export interface Alert {
 
 const ACTIVE = new Set<SessionStatus>(["recording", "transcribing", "summarizing"]);
 
+interface Sample {
+  t: number;
+  counts: Map<string, number>;
+  queued: number | null;
+  done: number;
+  failed: number;
+  /** Work was waiting and the worker wasn't paused: this moment counts toward the rate. */
+  working: boolean;
+}
+
+/** Clips converted between two samples: the larger of what the session caches and the worker's live counters gained. */
+function convertedBetween(a: Sample, b: Sample) {
+  let bySession = 0;
+  for (const [id, n] of b.counts) {
+    const before = a.counts.get(id);
+    if (before !== undefined) bySession += Math.max(0, n - before);
+  }
+  const byWorker = b.done >= a.done ? b.done + b.failed - a.done - a.failed : 0; // < : worker restarted
+  return Math.max(bySession, byWorker);
+}
+
 /** Keeps the samples the rate and trend need between /status calls. */
 export class PipelineTracker {
-  private samples: { t: number; counts: Map<string, number>; queued: number | null; done: number; failed: number }[] = [];
+  private samples: Sample[] = [];
   private progressSeen: { total: number; at: number } | null = null;
+  private wasWaiting = false;
+  /** The last rate measured over enough working time, kept through silence. */
+  private lastRate: number | null = null;
   private clipSeen = new Map<string, { clips: number; at: number }>();
   private memo = new Map<string, { key: string; value: unknown }>();
 
@@ -161,7 +187,7 @@ export class PipelineTracker {
   constructor(
     folders: string | ((id: string) => string) = (id) => sessionPaths(id).recording,
     private clock: () => number = Date.now,
-    private keywords: (party: string[]) => string[] = sttKeywords,
+    private keywords: (party: string[], campaignFolder: string | null) => string[] = sttKeywords,
   ) {
     this.folderOf = typeof folders === "string" ? (id) => path.join(folders, id) : folders;
   }
@@ -205,7 +231,9 @@ export class PipelineTracker {
     const party = input.recordings.flatMap((r) => r.speakers.flatMap((p) => (p.character ? [p.character] : [])));
     let names: string[] = [];
     try {
-      names = this.keywords(party);
+      // The glossary of the campaign being recorded (the first live recording's), else the shared one.
+      const live = input.recordings[0];
+      names = this.keywords(party, live ? campaignFolderOfPath(this.folderOf(live.sessionId)) : null);
     } catch {
       // campaign files unreadable: no hotword check
     }
@@ -263,28 +291,41 @@ export class PipelineTracker {
     const counts = new Map(conversions.map((c) => [c.sessionId, c.converted]));
     const done = worker.liveClips?.done ?? 0;
     const failed = worker.liveClips?.failed ?? 0;
-    this.samples.push({ t: now, counts, queued, done, failed });
+    const paused = Boolean(worker.paused);
+    const current = worker.reachable ? (worker.current ?? null) : null;
+    // Work that should be converting now. A failed session's clips wait for /scrib process instead.
+    const waiting = Boolean(queued) || current != null || conversions.some((c) => c.phase !== "failed" && c.pending > 0);
+    this.samples.push({ t: now, counts, queued, done, failed, working: waiting && !paused });
     while (this.samples.length && now - this.samples[0]!.t > RATE_WINDOW_MS) this.samples.shift();
     const first = this.samples[0]!;
     const span = now - first.t;
-    let rate: number | null = null;
+    // The rate counts only working time: an interval with work waiting at either end, or with clips
+    // converted in it. Silence at the table (nothing to convert) would otherwise read as a slow worker.
+    let activeMs = 0;
+    for (let i = 1; i < this.samples.length; i++) {
+      const a = this.samples[i - 1]!;
+      const b = this.samples[i]!;
+      if (a.working || b.working || convertedBetween(a, b) > 0) activeMs += b.t - a.t;
+    }
     let trend: number | null = null;
     const failedRecently = failed >= first.failed ? failed - first.failed : failed; // worker restarted
-    if (span >= MIN_RATE_SPAN_MS) {
-      let bySession = 0;
-      for (const [id, n] of counts) {
-        const before = first.counts.get(id);
-        if (before !== undefined) bySession += Math.max(0, n - before);
-      }
-      const byWorker = done >= first.done ? done + failed - first.done - first.failed : 0;
-      rate = Math.round((Math.max(bySession, byWorker) / span) * 600_000) / 10;
-      if (queued != null && first.queued != null) trend = Math.round(((queued - first.queued) / span) * 600_000) / 10;
+    if (activeMs >= MIN_RATE_SPAN_MS) {
+      this.lastRate = Math.round((convertedBetween(first, this.samples.at(-1)!) / activeMs) * 600_000) / 10;
+    }
+    const rate = this.lastRate; // no working time in the window: the last measured rate still holds
+    if (span >= MIN_RATE_SPAN_MS && queued != null && first.queued != null) {
+      trend = Math.round(((queued - first.queued) / span) * 600_000) / 10;
     }
     const total = [...counts.values()].reduce((a, b) => a + b, 0) + done + failed;
-    if (!this.progressSeen || total !== this.progressSeen.total) this.progressSeen = { total, at: now };
+    // Idle time counts from the last conversion, or from when work arrived after a quiet spell.
+    if (!this.progressSeen || total !== this.progressSeen.total || (waiting && !this.wasWaiting)) {
+      this.progressSeen = { total, at: now };
+    }
+    this.wasWaiting = waiting;
     const idleMs = now - this.progressSeen.at;
     const pending = conversions.reduce((a, c) => a + c.pending, 0);
-    const paused = Boolean(worker.paused);
+    // A clip started less than STALL_AFTER_MS ago is progress in itself (the first one also loads the model).
+    const clipStuck = current == null || current.seconds * 1000 >= STALL_AFTER_MS;
     return {
       paused,
       pausedReason: worker.pausedReason ?? null,
@@ -296,9 +337,13 @@ export class PipelineTracker {
       trendPerMin: trend,
       etaSec: rate && pending ? Math.round((pending / rate) * 60) : pending ? null : 0,
       windowSec: Math.round(span / 1000),
+      activeSec: Math.round(activeMs / 1000),
       liveFailedRecently: failedRecently,
+      busy: current != null,
+      busySec: current ? Math.round(current.seconds) : null,
+      waiting,
       noProgressSec: Math.round(idleMs / 1000),
-      stalled: Boolean(queued) && !paused && idleMs >= STALL_AFTER_MS,
+      stalled: waiting && worker.reachable && !paused && idleMs >= STALL_AFTER_MS && clipStuck,
     };
   }
 
@@ -325,8 +370,13 @@ export class PipelineTracker {
         "Resume it: Invoke-RestMethod -Method Post http://127.0.0.1:7421/resume -ContentType application/json -Body '{}'");
     }
     if (queue.stalled) {
-      add("stalled", "err", `The transcription worker has ${plural(queue.depth ?? 0, "clip")} queued but hasn't converted ` +
-        `anything for ${dur(queue.noProgressSec)}. Check its window or data\\logs\\worker-*.log for errors.`);
+      const since = dur(queue.noProgressSec);
+      add("stalled", "err", queue.depth || queue.busy
+        ? `The transcription worker has ${plural(queue.depth ?? 0, "clip")} queued` +
+          (queue.busy ? ` and has been on one clip for ${dur(queue.busySec ?? 0)},` : "") +
+          ` but hasn't finished a clip for ${since}. Check its window or data\\logs\\worker-*.log for errors.`
+        : `Nothing has reached the transcription worker for ${since}, but ${plural(queue.pendingClips, "clip")} still need converting. ` +
+          "If no session is being processed, run /scrib process for it.");
     } else if (recordings.length && queue.trendPerMin != null && queue.trendPerMin > BEHIND_TREND_PER_MIN && queue.windowSec >= 60) {
       const eta = queue.etaSec ? ` At the current rate the transcript will be ready about ${dur(queue.etaSec)} after /scrib stop.` : "";
       add("behind", "warn", `Transcription is falling behind: ${plural(queue.pendingClips, "clip")} waiting, ` +
@@ -339,7 +389,7 @@ export class PipelineTracker {
     for (const c of conversions) {
       if (c.phase !== "failed") continue;
       const done = `${c.converted} of ${plural(c.clips, "clip")} converted`;
-      add(`failed-${c.sessionId}`, "warn", queue.depth
+      add(`failed-${c.sessionId}`, "warn", queue.depth || queue.busy
         ? `Session ${c.number} is marked failed, but the worker is still converting its clips from disk (${done}). ` +
           `When the worker queue is empty, run /scrib process session:${c.number}.`
         : `Session ${c.number} failed (${done}). Run /scrib process session:${c.number} to finish it.`);
@@ -380,6 +430,9 @@ export class PipelineTracker {
       const held = queue.paused ? " It is paused, so they won't finish until it's resumed." : "";
       reasons.push(`${plural(queue.depth, "clip")} still waiting in the worker${eta}.${held} ` +
         "Stopping the worker now drops the queue; it re-queues the clips from disk when it starts again.");
+    } else if (queue.busy) {
+      reasons.push(`The worker is converting a clip (${dur(queue.busySec ?? 0)} so far). ` +
+        "Stopping it now drops that clip; it re-queues the clips from disk when it starts again.");
     }
     if (reasons.length) return { state: "wait" as const, title: "Wait: still transcribing", reasons: [...reasons, ...notes] };
     return {

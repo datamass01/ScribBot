@@ -558,3 +558,21 @@ def test_unfinished_clips_in_campaign_recording_folders(session: Path, tmp_path:
     assert len(found) == 3
     (rec / "transcript.json").write_text("{}")  # this recording is done
     assert unfinished_clips(tmp_path, 12) == []
+
+
+def test_campaign_notes_resolve_per_campaign_like_the_bot(tmp_path):
+    from scribworker.transcribe import campaign_folder_of, notes_file
+
+    rec = tmp_path / "data" / "campaigns" / "strahd" / "sessions" / "2026-11-01-a" / "recordings" / "2026-11-01-a"
+    assert campaign_folder_of(rec) == "strahd"
+    assert campaign_folder_of(str(rec).replace("\\", "/")) == "strahd"
+    assert campaign_folder_of(tmp_path / "data" / "sessions" / "2026-11-01-a") is None
+
+    camp = tmp_path / "campaign"
+    (camp / "strahd").mkdir(parents=True)
+    (camp / "glossary.md").write_text("- Shared", "utf-8")
+    assert notes_file(camp, "glossary.md", "strahd") == camp / "glossary.md"  # no own file yet: the shared one
+    (camp / "strahd" / "glossary.md").write_text("- Strahd", "utf-8")
+    assert notes_file(camp, "glossary.md", "strahd") == camp / "strahd" / "glossary.md"
+    assert notes_file(camp, "glossary.md", "..") == camp / "glossary.md"  # never outside CAMPAIGN_DIR
+    assert notes_file(camp, "glossary.md", None) == camp / "glossary.md"

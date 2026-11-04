@@ -73,12 +73,12 @@ class FakeBot:
 def write_env(path: Path, bot_url: str, token: str, data_dir: Path):
     port = bot_url.rsplit(":", 1)[1]
     path.write_text(f"API_HOST=127.0.0.1\nAPI_PORT={port}\nAPI_TOKEN={token}\nWORKER_URL=http://127.0.0.1:9\n"
-                    f"DATA_DIR={data_dir}\nDISCORD_TOKEN=discord-secret\n", "utf-8")
+                    f"DATA_DIR={data_dir}\nCAMPAIGN_DIR={data_dir.parent / 'campaign'}\nDISCORD_TOKEN=discord-secret\n", "utf-8")
 
 
 @pytest.fixture()
 def setup(tmp_path, monkeypatch):
-    for key in ("API_TOKEN", "API_PORT", "API_HOST", "DATA_DIR", "WORKER_URL", "LLM_MODEL", "DISCORD_TOKEN"):
+    for key in ("API_TOKEN", "API_PORT", "API_HOST", "DATA_DIR", "CAMPAIGN_DIR", "WORKER_URL", "LLM_MODEL", "DISCORD_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     bot = FakeBot("old-token")
     env = tmp_path / ".env"
@@ -236,6 +236,44 @@ def test_campaign_files_are_edited_in_place(setup):
     assert request(port, "PUT", "/api/campaign/glossary", {"text": "- Thorin\n"})[0] == 200
     assert request(port, "GET", "/api/campaign/glossary")[1]["text"] == "- Thorin\n"
     assert request(port, "PUT", "/api/campaign/secrets", {"text": "x"})[0] == 400
+    assert (setup["tmp"] / "campaign" / "glossary.md").read_text("utf-8") == "- Thorin\n"  # never the repo's campaign/
+
+
+def test_each_campaign_has_its_own_notes_starting_from_the_shared_ones(setup):
+    port = setup["port"]
+    camp = setup["tmp"] / "campaign"
+    request(port, "PUT", "/api/campaign/context", {"text": "Shared lore"})
+    status, note = request(port, "GET", "/api/campaign/context?campaign=strahd")
+    assert status == 200 and note["inherited"] is True and note["exists"] is False and note["text"] == "Shared lore"
+    assert request(port, "PUT", "/api/campaign/context?campaign=strahd", {"text": "Barovia"})[0] == 200
+    assert (camp / "strahd" / "context.md").read_text("utf-8") == "Barovia"
+    assert (camp / "context.md").read_text("utf-8") == "Shared lore"  # the shared one is untouched
+    note = request(port, "GET", "/api/campaign/context?campaign=strahd")[1]
+    assert note["inherited"] is False and note["text"] == "Barovia"
+    for bad in ("..", "a/b", ".hidden", "x%5Cy"):
+        assert request(port, "GET", f"/api/campaign/context?campaign={bad}")[0] == 404
+        assert request(port, "PUT", f"/api/campaign/context?campaign={bad}", {"text": "x"})[0] == 400
+
+
+def test_campaigns_are_read_only_from_the_database_while_the_bot_is_down(setup):
+    setup["bot"].close()
+    data = setup["tmp"] / "data"
+    data.mkdir()
+    db = sqlite3.connect(data / "scribbot.db")
+    db.execute("CREATE TABLE sessions (id TEXT, campaign_id INT, merged_into_id TEXT, deleted_at TEXT)")
+    db.execute("CREATE TABLE campaigns (id INTEGER PRIMARY KEY, world_id TEXT, folder TEXT, title TEXT, alias TEXT, last_seen_at TEXT,"
+               " created_at TEXT, foundry_url TEXT, foundry_user TEXT, foundry_password TEXT, selected_at TEXT)")
+    db.execute("INSERT INTO campaigns VALUES (1,'strahd','strahd','Barovia','Strahd',NULL,'x','https://vtt','Scribe','hunter2','2026-11-01')")
+    db.execute("INSERT INTO sessions VALUES ('s1',1,NULL,NULL)")
+    db.commit()
+    db.close()
+    status, body = request(setup["port"], "GET", "/api/admin/campaigns")
+    assert status == 200 and body["readOnly"] is True and body["chosenId"] == 1
+    c = body["campaigns"][0]
+    assert c["foundry"] == {"url": "https://vtt", "user": "Scribe", "passwordSet": True}
+    assert c["sessions"] == 1 and c["isDefault"] is True and c["name"] == "Strahd"
+    assert "hunter2" not in json.dumps(body)
+    assert request(setup["port"], "POST", "/api/admin/campaigns/playing", {"campaignId": 1})[0] == 503
 
 
 def test_bot_link_promotes_the_pair_that_works():
